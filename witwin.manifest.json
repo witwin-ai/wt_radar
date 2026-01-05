@@ -1,0 +1,14 @@
+{
+    "id": "radar_simulation",
+    "name": "Radar Simulation",
+    "version": "0.1.0",
+    "author": "WiTwin Team",
+    "description": "Radar system simulation and visualization components",
+    "homepage": "",
+    "repository": "",
+    "license": "MIT",
+    "dependencies": ["drjit", "trimesh"],
+    "entry_point": "__init__.py",
+    "icon": "radar",
+    "enabled": true
+}
