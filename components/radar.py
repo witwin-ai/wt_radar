@@ -9,7 +9,7 @@ import numpy as np
 
 from witwin.components import (
     Component, component, float_field, int_field, bool_field, plot_field, button,
-    GizmoContext, PlotBuilder, foldout_group, define_group
+    GizmoContext, foldout_group, define_group
 )
 from witwin.utils.logging import get_logger
 from witwin.utils.mitsuba_utils import scene_to_mitsuba
@@ -406,56 +406,42 @@ class RadarComponent(Component):
             tx_labels = [f"Tx{i}" for i in range(radar.num_tx)]
             rx_labels = [f"Rx{i}" for i in range(radar.num_rx)]
 
-            # Use line_series for the base plot, then add 2D batches
-            base_signal = PlotBuilder.line_series(
-                signal_data_2d[0][0]['series'],
-                title="Signal (MIMO)",
-                xlabel="Sample",
-                ylabel="Amplitude",
-            )
-            self.signal_real = PlotBuilder.with_batches_2d(
-                base_signal,
-                signal_data_2d,
-                tx_labels,
-                rx_labels
-            )
+            # Use Figure API with batch2d for MIMO
+            first_sig = signal_data_2d[0][0]['series']
+            self.signal_real.clear()
+            for s in first_sig:
+                self.signal_real.line(s['x'], s['y'], label=s['label'], color=s['color'])
+            self.signal_real.title("Signal (MIMO)")
+            self.signal_real.xlabel("Sample")
+            self.signal_real.ylabel("Amplitude")
+            self.signal_real.batch2d(signal_data_2d, tx_labels, rx_labels)
 
-            base_fft = PlotBuilder.line_series(
-                fft_data_2d[0][0]['series'],
-                title="Range FFT (MIMO)",
-                xlabel="Range (m)",
-                ylabel="Magnitude",
-            )
-            self.signal_fft = PlotBuilder.with_batches_2d(
-                base_fft,
-                fft_data_2d,
-                tx_labels,
-                rx_labels
-            )
+            first_fft = fft_data_2d[0][0]['series']
+            self.signal_fft.clear()
+            for s in first_fft:
+                self.signal_fft.line(s['x'], s['y'], label=s['label'], color=s['color'])
+            self.signal_fft.title("Range FFT (MIMO)")
+            self.signal_fft.xlabel("Range (m)")
+            self.signal_fft.ylabel("Magnitude")
+            self.signal_fft.batch2d(fft_data_2d, tx_labels, rx_labels)
         else:
             # ===== Non-MIMO Mode: combined signal =====
             sig = radar.chirp_simple(tau_filtered)
             fft = torch.fft.fft(sig)
             fft_magnitude = torch.abs(fft)
 
-            self.signal_real = PlotBuilder.line_series(
-                [
-                    {'x': x_samples, 'y': sig.real, 'label': 'Real', 'color': '#ff9500'},
-                    {'x': x_samples, 'y': sig.imag, 'label': 'Imag', 'color': '#00aaff'},
-                ],
-                title="Signal",
-                xlabel="Sample",
-                ylabel="Amplitude",
-            )
+            self.signal_real.clear()
+            self.signal_real.line(x_samples, sig.real, label='Real', color='#ff9500')
+            self.signal_real.line(x_samples, sig.imag, label='Imag', color='#00aaff')
+            self.signal_real.title("Signal")
+            self.signal_real.xlabel("Sample")
+            self.signal_real.ylabel("Amplitude")
 
-            self.signal_fft = PlotBuilder.line(
-                range_axis,
-                fft_magnitude,
-                title="Range FFT",
-                xlabel="Range (m)",
-                ylabel="Magnitude",
-                color="#51cf66"
-            )
+            self.signal_fft.clear()
+            self.signal_fft.line(range_axis, fft_magnitude, color="#51cf66")
+            self.signal_fft.title("Range FFT")
+            self.signal_fft.xlabel("Range (m)")
+            self.signal_fft.ylabel("Magnitude")
 
         # ===== Send Results to Frontend (if enabled) =====
         if self.commit_results:
