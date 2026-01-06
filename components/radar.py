@@ -8,7 +8,7 @@ import torch
 import numpy as np
 
 from witwin.components import (
-    Component, component, float_field, int_field, bool_field, plot_field, button,
+    Component, component, float_field, int_field, bool_field, figure, button,
     GizmoContext, foldout_group, define_group
 )
 from witwin.utils.logging import get_logger
@@ -222,8 +222,8 @@ class RadarComponent(Component):
     )
 
     # Plot fields for visualization
-    signal_real = plot_field(plot_type="line", description="Raw signal (real & imag)")
-    signal_fft = plot_field(plot_type="line", description="Range FFT magnitude")
+    signal_real = figure(plot_type="line", description="Raw signal (real & imag)")
+    signal_fft = figure(plot_type="line", description="Range FFT magnitude")
 
     # Resolution for ray tracing
     PIR_resolution = 128
