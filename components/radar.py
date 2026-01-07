@@ -363,17 +363,24 @@ class RadarComponent(Component):
         mask = tau_tensor > 0.1
         tau_filtered = tau_tensor[mask]
 
-        if len(tau_filtered) == 0:
+        no_targets = len(tau_filtered) == 0
+        if no_targets:
             logger.warning("No valid distance samples found")
-            tau_filtered = torch.tensor([1.0], dtype=torch.float64)
 
         # Range axis for FFT plots
         range_axis = [i * radar.range_resolution for i in range(radar.adc_samples)]
         x_samples = list(range(radar.adc_samples))
 
+        # Zero signal for empty scene
+        zero_sig = torch.zeros(radar.adc_samples, dtype=torch.complex128)
+        zero_fft = torch.zeros(radar.adc_samples, dtype=torch.float64)
+
         if self.mimo:
             # ===== MIMO Mode: compute signal for each Tx-Rx pair =====
-            frame = radar.frameMIMO(tau_filtered)  # [num_tx, num_rx, adc_samples]
+            if no_targets:
+                frame = torch.zeros((radar.num_tx, radar.num_rx, radar.adc_samples), dtype=torch.complex128)
+            else:
+                frame = radar.frameMIMO(tau_filtered)  # [num_tx, num_rx, adc_samples]
 
             # Build 2D batched plot data [Tx][Rx]
             signal_data_2d = []
@@ -426,9 +433,12 @@ class RadarComponent(Component):
             self.signal_fft.batch2d(fft_data_2d, tx_labels, rx_labels)
         else:
             # ===== Non-MIMO Mode: combined signal =====
-            sig = radar.chirp_simple(tau_filtered)
-            fft = torch.fft.fft(sig)
-            fft_magnitude = torch.abs(fft)
+            if no_targets:
+                sig = zero_sig
+                fft_magnitude = zero_fft
+            else:
+                sig = radar.chirp_simple(tau_filtered)
+                fft_magnitude = torch.abs(torch.fft.fft(sig))
 
             self.signal_real.clear()
             self.signal_real.line(x_samples, sig.real, label='Real', color='#ff9500')
