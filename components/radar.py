@@ -9,7 +9,7 @@ import numpy as np
 
 from witwin.components import (
     Component, component, float_field, int_field, bool_field, figure, button,
-    GizmoContext, foldout_group, define_group
+    GizmoContext, foldout_group, define_group, list_field, component_field
 )
 from witwin.utils.logging import get_logger
 from witwin.utils.mitsuba_utils import scene_to_mitsuba
@@ -221,9 +221,14 @@ class RadarComponent(Component):
         description="Frames per second"
     )
 
-    # Plot fields for visualization
-    signal_real = figure(plot_type="line", description="Raw signal (real & imag)")
-    signal_fft = figure(plot_type="line", description="Range FFT magnitude")
+    # Post-processing pipeline (accepts RadarPostProcessor and all subclasses)
+    post_processors = list_field(
+        component_field(component_type="RadarPostProcessor"),
+        description="Post-processing components to run after rendering"
+    )
+
+    # Raw signal visualization
+    signal_plot = figure(plot_type="line", description="Raw signal (real & imag)")
 
     # Resolution for ray tracing
     PIR_resolution = 128
@@ -323,7 +328,7 @@ class RadarComponent(Component):
             return f"Scene build failed: {e}"
 
         # ===== Generate Rays and Compute Intersections =====
-        logger.warning("Rendering radar view...")
+        logger.info("Rendering radar view...")
 
         # Generate rays from sensor
         rays = self.gen_rays(mi_scene)
@@ -367,108 +372,124 @@ class RadarComponent(Component):
         if no_targets:
             logger.warning("No valid distance samples found")
 
-        # Range axis for FFT plots
-        range_axis = [i * radar.range_resolution for i in range(radar.adc_samples)]
+        # ===== Generate Raw Signal =====
+        if self.mimo:
+            if no_targets:
+                raw_signal = torch.zeros((radar.num_tx, radar.num_rx, radar.adc_samples), dtype=torch.complex128)
+            else:
+                raw_signal = radar.frameMIMO(tau_filtered)  # [num_tx, num_rx, adc_samples]
+        else:
+            if no_targets:
+                raw_signal = torch.zeros(radar.adc_samples, dtype=torch.complex128)
+            else:
+                raw_signal = radar.chirp_simple(tau_filtered)
+
+        # ===== Update Signal Plot =====
         x_samples = list(range(radar.adc_samples))
 
-        # Zero signal for empty scene
-        zero_sig = torch.zeros(radar.adc_samples, dtype=torch.complex128)
-        zero_fft = torch.zeros(radar.adc_samples, dtype=torch.float64)
-
         if self.mimo:
-            # ===== MIMO Mode: compute signal for each Tx-Rx pair =====
-            if no_targets:
-                frame = torch.zeros((radar.num_tx, radar.num_rx, radar.adc_samples), dtype=torch.complex128)
-            else:
-                frame = radar.frameMIMO(tau_filtered)  # [num_tx, num_rx, adc_samples]
-
-            # Build 2D batched plot data [Tx][Rx]
+            # MIMO mode: batch2d visualization
+            num_tx, num_rx = radar.num_tx, radar.num_rx
             signal_data_2d = []
-            fft_data_2d = []
 
-            for tx_idx in range(radar.num_tx):
-                tx_signal_batch = []
-                tx_fft_batch = []
-
-                for rx_idx in range(radar.num_rx):
-                    sig = frame[tx_idx, rx_idx]
-                    fft_mag = torch.abs(torch.fft.fft(sig))
-
-                    tx_signal_batch.append({
+            for tx_idx in range(num_tx):
+                tx_batch = []
+                for rx_idx in range(num_rx):
+                    sig = raw_signal[tx_idx, rx_idx]
+                    tx_batch.append({
                         'series': [
-                            {'x': x_samples, 'y': sig.real, 'label': 'Real', 'color': '#ff9500'},
-                            {'x': x_samples, 'y': sig.imag, 'label': 'Imag', 'color': '#00aaff'},
+                            {'x': x_samples, 'y': sig.real.tolist(), 'label': 'Real', 'color': '#ff9500'},
+                            {'x': x_samples, 'y': sig.imag.tolist(), 'label': 'Imag', 'color': '#00aaff'},
                         ]
                     })
+                signal_data_2d.append(tx_batch)
 
-                    tx_fft_batch.append({
-                        'series': [
-                            {'x': range_axis, 'y': fft_mag, 'label': 'Magnitude', 'color': '#51cf66'},
-                        ]
-                    })
+            tx_labels = [f"Tx{i}" for i in range(num_tx)]
+            rx_labels = [f"Rx{i}" for i in range(num_rx)]
 
-                signal_data_2d.append(tx_signal_batch)
-                fft_data_2d.append(tx_fft_batch)
-
-            tx_labels = [f"Tx{i}" for i in range(radar.num_tx)]
-            rx_labels = [f"Rx{i}" for i in range(radar.num_rx)]
-
-            # Use Figure API with batch2d for MIMO
             first_sig = signal_data_2d[0][0]['series']
-            self.signal_real.clear()
+            self.signal_plot.clear()
             for s in first_sig:
-                self.signal_real.line(s['x'], s['y'], label=s['label'], color=s['color'])
-            self.signal_real.title("Signal (MIMO)")
-            self.signal_real.xlabel("Sample")
-            self.signal_real.ylabel("Amplitude")
-            self.signal_real.batch2d(signal_data_2d, tx_labels, rx_labels)
-
-            first_fft = fft_data_2d[0][0]['series']
-            self.signal_fft.clear()
-            for s in first_fft:
-                self.signal_fft.line(s['x'], s['y'], label=s['label'], color=s['color'])
-            self.signal_fft.title("Range FFT (MIMO)")
-            self.signal_fft.xlabel("Range (m)")
-            self.signal_fft.ylabel("Magnitude")
-            self.signal_fft.batch2d(fft_data_2d, tx_labels, rx_labels)
+                self.signal_plot.line(s['x'], s['y'], label=s['label'], color=s['color'])
+            self.signal_plot.title("Raw Signal (MIMO)")
+            self.signal_plot.xlabel("Sample")
+            self.signal_plot.ylabel("Amplitude")
+            self.signal_plot.batch2d(signal_data_2d, tx_labels, rx_labels)
         else:
-            # ===== Non-MIMO Mode: combined signal =====
-            if no_targets:
-                sig = zero_sig
-                fft_magnitude = zero_fft
-            else:
-                sig = radar.chirp_simple(tau_filtered)
-                fft_magnitude = torch.abs(torch.fft.fft(sig))
+            # Non-MIMO mode
+            self.signal_plot.clear()
+            self.signal_plot.line(x_samples, raw_signal.real.tolist(), label='Real', color='#ff9500')
+            self.signal_plot.line(x_samples, raw_signal.imag.tolist(), label='Imag', color='#00aaff')
+            self.signal_plot.title("Raw Signal")
+            self.signal_plot.xlabel("Sample")
+            self.signal_plot.ylabel("Amplitude")
 
-            self.signal_real.clear()
-            self.signal_real.line(x_samples, sig.real, label='Real', color='#ff9500')
-            self.signal_real.line(x_samples, sig.imag, label='Imag', color='#00aaff')
-            self.signal_real.title("Signal")
-            self.signal_real.xlabel("Sample")
-            self.signal_real.ylabel("Amplitude")
+        # ===== Build Signal Metadata =====
+        signal_metadata = {
+            'adc_samples': int(self.adc_samples),
+            'sample_rate': float(self.sample_rate),
+            'slope': float(self.slope),
+            'fc': float(self.fc),
+            'mimo': bool(self.mimo),
+            'range_resolution': radar.range_resolution,
+            'max_range': radar.max_range,
+            'doppler_resolution': radar.doppler_resolution,
+            'max_doppler': radar.max_doppler,
+            'distances': tau_filtered,
+            'distance_map': distance,
+            'intensity_map': intensity,
+        }
 
-            self.signal_fft.clear()
-            self.signal_fft.line(range_axis, fft_magnitude, color="#51cf66")
-            self.signal_fft.title("Range FFT")
-            self.signal_fft.xlabel("Range (m)")
-            self.signal_fft.ylabel("Magnitude")
+        # ===== Trigger Post-Processors =====
+        num_processors = len(self.post_processors) if self.post_processors else 0
+        logger.info(f"post_processors list: {self.post_processors}")
+        if num_processors > 0:
+            logger.info(f"Triggering {num_processors} post-processor(s)...")
+            for i, processor_ref in enumerate(self.post_processors):
+                logger.info(f"  [{i}] processor_ref = {processor_ref}, type = {type(processor_ref)}")
 
-        # ===== Send Results to Frontend (if enabled) =====
-        if self.commit_results:
+                # Resolve component reference to actual component instance
+                processor = None
+                if isinstance(processor_ref, dict) and processor_ref.get('object_id'):
+                    obj_id = processor_ref['object_id']
+                    comp_type = processor_ref.get('component_type', 'RadarPostProcessor')
+                    target_obj = self.scene.get_object(obj_id)
+                    if target_obj:
+                        # Try to find the component by type or any RadarPostProcessor subclass
+                        processor = target_obj.get_component(comp_type)
+                        if not processor:
+                            # Try all components to find a RadarPostProcessor
+                            for comp in target_obj.get_all_components().values():
+                                if hasattr(comp, 'set_raw_signal'):
+                                    processor = comp
+                                    break
+                        logger.info(f"  [{i}] Resolved to: {processor}")
+                    else:
+                        logger.warning(f"  [{i}] Object not found: {obj_id}")
+                elif hasattr(processor_ref, 'set_raw_signal'):
+                    # Already a component instance
+                    processor = processor_ref
+
+                if processor and hasattr(processor, 'set_raw_signal'):
+                    logger.info(f"  [{i}] Calling set_raw_signal...")
+                    try:
+                        processor.set_raw_signal(raw_signal, signal_metadata)
+                        logger.info(f"  [{i}] set_raw_signal completed")
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"Post-processor failed: {e}")
+                        logger.error(traceback.format_exc())
+                else:
+                    logger.warning(f"  [{i}] Processor invalid or missing set_raw_signal")
+
+        # ===== Send Debug Results to Frontend (if enabled) =====
+        if self.commit_results and self.debug:
             from witwin import Results
+            Results.imshow(distance, title="Distance Map")
+            Results.imshow(intensity, title="Intensity Map")
+            Results.commit("Radar Debug")
 
-            # Debug: show Distance/Intensity maps
-            if self.debug:
-                Results.imshow(distance, title="Distance Map")
-                Results.imshow(intensity, title="Intensity Map")
-
-            # Add the same plots as signal_real and signal_fft (with series and batches support)
-            Results.add_plot(self.signal_real)
-            Results.add_plot(self.signal_fft)
-
-            Results.commit("Radar Results")
-
-        return f"Rendered radar view with MaxRange={radar.max_range:.1f}m, FOV={self.fov:.1f}°"
+        return f"Rendered radar view with MaxRange={radar.max_range:.1f}m, FOV={self.fov:.1f}°, {num_processors} post-processor(s)"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert radar component to dictionary for serialization."""
