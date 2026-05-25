@@ -113,3 +113,33 @@ def _value_equal(a: Any, b: Any) -> bool:
     if isinstance(a, (int, float)):
         return approx(a, b)
     return a == b
+
+
+# --- motion graph (TransformMotion) ----------------------------------------
+
+def _opt_vec_equal(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return all(approx(x, y) for x, y in zip(a.tolist(), b.tolist()))
+
+
+def assert_motion_equal(m1: Any, m2: Any) -> None:
+    """Assert two ``TransformMotion`` objects match field-for-field."""
+    assert all(approx(x, y) for x, y in zip(m1.offset.tolist(), m2.offset.tolist())), "offset"
+    assert all(approx(x, y) for x, y in zip(m1.velocity.tolist(), m2.velocity.tolist())), "velocity"
+    assert _opt_vec_equal(m1.axis, m2.axis), "axis"
+    assert _opt_vec_equal(m1.origin, m2.origin), "origin"
+    assert approx(m1.angular_velocity.item(), m2.angular_velocity.item()), "angular_velocity"
+    assert approx(m1.angle.item(), m2.angle.item()), "angle"
+    assert approx(m1.t_ref.item(), m2.t_ref.item()), "t_ref"
+    assert str(m1.space) == str(m2.space), "space"
+    assert (m1.parent or None) == (m2.parent or None), "parent"
+
+
+def assert_motions_equal(scene1: Any, scene2: Any) -> None:
+    """Assert two radar scenes have identical ``_structure_motions`` graphs."""
+    m1 = scene1._structure_motions
+    m2 = scene2._structure_motions
+    assert m1.keys() == m2.keys(), f"motion keys {set(m1)} != {set(m2)}"
+    for name in m1:
+        assert_motion_equal(m1[name], m2[name])

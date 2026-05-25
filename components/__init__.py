@@ -5,6 +5,7 @@ Importing this package registers every radar component with the core
 EMMaterial / StructureMeta) stay in core; these are the radar-specific additions.
 """
 from .config import RadarConfigComponent
+from .motion import RadarMotionComponent
 from .sensor import RadarSensorComponent
 from .structure_meta import RadarStructureMetaComponent
 from .subconfigs import (
@@ -16,6 +17,7 @@ from .subconfigs import (
 
 __all__ = [
     "RadarConfigComponent",
+    "RadarMotionComponent",
     "RadarSensorComponent",
     "RadarStructureMetaComponent",
     "RadarAntennaPatternComponent",

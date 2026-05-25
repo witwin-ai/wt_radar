@@ -19,6 +19,7 @@ from typing import Any, Optional, Tuple
 from witwin_server import Scene, SceneObject
 
 from .config_map import MARKER_COMPONENT, ConfigMap
+from .motion_map import MotionMap
 from .structure_map import RadarStructureMap
 
 
@@ -44,7 +45,12 @@ class RadarAdapter:
         studio.begin_batch()
         studio.add_object(ConfigMap.settings_to_studio(config))
         for structure in platform_scene.structures:
-            studio.add_object(RadarStructureMap.to_studio(structure))
+            sobj = RadarStructureMap.to_studio(structure)
+            motion = platform_scene.get_structure_motion(structure.name)
+            if motion is not None:
+                from ..components.motion import RadarMotionComponent
+                MotionMap.to_studio(sobj.add_component(RadarMotionComponent()), motion)
+            studio.add_object(sobj)
         studio.end_batch()
         return studio
 
@@ -60,6 +66,9 @@ class RadarAdapter:
                 "radar export requires a 'Radar Settings' object with a RadarConfig component.")
         config = ConfigMap.build_config(settings)
         scene = wr.Scene(device="cpu")
+        # Add all structures first, then motions: add_structure_motion validates that
+        # the parent structure exists and that the motion graph stays acyclic.
+        movers = []
         for obj in studio_scene.objects.values():
             if obj is settings:
                 continue
@@ -68,6 +77,14 @@ class RadarAdapter:
             structure = RadarStructureMap.to_platform(obj)
             if structure is not None:
                 scene.add_structure(structure)
+                movers.append(obj)
+        for obj in movers:
+            radar_motion = obj.get_component("RadarMotion")
+            if radar_motion is None:
+                continue
+            motion = MotionMap.build(radar_motion)
+            if motion is not None:
+                scene.add_structure_motion(obj.name, motion)
         return scene, config
 
     # --- helpers -------------------------------------------------------------
