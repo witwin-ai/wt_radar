@@ -1,37 +1,53 @@
 """Sensor config interchange: ``witwin.radar.RadarConfig`` <-> the Radar Settings object.
 
-``settings_to_studio`` builds the single ``Empty`` Radar Settings object and fills the
-``RadarConfig`` component from a platform ``RadarConfig`` dataclass. ``build_config``
-reads the component back into a dict and hands it to ``RadarConfig.from_dict``, which
-runs the platform's own validation (loc counts, finiteness, sub-config rules) — so the
-editor never emits an invalid config. Values are stored in the platform's native
-non-SI units (see ``common``), so the round trip is exact.
-
-R0 covers the 17 core FMCW fields. The four sub-configs and the sensor pose/backend are
-layered on by R1 (``sensor_map`` / ``subconfig_map``).
+``settings_to_studio`` builds the single ``Empty`` Radar Settings object — the
+``RadarConfig`` core, the sensor pose/backend, and the four sub-config components — and
+fills them from a platform ``RadarConfig`` (the sensor pose is editor state, not part of
+the pair, so it keeps its defaults). ``build_config`` reads the components back into a
+dict, enforces the adc-vs-quantization cross rule, and hands it to
+``RadarConfig.from_dict`` which runs the platform's own validation — so the editor never
+emits an invalid config. Values are stored in the platform's native non-SI units (see
+``common``), so the round trip is exact.
 """
 from typing import Any, Dict, Optional
 
 from witwin_server import SceneObject
 
 from .common import num, vec_list
+from .subconfig_map import SubConfigMap
 
 SETTINGS_NAME = "Radar Settings"
 MARKER_COMPONENT = "RadarConfig"
 
 
 class ConfigMap:
-    """``RadarConfig`` <-> the Radar Settings object's ``RadarConfig`` component."""
+    """``RadarConfig`` (+ sensor + 4 sub-configs) <-> the Radar Settings object."""
 
     @staticmethod
     def settings_to_studio(config: Optional[Any]) -> SceneObject:
-        """Build the Radar Settings ``Empty`` object; ``None`` leaves component defaults."""
+        """Build the Radar Settings object; ``None`` leaves every component at defaults."""
         from ..components.config import RadarConfigComponent
+        from ..components.sensor import RadarSensorComponent
+        from ..components.subconfigs import (
+            RadarAntennaPatternComponent,
+            RadarNoiseModelComponent,
+            RadarPolarizationComponent,
+            RadarReceiverChainComponent,
+        )
 
         obj = SceneObject(name=SETTINGS_NAME, mesh_type="Empty")
-        comp = obj.add_component(RadarConfigComponent())
+        cfg = obj.add_component(RadarConfigComponent())
+        obj.add_component(RadarSensorComponent())
+        antenna = obj.add_component(RadarAntennaPatternComponent())
+        noise = obj.add_component(RadarNoiseModelComponent())
+        polar = obj.add_component(RadarPolarizationComponent())
+        chain = obj.add_component(RadarReceiverChainComponent())
         if config is not None:
-            ConfigMap._fill(comp, config)
+            ConfigMap._fill(cfg, config)
+            SubConfigMap.antenna_to_studio(antenna, config.antenna_pattern)
+            SubConfigMap.noise_to_studio(noise, config.noise_model)
+            SubConfigMap.pol_to_studio(polar, config.polarization)
+            SubConfigMap.chain_to_studio(chain, config.receiver_chain)
         return obj
 
     @staticmethod
@@ -39,12 +55,23 @@ class ConfigMap:
         """Read the Radar Settings components back into a validated ``RadarConfig``."""
         from witwin.radar import RadarConfig
 
-        comp = settings_obj.get_component(MARKER_COMPONENT)
-        return RadarConfig.from_dict(ConfigMap.build_dict(comp))
+        config_dict = ConfigMap.build_dict(settings_obj)
+        ConfigMap._check_cross_rules(config_dict)
+        return RadarConfig.from_dict(config_dict)
 
     @staticmethod
-    def build_dict(comp: Any) -> Dict[str, Any]:
-        """``RadarConfig`` component -> the dict accepted by ``RadarConfig.from_dict``."""
+    def build_dict(settings_obj: SceneObject) -> Dict[str, Any]:
+        """Radar Settings components -> the dict accepted by ``RadarConfig.from_dict``."""
+        comp = settings_obj.get_component(MARKER_COMPONENT)
+        out = ConfigMap._core_dict(comp)
+        out.update(ConfigMap._subconfig_dict(settings_obj))
+        return out
+
+    # --- core fields ---------------------------------------------------------
+
+    @staticmethod
+    def _core_dict(comp: Any) -> Dict[str, Any]:
+        # The 17 RadarConfig core fields (native units, verbatim).
         return {
             "num_tx": int(comp.num_tx),
             "num_rx": int(comp.num_rx),
@@ -85,3 +112,30 @@ class ConfigMap:
         comp.num_rx = int(config.num_rx)
         comp.tx_loc = [list(loc) for loc in config.tx_loc]
         comp.rx_loc = [list(loc) for loc in config.rx_loc]
+
+    # --- sub-configs + cross rules -------------------------------------------
+
+    @staticmethod
+    def _subconfig_dict(settings_obj: SceneObject) -> Dict[str, Any]:
+        # The four optional sub-configs (each None when its component is disabled).
+        antenna = settings_obj.get_component("RadarAntennaPattern")
+        noise = settings_obj.get_component("RadarNoiseModel")
+        polar = settings_obj.get_component("RadarPolarization")
+        chain = settings_obj.get_component("RadarReceiverChain")
+        return {
+            "antenna_pattern": SubConfigMap.antenna_build(antenna) if antenna is not None else None,
+            "noise_model": SubConfigMap.noise_build(noise) if noise is not None else None,
+            "polarization": SubConfigMap.pol_build(polar) if polar is not None else None,
+            "receiver_chain": SubConfigMap.chain_build(chain) if chain is not None else None,
+        }
+
+    @staticmethod
+    def _check_cross_rules(config_dict: Dict[str, Any]) -> None:
+        # Mirror Radar.__init__: ADC quantization can live in exactly one place.
+        chain = config_dict.get("receiver_chain")
+        noise = config_dict.get("noise_model")
+        if (chain is not None and chain.get("adc") is not None
+                and noise is not None and noise.get("quantization") is not None):
+            raise ValueError(
+                "Radar receiver_chain.adc and noise_model.quantization cannot both be "
+                "enabled; use one quantizer.")

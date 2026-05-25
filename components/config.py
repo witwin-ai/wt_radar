@@ -9,8 +9,10 @@ and the sensor pose/backend live in sibling components added in R1.
 The Radar Settings object is recognized by the presence of this component (it is the
 adapter's marker component), mirroring how the Maxwell adapter keys off MaxwellDomain.
 """
+from witwin_server import Notifications
 from witwin_server.components import (
     Component,
+    button,
     component,
     define_group,
     float_field,
@@ -20,7 +22,7 @@ from witwin_server.components import (
     vector3_field,
 )
 
-from ..adapter.common import FREQUENCY_UNITS, SAMPLE_RATE_UNITS, SLOPE_UNITS, TIME_UNITS
+from ..adapter.common import FREQUENCY_UNITS, SAMPLE_RATE_UNITS, SLOPE_UNITS, TIME_UNITS, Derived
 
 _CAT = "Simulation/Radar"
 
@@ -71,3 +73,12 @@ class RadarConfigComponent(Component):
     rx_loc = list_field(vector3_field([0.0, 0.0, 0.0]),
                         default=[[-6.0, 0.0, 0.0], [-5.0, 0.0, 0.0], [-4.0, 0.0, 0.0], [-3.0, 0.0, 0.0]],
                         group="Antenna", description="RX positions (half-wavelength units)")
+
+    @button(display_name="Show Derived Values")
+    def show_derived(self):
+        """Report the derived range/doppler resolution + max range/doppler (authoring feedback)."""
+        d = Derived.compute(self)
+        msg = (f"range res {d['range_resolution_m']:.4f} m | max range {d['max_range_m']:.2f} m | "
+               f"doppler res {d['doppler_resolution_mps']:.4f} m/s | max doppler {d['max_doppler_mps']:.2f} m/s")
+        Notifications.info("Radar", msg)
+        return msg

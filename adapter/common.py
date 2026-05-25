@@ -6,7 +6,9 @@ half-wavelength units. The unit pickers below keep the stored value in the platf
 native unit (the option with multiplier 1.0 is the base), so the round trip is exact
 no matter which unit the editor displays.
 """
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
+
+C0 = 299792458.0  # speed of light (m/s), matching witwin.radar.Radar
 
 # Carrier frequency: stored in Hz (RadarConfig.fc), shown in GHz by default.
 FREQUENCY_UNITS = [
@@ -58,3 +60,26 @@ def vec_list(value: Any) -> List[List[float]]:
 def opt_dict_equal(a: Optional[dict], b: Optional[dict]) -> bool:
     """Compare two optional sub-config dicts (None == None)."""
     return a == b
+
+
+class Derived:
+    """Read-only derived sensor values, computed exactly as ``witwin.radar.Radar`` does."""
+
+    @staticmethod
+    def compute(comp: Any) -> Dict[str, float]:
+        """RadarConfig component -> range/doppler resolution + max range/doppler."""
+        fc = num(comp.fc)
+        fs = num(comp.sample_rate) * 1e3
+        slope_hz = num(comp.slope) * 1e12
+        adc_samples = num(comp.adc_samples)
+        chirp_period = (num(comp.idle_time) + num(comp.ramp_end_time)) * 1e-6
+        num_tx = num(comp.num_tx)
+        num_doppler = num(comp.num_doppler_bins)
+        lam = C0 / fc
+        return {
+            "range_resolution_m": C0 * fs / (2 * slope_hz * adc_samples),
+            "max_range_m": C0 * fs / (2 * slope_hz),
+            "doppler_resolution_mps": lam / (2 * num_doppler * chirp_period * num_tx),
+            "max_doppler_mps": lam / (4 * chirp_period * num_tx),
+        }
+
