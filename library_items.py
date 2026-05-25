@@ -1,9 +1,17 @@
-"""Radar library prefabs — drag-to-create scene building blocks.
+"""Radar library prefabs — drag-to-create scene building blocks (master §8).
 
-R0 registers the ``Radar`` category and a **Radar Settings** prefab (the FMCW sensor
-config singleton, built from the same component defaults the adapter round-trips). The
-full starter (settings + a moving target so it is immediately simulable) plus the
-sensor / moving-target / SMPL items land in R3 alongside the solve + result views.
+Registers a ``Radar`` category with:
+
+- **Radar (Demo)** — a Radar Settings object (77 GHz FMCW defaults + sensor pose/backend
+  + tracer + the Simulate button) plus a moving box target, so dropping it in is
+  immediately simulable: press **Simulate** on the Radar Settings object to see the
+  range-doppler / point-cloud views in-component.
+- **Radar Settings** — just the sensor singleton, to compose a custom scene.
+- **Moving Target** — a box structure carrying a RadarMotion (linear velocity).
+- **SMPL Body** — a stored-params SMPL body (display mesh bakes when model files exist).
+
+Each prefab reuses the tested adapter maps so geometry / materials / components match the
+round trip. Runtime/result state is never part of a prefab.
 """
 from witwin_server import Library
 
@@ -12,19 +20,82 @@ from .adapter.config_map import ConfigMap
 _CATEGORY = "radar"
 
 
-def _make_settings(ctx):
-    # A Radar Settings object with default 77 GHz FMCW config.
+def _settings_object(name="Radar Settings"):
+    # The Radar Settings singleton with default 77 GHz FMCW config + sensor/tracer/result.
     obj = ConfigMap.settings_to_studio(None)
-    obj.name = ctx.name
+    obj.name = name
+    return obj
+
+
+def _target_object(name="Moving Target"):
+    # A dynamic box target with a linear-velocity RadarMotion (immediately simulable).
+    import witwin.core as wc
+
+    from .adapter.structure_map import RadarStructureMap
+    from .components.motion import RadarMotionComponent
+
+    obj = RadarStructureMap.to_studio(wc.Structure(
+        wc.Box(position=(0.6, 0.0, -2.5), size=(0.6, 0.4, 0.4)),
+        wc.Material(eps_r=8.0, name="metal"), name=name, metadata={"dynamic": True}))
+    motion = obj.add_component(RadarMotionComponent())
+    motion.velocity = [0.2, 0.0, 0.0]
+    return obj
+
+
+def _smpl_object(name="SMPL Body"):
+    # A stored-params SMPL body (no baked mesh until model files are available).
+    from witwin_server import SceneObject
+    from witwin_server.components import PlatformGeometryComponent
+
+    from .components.structure_meta import RadarStructureMetaComponent
+
+    obj = SceneObject(name=name, mesh_type="Custom")
+    geom = obj.add_component(PlatformGeometryComponent())
+    geom.kind = "smpl"
+    geom.pose = [0.0] * 72
+    geom.shape = [0.0] * 10
+    geom.gender = "male"
+    obj.add_component(RadarStructureMetaComponent()).dynamic = True
+    return obj
+
+
+# --- library factories (context.scene gets the extras; return the primary obj) ---
+
+def _make_demo(ctx):
+    settings = _settings_object(ctx.name)
+    ctx.scene.add_object(_target_object())
+    return settings
+
+
+def _make_settings(ctx):
+    return _settings_object(ctx.name)
+
+
+def _make_target(ctx):
+    obj = _target_object(ctx.name)
+    return obj
+
+
+def _make_smpl(ctx):
+    obj = _smpl_object(ctx.name)
     return obj
 
 
 def register() -> None:
     """Register the Radar library category + prefab items."""
     Library.register_category(_CATEGORY, "Radar", icon="radar", order=30)
+    Library.register_item("radar_demo", "Radar (Demo)", _CATEGORY,
+                          icon="radar", object_type="empty", factory=_make_demo,
+                          description="Sensor + a moving target; Simulate to see the range-doppler signal")
     Library.register_item("radar_settings", "Radar Settings", _CATEGORY,
                           icon="settings", object_type="empty", factory=_make_settings,
-                          description="FMCW sensor config singleton (build your own scene)")
+                          description="FMCW sensor config + Simulate button (build your own scene)")
+    Library.register_item("radar_target", "Moving Target", _CATEGORY,
+                          icon="box", object_type="mesh", factory=_make_target,
+                          description="A box target with a linear-velocity radar motion")
+    Library.register_item("radar_smpl", "SMPL Body", _CATEGORY,
+                          icon="user", object_type="mesh", factory=_make_smpl,
+                          description="A stored-params SMPL body (dynamic; bakes when model files exist)")
 
 
 register()

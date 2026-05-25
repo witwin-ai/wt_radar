@@ -27,6 +27,7 @@ class ConfigMap:
     def settings_to_studio(config: Optional[Any]) -> SceneObject:
         """Build the Radar Settings object; ``None`` leaves every component at defaults."""
         from ..components.config import RadarConfigComponent
+        from ..components.result import RadarResultComponent
         from ..components.sensor import RadarSensorComponent
         from ..components.subconfigs import (
             RadarAntennaPatternComponent,
@@ -34,14 +35,17 @@ class ConfigMap:
             RadarPolarizationComponent,
             RadarReceiverChainComponent,
         )
+        from ..components.tracer import RadarTracerComponent
 
         obj = SceneObject(name=SETTINGS_NAME, mesh_type="Empty")
         cfg = obj.add_component(RadarConfigComponent())
         obj.add_component(RadarSensorComponent())
+        obj.add_component(RadarTracerComponent())
         antenna = obj.add_component(RadarAntennaPatternComponent())
         noise = obj.add_component(RadarNoiseModelComponent())
         polar = obj.add_component(RadarPolarizationComponent())
         chain = obj.add_component(RadarReceiverChainComponent())
+        obj.add_component(RadarResultComponent())  # Simulate button + signal views (no round-trip data)
         if config is not None:
             ConfigMap._fill(cfg, config)
             SubConfigMap.antenna_to_studio(antenna, config.antenna_pattern)

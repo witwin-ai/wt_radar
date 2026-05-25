@@ -56,8 +56,14 @@ class RadarAdapter:
 
     # --- studio -> platform --------------------------------------------------
 
-    def to_platform(self, studio_scene: Scene) -> Tuple[Any, Any]:
-        """Rebuild the ``(radar.Scene, RadarConfig)`` pair from the studio scene."""
+    def to_platform(self, studio_scene: Scene, *, device: str = "cpu") -> Tuple[Any, Any]:
+        """Rebuild the ``(radar.Scene, RadarConfig)`` pair from the studio scene.
+
+        ``device`` is the radar ``Scene`` device. It defaults to ``"cpu"`` for the
+        round trip / handler export (no tracing happens there); the solve path
+        (:class:`~.solve.SolveRunner`) passes ``"cuda"`` because the mitsuba ray tracer
+        is CUDA-only.
+        """
         import witwin.radar as wr
 
         settings = self._find_settings(studio_scene)
@@ -65,7 +71,7 @@ class RadarAdapter:
             raise ValueError(
                 "radar export requires a 'Radar Settings' object with a RadarConfig component.")
         config = ConfigMap.build_config(settings)
-        scene = wr.Scene(device="cpu")
+        scene = wr.Scene(device=device)
         # Add all structures first, then motions: add_structure_motion validates that
         # the parent structure exists and that the motion graph stays acyclic.
         movers = []
