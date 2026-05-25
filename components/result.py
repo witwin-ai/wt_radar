@@ -17,11 +17,13 @@ from witwin_server.components import (
     bool_field,
     button,
     component,
+    component_field,
     define_group,
     figure,
     float_field,
     foldout_group,
     int_field,
+    list_field,
     string_field,
 )
 
@@ -46,6 +48,8 @@ class RadarResultComponent(Component):
     motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
                                    group="Solve", description="Re-trace per chirp or per frame")
     t0 = float_field(0.0, group="Solve", description="Solve start time (s)")
+    post_processors = list_field(component_field(component_type="RadarPostProcessor"), default=[],
+                                 group="Solve", description="Extra post-processor views run after each solve")
 
     view = string_field("range_doppler", options=_VIEWS, enum_toggle=True, group="View",
                         description="Which signal view to render")
@@ -83,8 +87,38 @@ class RadarResultComponent(Component):
         self._radar = result.radar
         self._signal = result.signal
         self.update_view()
+        self._run_post_processors()
         Notifications.success("Radar", f"Solved: MIMO signal {tuple(result.signal.shape)}")
         return "Solve complete"
+
+    def _run_post_processors(self):
+        # Resolve each referenced RadarPostProcessor (by object id) and run its view.
+        refs = self.post_processors or []
+        if not refs:
+            return
+        scene = self.scene
+        for ref in refs:
+            proc = self._resolve_processor(scene, ref)
+            if proc is not None and bool(getattr(proc, "enabled", True)):
+                proc.process(self._radar, self._signal)
+
+    @staticmethod
+    def _resolve_processor(scene, ref):
+        # A component_field ref is a {object_id, component_type} dict (or a live component).
+        if hasattr(ref, "process"):
+            return ref
+        if not isinstance(ref, dict) or not ref.get("object_id"):
+            return None
+        obj = scene.get_object(ref["object_id"]) if scene is not None else None
+        if obj is None:
+            return None
+        named = obj.get_component(ref.get("component_type", "RadarPostProcessor"))
+        if named is not None and hasattr(named, "process"):
+            return named
+        for comp in obj.get_all_components().values():
+            if hasattr(comp, "process"):
+                return comp
+        return None
 
     @button(display_name="Update View")
     def update_view(self):

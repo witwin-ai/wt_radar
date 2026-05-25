@@ -6,6 +6,11 @@ EMMaterial / StructureMeta) stay in core; these are the radar-specific additions
 """
 from .config import RadarConfigComponent
 from .motion import RadarMotionComponent
+from .post_processing import (
+    PointCloudProcessorComponent,
+    RadarPostProcessorComponent,
+    RangeDopplerProcessorComponent,
+)
 from .result import RadarResultComponent
 from .sensor import RadarSensorComponent
 from .structure_meta import RadarStructureMetaComponent
@@ -21,6 +26,9 @@ from .tracer import RadarTracerComponent
 __all__ = [
     "RadarConfigComponent",
     "RadarMotionComponent",
+    "RadarPostProcessorComponent",
+    "RangeDopplerProcessorComponent",
+    "PointCloudProcessorComponent",
     "RadarResultComponent",
     "RadarSensorComponent",
     "RadarStructureMetaComponent",

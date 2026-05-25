@@ -109,6 +109,24 @@ class SolveRunner:
         return SolveResult(radar=radar, signal=signal)
 
     @staticmethod
+    def run_group(studio_scene: Any, *, sensors: "dict[str, SensorSpec]", tracer: TracerSpec,
+                  motion_sampling: str, t0: float) -> "dict[str, Any]":
+        """Run several named radars on one rebuilt scene (``Radar.simulate_group``)."""
+        import torch
+        import witwin.radar as wr
+
+        from .radar_adapter import RadarAdapter
+
+        scene_device = "cuda" if torch.cuda.is_available() else "cpu"
+        scene, config = RadarAdapter().to_platform(studio_scene, device=scene_device)
+        radars = {name: SolveRunner.build_radar(config, spec) for name, spec in sensors.items()}
+        return wr.Radar.simulate_group(
+            scene, radars=radars, resolution=tracer.resolution, epsilon_r=tracer.epsilon_r,
+            sampling=tracer.sampling, multipath=tracer.multipath,
+            max_reflections=tracer.max_reflections, ray_batch_size=tracer.ray_batch_size,
+            t0=t0, motion_sampling=motion_sampling)
+
+    @staticmethod
     def build_radar(config: Any, sensor: SensorSpec) -> Any:
         """Construct a ``Radar`` from a RadarConfig + the sensor pose/backend."""
         import witwin.radar as wr
