@@ -3,7 +3,7 @@
   "name": "Radar (FMCW)",
   "version": "0.1.0",
   "author": "",
-  "description": "Round-trips witwin.radar solver scenes <-> the studio editor as a (Scene, RadarConfig) pair (full FMCW sensor config, antenna/noise/polarization/receiver chain, motion graph + timeline, SMPL) and runs the dirichlet/slang/pytorch backends with in-component range-doppler / point-cloud / MUSIC / CFAR signal visualization.",
+  "description": "Round-trips witwin.radar solver scenes <-> the studio editor as a (Scene, RadarConfig) pair (full FMCW sensor config, antenna/noise/polarization/receiver chain, motion graph + timeline) and runs the dirichlet/slang/pytorch backends with in-component range-doppler / point-cloud / MUSIC / CFAR signal visualization.",
   "license": "GPL-3.0-or-later",
   "engines": { "witwin": "^1.0.0" },
   "dependencies": ["scipy", "numpy"],

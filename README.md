@@ -29,9 +29,14 @@ same repo.
 adapter/        RadarAdapter (detect/to_studio/to_platform) + config/structure/motion/solve maps
 components/      RadarConfig, RadarStructureMeta, RadarMotion, RadarSensor, sub-configs, RadarResult
 examples/        radar (Scene, RadarConfig) factories for the load demo
-library_items.py drag-to-create prefabs (Radar starter, sensor, moving target, SMPL)
+library_items.py drag-to-create prefabs (Radar starter, sensor, moving target)
 tests/           per-phase round-trip + live-solve suites
 ```
+
+Human/SMPL bodies are owned by the **wt-human** plugin, not radar. A radar scene that
+contains one round-trips through the shared base geometry map (`kind="smpl"`) with no
+radar-side SMPL code; radar's only human-aware feature is the optional `RadarTimeline`
+"motion" source, which renders frames from a human placed by wt-human.
 
 ## Phases
 
@@ -39,7 +44,7 @@ tests/           per-phase round-trip + live-solve suites
 |-------|-------|
 | R0 | Scaffolding + structures + `(Scene, RadarConfig)` contract + `RadarStructureMeta` |
 | R1 | Full sensor config: antenna pattern / noise / polarization / receiver chain + sensor pose/backend + validation |
-| R2 | SMPL bodies + dynamics (`RadarMotion` motion graph + parenting/acyclicity) |
+| R2 | Dynamics (`RadarMotion` motion graph + parenting/acyclicity); human geometry is wt-human's |
 | R3 | Tracer + 3 solver backends + single-frame signal viz (range-doppler / point cloud / MUSIC / CFAR) + library items |
 | R4 | Multi-frame timeline (follow-up) |
 | R5 | Polish: `simulate_group`, pluggable post-processors, viewport point cloud (follow-up) |

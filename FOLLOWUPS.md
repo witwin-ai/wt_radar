@@ -9,10 +9,10 @@ Deferred work, in rough priority order.
   `FileNotFoundError` instead of degrading to params-only (the `StudioGeometry` docstring
   already promises this degradation). Broadening the catch (e.g.
   `except (ImportError, FileNotFoundError, OSError)`) would make SMPL load/round-trip
-  degrade gracefully when model files are absent. Until then, the full SMPL
-  platform→studio→platform round trip (which bakes the display mesh) is skipped in
-  `tests/test_r2_motion_smpl.py::test_smpl_full_round_trip`; the params reconstruction
-  (`test_smpl_params_reconstruct`) and motion graph are fully tested.
+  degrade gracefully when model files are absent. This is a base/wt-human concern (radar
+  owns no SMPL code), but it affects radar too: round-tripping a wt-human body that lands
+  in a radar scene, and the `RadarTimeline` "motion" source, both bake SMPL through the
+  base and so need model files present.
 
 ## R5 polish not yet implemented
 
@@ -34,4 +34,4 @@ Deferred work, in rough priority order.
   lookup `name` collides with a `name=` change, so the rename/re-parent remap code in
   `update_structure` is unreachable via the public API. The adapter keys motions by the
   live object name + `RadarMotion.parent` string, so editor renames round-trip correctly
-  regardless (see `tests/test_r2_motion_smpl.py::test_rename_keeps_motion_refs_consistent`).
+  regardless (see `tests/test_r2_motion.py::test_rename_keeps_motion_refs_consistent`).

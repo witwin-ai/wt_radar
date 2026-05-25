@@ -1,20 +1,17 @@
-"""R2 round-trip: SMPL bodies + dynamics (the radar motion graph).
+"""R2 round-trip: dynamics (the radar motion graph).
 
-Motion: a parented, mixed translation/rotation graph round-trips so
-``scene._structure_motions`` reconstructs identically; self-parent and cyclic graphs are
-rejected on export; a structure rename re-parents its children (platform
-``update_structure``) and the renamed graph still round-trips.
+A parented, mixed translation/rotation graph round-trips so ``scene._structure_motions``
+reconstructs identically; self-parent and cyclic graphs are rejected on export; an editor
+rename (object name + child parent refs) keeps the motion graph consistent.
 
-SMPL: the params (pose/shape/gender/model_root) reconstruct through the base
-``GeometryMap`` (no baking needed). The full platform->studio->platform round trip bakes
-the display mesh, which needs SMPL model files; when they are absent the base bake raises
-(it only degrades on ImportError, not on a missing model file) so that leg is skipped
-with a clear message.
+Human/SMPL bodies are owned by the wt-human plugin, not radar. A radar scene that contains
+one round-trips through the shared base geometry map with no radar-side SMPL code, so SMPL
+is not exercised here.
 """
 import pytest
 import witwin.radar as wr
 
-from _helpers import approx, assert_motions_equal, assert_structures_equal
+from _helpers import assert_motions_equal, assert_structures_equal
 
 _BASE = {
     "num_tx": 3, "num_rx": 4,
@@ -46,8 +43,6 @@ def _radar_motion(studio, name):
     obj = next(o for o in studio.objects.values() if o.name == name)
     return obj.get_component("RadarMotion")
 
-
-# --- motion graph round trip -----------------------------------------------
 
 def test_motion_graph_round_trip(adapter):
     scene, config = _motion_pair()
@@ -101,46 +96,3 @@ def test_rename_keeps_motion_refs_consistent(adapter):
     assert "platform" in names and "base" not in names
     assert "platform" in rebuilt._structure_motions
     assert rebuilt._structure_motions["arm"].parent == "platform"
-
-
-# --- SMPL ------------------------------------------------------------------
-
-def test_smpl_params_reconstruct(wtr):
-    # to_platform direction (no baking): PlatformGeometry(kind=smpl) -> SMPLBody, params kept.
-    from witwin_server import SceneObject
-    from witwin_server.components import PlatformGeometryComponent
-    from witwin_server.platform_bridge import GeometryMap
-
-    pose = [round(0.01 * i, 4) for i in range(72)]
-    shape = [round(0.1 * i, 4) for i in range(10)]
-    obj = SceneObject(name="human", mesh_type="Empty")
-    geom = obj.add_component(PlatformGeometryComponent())
-    geom.kind = "smpl"
-    geom.pose = pose
-    geom.shape = shape
-    geom.gender = "female"
-    geom.model_root = "/models/smpl"
-
-    body = GeometryMap.to_platform(geom, [0.0, 0.0, -3.0], [1.0, 0.0, 0.0, 0.0])
-    assert str(body.kind) == "smpl"
-    assert str(body.gender) == "female"
-    assert str(body.model_root) == "/models/smpl"
-    assert all(approx(a, b) for a, b in zip([float(x) for x in body.pose.tolist()], pose))
-    assert all(approx(a, b) for a, b in zip([float(x) for x in body.shape.tolist()], shape))
-
-
-def test_smpl_full_round_trip(adapter):
-    scene = wr.Scene(device="cpu")
-    scene.add_smpl(name="human", pose=[0.0] * 72, shape=[0.0] * 10,
-                   position=(0.0, 0.0, -3.0), gender="male")
-    config = wr.RadarConfig.from_dict(_BASE)
-    try:
-        studio = adapter.to_studio((scene, config))
-    except (FileNotFoundError, OSError) as exc:
-        pytest.skip(f"SMPL model files absent; base bake degrades only on ImportError ({type(exc).__name__})")
-
-    rebuilt, _ = adapter.to_platform(studio)
-    body = rebuilt.structures[0].geometry
-    assert str(body.kind) == "smpl"
-    assert str(body.gender) == "male"
-    assert rebuilt.structures[0].metadata.get("dynamic") is True  # SMPL bodies are always dynamic

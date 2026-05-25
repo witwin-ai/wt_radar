@@ -8,7 +8,9 @@ Registers a ``Radar`` category with:
   range-doppler / point-cloud views in-component.
 - **Radar Settings** — just the sensor singleton, to compose a custom scene.
 - **Moving Target** — a box structure carrying a RadarMotion (linear velocity).
-- **SMPL Body** — a stored-params SMPL body (display mesh bakes when model files exist).
+
+Human/SMPL bodies are owned by the wt-human plugin, not radar; a radar scene that contains
+one round-trips through the shared base geometry map with no radar-side SMPL code.
 
 Each prefab reuses the tested adapter maps so geometry / materials / components match the
 round trip. Runtime/result state is never part of a prefab.
@@ -42,23 +44,6 @@ def _target_object(name="Moving Target"):
     return obj
 
 
-def _smpl_object(name="SMPL Body"):
-    # A stored-params SMPL body (no baked mesh until model files are available).
-    from witwin_server import SceneObject
-    from witwin_server.components import PlatformGeometryComponent
-
-    from .components.structure_meta import RadarStructureMetaComponent
-
-    obj = SceneObject(name=name, mesh_type="Custom")
-    geom = obj.add_component(PlatformGeometryComponent())
-    geom.kind = "smpl"
-    geom.pose = [0.0] * 72
-    geom.shape = [0.0] * 10
-    geom.gender = "male"
-    obj.add_component(RadarStructureMetaComponent()).dynamic = True
-    return obj
-
-
 # --- library factories (context.scene gets the extras; return the primary obj) ---
 
 def _make_demo(ctx):
@@ -76,11 +61,6 @@ def _make_target(ctx):
     return obj
 
 
-def _make_smpl(ctx):
-    obj = _smpl_object(ctx.name)
-    return obj
-
-
 def register() -> None:
     """Register the Radar library category + prefab items."""
     Library.register_category(_CATEGORY, "Radar", icon="radar", order=30)
@@ -93,9 +73,6 @@ def register() -> None:
     Library.register_item("radar_target", "Moving Target", _CATEGORY,
                           icon="box", object_type="mesh", factory=_make_target,
                           description="A box target with a linear-velocity radar motion")
-    Library.register_item("radar_smpl", "SMPL Body", _CATEGORY,
-                          icon="user", object_type="mesh", factory=_make_smpl,
-                          description="A stored-params SMPL body (dynamic; bakes when model files exist)")
 
 
 register()
