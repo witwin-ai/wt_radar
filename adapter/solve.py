@@ -100,15 +100,22 @@ class SolveRunner:
 
         scene_device = "cuda" if torch.cuda.is_available() else "cpu"
         scene, config = RadarAdapter().to_platform(studio_scene, device=scene_device)
-        radar = wr.Radar(
-            config, backend=sensor.backend, pad_factor=sensor.pad_factor, device=sensor.device,
-            position=sensor.position, target=sensor.target, up=sensor.up, fov=sensor.fov)
+        radar = SolveRunner.build_radar(config, sensor)
         signal = radar.simulate(
             scene, resolution=tracer.resolution, epsilon_r=tracer.epsilon_r,
             sampling=tracer.sampling, multipath=tracer.multipath,
             max_reflections=tracer.max_reflections, ray_batch_size=tracer.ray_batch_size,
             t0=t0, motion_sampling=motion_sampling)
         return SolveResult(radar=radar, signal=signal)
+
+    @staticmethod
+    def build_radar(config: Any, sensor: SensorSpec) -> Any:
+        """Construct a ``Radar`` from a RadarConfig + the sensor pose/backend."""
+        import witwin.radar as wr
+
+        return wr.Radar(
+            config, backend=sensor.backend, pad_factor=sensor.pad_factor, device=sensor.device,
+            position=sensor.position, target=sensor.target, up=sensor.up, fov=sensor.fov)
 
 
 class SigProc:

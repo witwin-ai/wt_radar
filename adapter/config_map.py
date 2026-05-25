@@ -35,6 +35,7 @@ class ConfigMap:
             RadarPolarizationComponent,
             RadarReceiverChainComponent,
         )
+        from ..components.timeline import RadarTimelineComponent
         from ..components.tracer import RadarTracerComponent
 
         obj = SceneObject(name=SETTINGS_NAME, mesh_type="Empty")
@@ -46,6 +47,7 @@ class ConfigMap:
         polar = obj.add_component(RadarPolarizationComponent())
         chain = obj.add_component(RadarReceiverChainComponent())
         obj.add_component(RadarResultComponent())  # Simulate button + signal views (no round-trip data)
+        obj.add_component(RadarTimelineComponent())  # multi-frame generation (no round-trip data)
         if config is not None:
             ConfigMap._fill(cfg, config)
             SubConfigMap.antenna_to_studio(antenna, config.antenna_pattern)

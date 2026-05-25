@@ -15,6 +15,7 @@ from .subconfigs import (
     RadarPolarizationComponent,
     RadarReceiverChainComponent,
 )
+from .timeline import RadarTimelineComponent
 from .tracer import RadarTracerComponent
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "RadarResultComponent",
     "RadarSensorComponent",
     "RadarStructureMetaComponent",
+    "RadarTimelineComponent",
     "RadarTracerComponent",
     "RadarAntennaPatternComponent",
     "RadarNoiseModelComponent",
