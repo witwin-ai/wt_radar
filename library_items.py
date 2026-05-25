@@ -1,29 +1,30 @@
+"""Radar library prefabs — drag-to-create scene building blocks.
+
+R0 registers the ``Radar`` category and a **Radar Settings** prefab (the FMCW sensor
+config singleton, built from the same component defaults the adapter round-trips). The
+full starter (settings + a moving target so it is immediately simulable) plus the
+sensor / moving-target / SMPL items land in R3 alongside the solve + result views.
 """
-Library items provided by the Radar Simulation extension.
+from witwin_server import Library
 
-Registers the Radar object in the RF category.
-"""
-from witwin import Library, CreateContext
-from witwin.core import SceneObject
+from .adapter.config_map import ConfigMap
+
+_CATEGORY = "radar"
 
 
-# Factory function for creating radar objects
-def create_radar(ctx: CreateContext) -> SceneObject:
-    """Create a radar object with the Radar component."""
-    obj = SceneObject(name=ctx.name, mesh_type="Empty")
-    obj.add_component("Radar")
-    # Radar has direction but no meaningful scale
-    obj["Transform"].freeze_scale = True
+def _make_settings(ctx):
+    # A Radar Settings object with default 77 GHz FMCW config.
+    obj = ConfigMap.settings_to_studio(None)
+    obj.name = ctx.name
     return obj
 
 
-# Register the library item in the RF category
-Library.register_item(
-    id="radar",
-    name="Radar",
-    category="rf",
-    icon="radar",
-    description="Radar sensor for simulation",
-    factory=create_radar,
-    object_type="radar"
-)
+def register() -> None:
+    """Register the Radar library category + prefab items."""
+    Library.register_category(_CATEGORY, "Radar", icon="radar", order=30)
+    Library.register_item("radar_settings", "Radar Settings", _CATEGORY,
+                          icon="settings", object_type="empty", factory=_make_settings,
+                          description="FMCW sensor config singleton (build your own scene)")
+
+
+register()

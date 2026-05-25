@@ -1,15 +1,13 @@
-"""Radar extension components."""
-from .radar import RadarComponent, SimpleRadar
-from .post_processing import (
-    RadarPostProcessor,
-    RangeFFTProcessor,
-    RangeDopplerProcessor,
-)
+"""Radar scene components (auto-registered via their ``@component`` decorators).
+
+Importing this package registers every radar component with the core
+``ComponentRegistry``. The base layer's shared components (PlatformGeometry /
+EMMaterial / StructureMeta) stay in core; these are the radar-specific additions.
+"""
+from .config import RadarConfigComponent
+from .structure_meta import RadarStructureMetaComponent
 
 __all__ = [
-    'RadarComponent',
-    'SimpleRadar',
-    'RadarPostProcessor',
-    'RangeFFTProcessor',
-    'RangeDopplerProcessor',
+    "RadarConfigComponent",
+    "RadarStructureMetaComponent",
 ]
