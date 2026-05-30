@@ -1,10 +1,8 @@
 """R0 round-trip: scaffolding + structures + the (Scene, RadarConfig) pair contract.
 
-Builds a radar ``Scene`` (three structures with bsdf/dynamic metadata) paired with a
-``RadarConfig``, runs the pair through ``to_studio`` then ``to_platform``, and asserts
-the rebuilt pair reproduces every ``RadarConfig`` field (incl. tx_loc/rx_loc and the
-non-SI unit conventions) and every structure (geometry + scalar material + bsdf/dynamic
-metadata).
+Builds a radar ``Scene`` paired with a ``RadarConfig``, runs the pair through
+``to_studio`` then ``to_platform``, and asserts the rebuilt pair reproduces the
+Studio-editable config, geometry, and scalar material fields.
 """
 import witwin.radar as wr
 from witwin_server import SceneObject
@@ -24,7 +22,8 @@ _CONFIG = {
 
 
 def _build_pair():
-    # A radar (Scene, RadarConfig) pair with three structures + radar metadata.
+    # A radar (Scene, RadarConfig) pair. Input metadata is deliberately not exported
+    # back into Studio-authored radar structures.
     scene = wr.Scene(device="cpu")
     scene.add_mesh(
         name="wall",
@@ -112,12 +111,12 @@ def test_plain_mesh_exports_as_radar_structure(adapter):
         assert approx(got_axis[1], expected_axis[1])
 
 
-def test_metadata_round_trip(adapter):
+def test_radar_only_metadata_is_dropped(adapter):
     scene, config = _build_pair()
     rebuilt_scene, _ = adapter.to_platform(adapter.to_studio((scene, config)))
     by_name = {s.name: s for s in rebuilt_scene.structures}
-    assert by_name["car"].metadata["dynamic"] is True
-    assert by_name["car"].metadata["bsdf"] == {"type": "conductor", "material": "Cu"}
+    assert "dynamic" not in by_name["car"].metadata
+    assert "bsdf" not in by_name["car"].metadata
     assert "dynamic" not in by_name["wall"].metadata
     assert "bsdf" not in by_name["wall"].metadata
 

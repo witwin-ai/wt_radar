@@ -1,10 +1,8 @@
 """Radar structure overlay on top of the frozen base ``StructureMap``.
 
-The base ``StructureMap`` already round-trips geometry + scalar material + transform +
-the full opaque ``metadata`` dict (via ``StructureMeta``). Radar adds nothing to that
-except keeping two radar-only metadata keys, ``dynamic`` and ``bsdf``, as internal
-adapter state during immediate import/export. Everything geometric/material is
-delegated to the frozen base map — no reimplementation.
+The live editor path is mesh-first: any visible, non-empty Studio ``Mesh`` can be
+exported as a radar structure without radar-specific sidecar components. Radar-only
+metadata from imported platform scenes is intentionally discarded.
 """
 from typing import Any, Optional
 
@@ -14,34 +12,22 @@ from witwin_server import SceneObject
 from witwin_server.features.platform.bridge import MaterialMap, StructureMap, TransformMap
 from witwin_server.utils.mitsuba_utils import get_world_transform
 
-_RADAR_METADATA_ATTR = "_wt_radar_metadata"
-
 
 class RadarStructureMap:
     """Map radar structures while keeping the common editor path component-light."""
 
     @staticmethod
     def to_studio(structure: Any) -> SceneObject:
-        """Build a normal mesh-backed object and keep radar metadata internal."""
+        """Build a normal mesh-backed object."""
         obj = RadarStructureMap._native_to_studio(structure)
         if obj is None:
             obj = StructureMap.to_studio(structure)
             RadarStructureMap._strip_platform_components_if_mesh_backed(obj)
-
-        metadata = dict(structure.metadata)
-        radar_metadata = {}
-        if bool(metadata.get("dynamic", False)):
-            radar_metadata["dynamic"] = True
-        bsdf = metadata.get("bsdf")
-        if isinstance(bsdf, dict):
-            radar_metadata["bsdf"] = bsdf
-        if radar_metadata:
-            setattr(obj, _RADAR_METADATA_ATTR, radar_metadata)
         return obj
 
     @staticmethod
     def to_platform(obj: SceneObject) -> Optional[Any]:
-        """Rebuild a ``core.Structure``, merging dynamic/bsdf back into its metadata."""
+        """Rebuild a ``core.Structure`` from ordinary Studio mesh/material fields."""
         base = (
             StructureMap.to_platform(obj)
             if obj.get_component("PlatformGeometry") is not None
@@ -53,9 +39,6 @@ class RadarStructureMap:
         import witwin.core as wc
 
         metadata = dict(base.metadata)
-        radar_metadata = getattr(obj, _RADAR_METADATA_ATTR, None)
-        if isinstance(radar_metadata, dict):
-            metadata.update(radar_metadata)
 
         return wc.Structure(
             base.geometry,

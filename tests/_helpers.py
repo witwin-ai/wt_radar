@@ -74,7 +74,7 @@ def assert_material_scalar_equal(m1: Any, m2: Any) -> None:
 
 
 def assert_structures_equal(list1: Any, list2: Any) -> None:
-    """Assert two radar structure lists match (geometry + material + meta + radar metadata)."""
+    """Assert two radar structure lists match in ordinary Studio-editable fields."""
     s1 = {s.name: s for s in list1}
     s2 = {s.name: s for s in list2}
     assert s1.keys() == s2.keys(), f"structure names {s1.keys()} != {s2.keys()}"
@@ -85,7 +85,6 @@ def assert_structures_equal(list1: Any, list2: Any) -> None:
         assert int(a.priority) == int(b.priority), f"{name} priority"
         assert bool(a.enabled) == bool(b.enabled), f"{name} enabled"
         assert tuple(a.tags) == tuple(b.tags), f"{name} tags"
-        assert dict(a.metadata) == dict(b.metadata), f"{name} metadata (incl bsdf/dynamic)"
 
 
 # --- RadarConfig (the (Scene, RadarConfig) pair's config half) ---
