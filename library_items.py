@@ -7,7 +7,7 @@ Registers a ``Radar`` category with:
   immediately simulable: press **Simulate** on the Radar Settings object to see the
   range-doppler / point-cloud views in-component.
 - **Radar Settings** — just the sensor singleton, to compose a custom scene.
-- **Moving Target** — a box structure carrying a RadarMotion (linear velocity).
+- **Radar Target** — a plain box mesh with radar-friendly material defaults.
 
 Human/SMPL bodies are owned by the wt-human plugin, not radar; a radar scene that contains
 one round-trips through the shared base geometry map with no radar-side SMPL code.
@@ -29,18 +29,18 @@ def _settings_object(name="Radar Settings"):
     return obj
 
 
-def _target_object(name="Moving Target"):
-    # A dynamic box target with a linear-velocity RadarMotion (immediately simulable).
-    import witwin.core as wc
+def _target_object(name="Radar Target"):
+    # A plain Studio mesh: the adapter exports visible meshes directly as radar structures.
+    from witwin_server import SceneObject
 
-    from .adapter.structure_map import RadarStructureMap
-    from .components.motion import RadarMotionComponent
-
-    obj = RadarStructureMap.to_studio(wc.Structure(
-        wc.Box(position=(0.6, 0.0, -2.5), size=(0.6, 0.4, 0.4)),
-        wc.Material(eps_r=8.0, name="metal"), name=name, metadata={"dynamic": True}))
-    motion = obj.add_component(RadarMotionComponent())
-    motion.velocity = [0.2, 0.0, 0.0]
+    obj = SceneObject(name=name, mesh_type="Cube")
+    transform = obj.get_component("Transform")
+    transform.position = [0.6, 0.0, -2.5]
+    transform.scale = [0.6, 0.4, 0.4]
+    material = obj.get_component("Material")
+    if material is not None:
+        material.eps_r = 8.0
+        material.material_name = "metal"
     return obj
 
 
@@ -48,7 +48,16 @@ def _target_object(name="Moving Target"):
 
 def _make_demo(ctx):
     settings = _settings_object(ctx.name)
-    ctx.scene.add_object(_target_object())
+    # Unique the target name so dropping the demo more than once does not produce two
+    # structures with the same name (the platform wr.Scene.add_structure rejects dups).
+    base = "Radar Target"
+    existing = {obj.name for obj in ctx.scene.objects.values()}
+    name = base
+    i = 2
+    while name in existing:
+        name = f"{base} {i}"
+        i += 1
+    ctx.scene.add_object(_target_object(name))
     return settings
 
 
@@ -66,13 +75,13 @@ def register() -> None:
     Library.register_category(_CATEGORY, "Radar", icon="radar", order=30)
     Library.register_item("radar_demo", "Radar (Demo)", _CATEGORY,
                           icon="radar", object_type="empty", factory=_make_demo,
-                          description="Sensor + a moving target; Simulate to see the range-doppler signal")
+                          description="Sensor + a plain mesh target; Simulate to see the range-doppler signal")
     Library.register_item("radar_settings", "Radar Settings", _CATEGORY,
                           icon="settings", object_type="empty", factory=_make_settings,
                           description="FMCW sensor config + Simulate button (build your own scene)")
-    Library.register_item("radar_target", "Moving Target", _CATEGORY,
+    Library.register_item("radar_target", "Radar Target", _CATEGORY,
                           icon="box", object_type="mesh", factory=_make_target,
-                          description="A box target with a linear-velocity radar motion")
+                          description="A plain box mesh exported directly as a radar structure")
 
 
 register()

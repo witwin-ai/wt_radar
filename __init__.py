@@ -11,8 +11,8 @@ Importing this package (eager: no ``activationEvents``):
 No ``witwin.radar`` import happens at module load: the adapter maps lazy-import it
 inside their methods (its ``__init__`` eagerly initializes the mitsuba CUDA variant),
 so the plugin still registers its schema-only components on a machine without the
-radar solver installed. The shared base layer (``witwin_server.platform_bridge`` +
-the unified ``EMMaterial``/``PlatformGeometry``/``StructureMeta`` components) is in
+radar solver installed. The shared base layer (``witwin_server.features.platform.bridge`` +
+the unified ``Material``/``PlatformGeometry``/``StructureMeta`` components) is in
 core and frozen; this plugin only reads/writes it.
 
 Radar is unlike maxwell/channel in two ways the round trip must respect:
@@ -21,7 +21,7 @@ Radar is unlike maxwell/channel in two ways the round trip must respect:
   * dynamics are a **separate acyclic motion graph** (``scene._structure_motions``),
     never the studio ``Transform`` parent tree.
 """
-from witwin_server.handlers.platform_scene import PlatformSceneHandler
+from witwin_server.features.platform.scene_handlers import PlatformSceneHandler
 
 from . import components  # noqa: F401  (side-effect: registers radar components)
 from . import library_items  # noqa: F401  (side-effect: registers radar library prefabs)

@@ -7,8 +7,9 @@ non-SI unit conventions) and every structure (geometry + scalar material + bsdf/
 metadata).
 """
 import witwin.radar as wr
+from witwin_server import SceneObject
 
-from _helpers import assert_radar_config_equal, assert_structures_equal
+from _helpers import assert_radar_config_equal, assert_structures_equal, approx
 
 _CONFIG = {
     "num_tx": 3, "num_rx": 4,
@@ -64,6 +65,51 @@ def test_structures_round_trip(adapter):
     scene, config = _build_pair()
     rebuilt_scene, rebuilt_config = adapter.to_platform(adapter.to_studio((scene, config)))
     assert_structures_equal(scene.structures, rebuilt_scene.structures)
+
+
+def test_imported_structures_are_regular_meshes(adapter):
+    studio = adapter.to_studio(_build_pair())
+
+    targets = [obj for obj in studio.objects.values() if obj.name in {"wall", "car", "ball"}]
+
+    assert len(targets) == 3
+    for obj in targets:
+        mesh = obj.get_component("Mesh")
+        assert mesh is not None and not mesh.is_empty
+        assert obj.get_component("PlatformGeometry") is None
+        assert obj.get_component("StructureMeta") is None
+        assert obj.get_component("RadarStructureMeta") is None
+
+
+def test_library_target_is_plain_mesh_without_radar_sidecars(wtr):
+    target = wtr.library_items._target_object()
+
+    mesh = target.get_component("Mesh")
+    assert mesh is not None and not mesh.is_empty
+    assert target.get_component("RadarStructureMeta") is None
+    assert target.get_component("RadarMotion") is None
+
+
+def test_plain_mesh_exports_as_radar_structure(adapter):
+    _, config = _build_pair()
+    studio = adapter.to_studio((wr.Scene(device="cpu"), config))
+    cube = SceneObject(name="plain target", mesh_type="Cube")
+    cube.get_component("Transform").position = [0.5, 0.0, -1.0]
+    cube.get_component("Transform").scale = [0.2, 0.4, 0.6]
+    cube.get_component("Material").eps_r = 7.0
+    studio.add_object(cube)
+
+    rebuilt_scene, _ = adapter.to_platform(studio)
+
+    assert len(rebuilt_scene.structures) == 1
+    target = rebuilt_scene.structures[0]
+    assert target.name == "plain target"
+    assert str(target.geometry.kind) == "mesh"
+    assert approx(target.material.eps_r, 7.0)
+    expected_bounds = ((0.4, 0.6), (-0.2, 0.2), (-1.3, -0.7))
+    for got_axis, expected_axis in zip(target.geometry.bounds_world, expected_bounds):
+        assert approx(got_axis[0], expected_axis[0])
+        assert approx(got_axis[1], expected_axis[1])
 
 
 def test_metadata_round_trip(adapter):

@@ -47,18 +47,18 @@ def _backends():
 
 def _solve_via_adapter(adapter, backend):
     studio = adapter.to_studio((_scene("cpu"), wr.RadarConfig.from_dict(_CONFIG)))
-    sensor = studio_settings(studio).get_component("RadarSensor")
-    sensor.backend = backend
-    sensor.device = "cpu" if backend == "pytorch" else "cuda"
+    radar = studio_settings(studio).get_component("Radar")
+    radar.backend = backend
+    radar.device = "cpu" if backend == "pytorch" else "cuda"
     return SolveRunner.run(
         studio,
-        sensor=SensorSpec.from_component(sensor),
+        sensor=SensorSpec.from_component(radar),
         tracer=TracerSpec(resolution=_RESOLUTION),
         motion_sampling="per_chirp", t0=0.0)
 
 
 def studio_settings(studio):
-    return next(o for o in studio.objects.values() if o.get_component("RadarConfig") is not None)
+    return next(o for o in studio.objects.values() if o.get_component("Radar") is not None)
 
 
 @pytest.mark.gpu
@@ -109,6 +109,52 @@ def test_music_image(wtr, cuda_ready):
     assert img.shape == (48, 48)
 
 
+def test_sensor_pose_follows_transform(adapter):
+    """The SensorSpec position/up come from the owner Transform, not from a separate field."""
+    studio = adapter.to_studio((_scene("cpu"), wr.RadarConfig.from_dict(_CONFIG)))
+    settings = studio_settings(studio)
+    transform = settings.get_component("Transform")
+    transform.position = [1.5, -2.0, 0.5]
+    transform.rotation = [0.0, 0.0, 0.0]   # identity -> forward is local -Z, up is +Y
+
+    spec = SensorSpec.from_component(settings.get_component("Radar"))
+
+    assert spec.position == pytest.approx([1.5, -2.0, 0.5])
+    assert spec.up == pytest.approx([0.0, 1.0, 0.0], abs=1e-6)
+    # target = position + forward; identity rotation -> forward = (0, 0, -1).
+    assert spec.target == pytest.approx([1.5, -2.0, -0.5], abs=1e-6)
+
+
+def test_built_radar_tx_pos_follows_transform(adapter):
+    """Moving the Transform shifts the wr.Radar's tx_pos / rx_pos in world coords.
+
+    This catches the case where SensorSpec is right but the value never reaches the
+    platform: `build_radar(config, spec)` constructs a real wr.Radar from the spec,
+    which recomputes tx_pos = world_from_local_points(tx_loc). The resulting tx_pos
+    is what compute_total_path_lengths uses to drive the simulated signal, so this
+    is the closest pose-side check we can run on CPU (no CUDA needed).
+    """
+    studio = adapter.to_studio((_scene("cpu"), wr.RadarConfig.from_dict(_CONFIG)))
+    settings = studio_settings(studio)
+    radar_comp = settings.get_component("Radar")
+    radar_comp.backend = "pytorch"  # CPU-capable; we only inspect pose, not solve
+    radar_comp.device = "cpu"
+
+    settings.get_component("Transform").position = [10.0, 0.0, 0.0]
+    radar_a = SolveRunner.build_radar(
+        wr.RadarConfig.from_dict(_CONFIG), SensorSpec.from_component(radar_comp))
+
+    settings.get_component("Transform").position = [-7.0, 0.0, 0.0]
+    radar_b = SolveRunner.build_radar(
+        wr.RadarConfig.from_dict(_CONFIG), SensorSpec.from_component(radar_comp))
+
+    assert radar_a.position.tolist() == pytest.approx([10.0, 0.0, 0.0])
+    assert radar_b.position.tolist() == pytest.approx([-7.0, 0.0, 0.0])
+    # tx_pos[0] is antenna 0 at local (0,0,0) -> equals radar position in world.
+    assert radar_a.tx_pos[0].tolist() == pytest.approx([10.0, 0.0, 0.0], abs=1e-4)
+    assert radar_b.tx_pos[0].tolist() == pytest.approx([-7.0, 0.0, 0.0], abs=1e-4)
+
+
 @pytest.mark.gpu
 def test_library_demo_round_trips_and_solves(wtr, adapter, cuda_ready):
     # The "Radar (Demo)" prefab: a settings object + a moving target that solves.
@@ -116,7 +162,7 @@ def test_library_demo_round_trips_and_solves(wtr, adapter, cuda_ready):
 
     from wt_radar.library_items import _settings_object, _target_object
 
-    studio = Scene(kind="local")
+    studio = Scene()
     studio.begin_batch()
     studio.add_object(_settings_object())
     studio.add_object(_target_object())
@@ -124,9 +170,9 @@ def test_library_demo_round_trips_and_solves(wtr, adapter, cuda_ready):
 
     scene, config = adapter.to_platform(studio)
     assert len(scene.structures) == 1 and config.num_tx == 3
-    sensor = studio_settings(studio).get_component("RadarSensor")
-    sensor.backend = "dirichlet"
-    result = SolveRunner.run(studio, sensor=SensorSpec.from_component(sensor),
+    radar = studio_settings(studio).get_component("Radar")
+    radar.backend = "dirichlet"
+    result = SolveRunner.run(studio, sensor=SensorSpec.from_component(radar),
                              tracer=TracerSpec(resolution=_RESOLUTION),
                              motion_sampling="per_chirp", t0=0.0)
     assert tuple(result.signal.shape) == _SHAPE

@@ -27,7 +27,7 @@ _CONFIG = {
 
 def _settings_in_scene():
     settings = ConfigMap.settings_to_studio(wr.RadarConfig.from_dict(_CONFIG))
-    studio = Scene(kind="local")
+    studio = Scene()
     studio.begin_batch()
     studio.add_object(settings)
     studio.end_batch()
@@ -46,13 +46,13 @@ def test_pointcloud_timeline_matches_direct(wtr, cuda_ready, tmp_path):
     np.savez(path, positions=positions)
 
     settings = _settings_in_scene()
-    timeline = settings.get_component("RadarTimeline")
-    timeline.frame_rate = 10.0
-    timeline.source = "pointcloud_sequence"
-    timeline.pointcloud_path = str(path)
-    timeline.velocity_corrected = False
-    timeline.generate()
-    frames = timeline._frames
+    radar = settings.get_component("Radar")
+    radar.frame_rate = 10.0
+    radar.timeline_source = "pointcloud_sequence"
+    radar.pointcloud_path = str(path)
+    radar.velocity_corrected = False
+    radar.generate_timeline()
+    frames = radar._frames
     assert frames is not None and frames.shape[1:] == (3, 4, 128, 256) and frames.shape[0] >= 1
 
     direct_tl = wr.Timeline(frame_rate=10.0, device="cuda")
@@ -68,17 +68,16 @@ def test_frame_slider_pushes_to_result(wtr, cuda_ready, tmp_path):
     path = tmp_path / "seq.npz"
     np.savez(path, positions=_pointcloud_seq())
     settings = _settings_in_scene()
-    timeline = settings.get_component("RadarTimeline")
-    timeline.frame_rate = 10.0
-    timeline.pointcloud_path = str(path)
-    timeline.velocity_corrected = False
-    timeline.generate()
+    radar = settings.get_component("Radar")
+    radar.frame_rate = 10.0
+    radar.pointcloud_path = str(path)
+    radar.velocity_corrected = False
+    radar.generate_timeline()
 
-    timeline.frame_index = 1
-    timeline.show_frame()
-    result = settings.get_component("RadarResult")
-    assert result._signal is not None
-    assert torch.equal(result._signal, timeline._frames[1])
+    radar.frame_index = 1
+    radar.show_frame()
+    assert radar._signal is not None
+    assert torch.equal(radar._signal, radar._frames[1])
 
 
 @pytest.mark.gpu
@@ -87,8 +86,8 @@ def test_motion_source_requires_human(wtr, cuda_ready, tmp_path):
     np.savez(path, pose=np.zeros((1, 72), dtype=np.float32), shape=np.zeros(10, dtype=np.float32),
              root_translation=np.zeros((1, 3), dtype=np.float32))
     settings = _settings_in_scene()
-    timeline = settings.get_component("RadarTimeline")
-    timeline.source = "motion"
-    timeline.motion_path = str(path)
+    radar = settings.get_component("Radar")
+    radar.timeline_source = "motion"
+    radar.motion_path = str(path)
     with pytest.raises(KeyError):
-        timeline.generate()
+        radar.generate_timeline()

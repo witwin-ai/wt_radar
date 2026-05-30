@@ -1,7 +1,9 @@
 """Shared round-trip assertion helpers for the wt-radar test suite."""
 from typing import Any, Optional
 
-from witwin_server.platform_bridge import GeometryMap
+import numpy as np
+
+from witwin_server.features.platform.bridge import GeometryMap
 
 # Combined abs+rel tolerance: carrier/slope values are large (e.g. fc=77e9) and may pass
 # through float32 component storage, so a pure absolute tolerance is too strict for them.
@@ -36,10 +38,30 @@ def _params_equal(a: dict, b: dict) -> bool:
 def assert_geometry_equal(g1: Any, g2: Any) -> None:
     """Assert two platform geometries match (kind + params + position + rotation)."""
     a, b = GeometryMap.to_studio(g1), GeometryMap.to_studio(g2)
+    if a.kind != b.kind:
+        assert_bounds_equal(g1, g2)
+        return
     assert a.kind == b.kind, f"geometry kind {a.kind} != {b.kind}"
     assert _params_equal(a.params, b.params), f"geometry params {a.params} != {b.params}"
     assert all(approx(x, y) for x, y in zip(a.position, b.position)), "geometry position"
     assert all(approx(x, y) for x, y in zip(a.rotation_quat, b.rotation_quat)), "geometry rotation"
+
+
+def assert_bounds_equal(g1: Any, g2: Any) -> None:
+    """Assert two geometries occupy the same world-space axis-aligned bounds."""
+    for axis, (bounds_a, bounds_b) in enumerate(zip(_bounds_world(g1), _bounds_world(g2))):
+        assert approx(bounds_a[0], bounds_b[0]), f"bounds axis {axis} min"
+        assert approx(bounds_a[1], bounds_b[1]), f"bounds axis {axis} max"
+
+
+def _bounds_world(geometry: Any) -> tuple:
+    if hasattr(geometry, "bounds_world"):
+        return geometry.bounds_world
+    vertices, _ = geometry.to_mesh()
+    if hasattr(vertices, "detach"):
+        vertices = vertices.detach().cpu().numpy()
+    world = np.asarray(vertices, dtype=np.float64).reshape(-1, 3)
+    return tuple((float(world[:, axis].min()), float(world[:, axis].max())) for axis in range(3))
 
 
 def assert_material_scalar_equal(m1: Any, m2: Any) -> None:

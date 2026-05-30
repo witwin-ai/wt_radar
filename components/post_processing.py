@@ -9,7 +9,7 @@ subclass.
 """
 from typing import Any
 
-from witwin_server.components import (
+from witwin_server.core.components import (
     Component,
     bool_field,
     component,

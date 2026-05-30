@@ -11,7 +11,7 @@ Only structures that actually move carry this component; the adapter adds it on
 ``to_platform`` via ``scene.add_structure_motion`` (which validates parent-exists +
 acyclicity).
 """
-from witwin_server.components import (
+from witwin_server.core.components import (
     Component,
     bool_field,
     component,

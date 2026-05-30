@@ -1,41 +1,22 @@
 """Radar scene components (auto-registered via their ``@component`` decorators).
 
-Importing this package registers every radar component with the core
-``ComponentRegistry``. The base layer's shared components (PlatformGeometry /
-EMMaterial / StructureMeta) stay in core; these are the radar-specific additions.
+The unified ``Radar`` component carries every settings-level radar field
+(FMCW config + sensor pose + tracer + sub-configs + solve + timeline) under
+foldout groups; optional motion and the polymorphic post-processor hierarchy stay
+separate because they live on other scene objects.
 """
-from .config import RadarConfigComponent
 from .motion import RadarMotionComponent
 from .post_processing import (
     PointCloudProcessorComponent,
     RadarPostProcessorComponent,
     RangeDopplerProcessorComponent,
 )
-from .result import RadarResultComponent
-from .sensor import RadarSensorComponent
-from .structure_meta import RadarStructureMetaComponent
-from .subconfigs import (
-    RadarAntennaPatternComponent,
-    RadarNoiseModelComponent,
-    RadarPolarizationComponent,
-    RadarReceiverChainComponent,
-)
-from .timeline import RadarTimelineComponent
-from .tracer import RadarTracerComponent
+from .radar import RadarComponent
 
 __all__ = [
-    "RadarConfigComponent",
+    "RadarComponent",
     "RadarMotionComponent",
     "RadarPostProcessorComponent",
     "RangeDopplerProcessorComponent",
     "PointCloudProcessorComponent",
-    "RadarResultComponent",
-    "RadarSensorComponent",
-    "RadarStructureMetaComponent",
-    "RadarTimelineComponent",
-    "RadarTracerComponent",
-    "RadarAntennaPatternComponent",
-    "RadarNoiseModelComponent",
-    "RadarPolarizationComponent",
-    "RadarReceiverChainComponent",
 ]

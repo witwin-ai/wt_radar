@@ -15,12 +15,22 @@ from typing import Any, List, Optional, Tuple
 
 import numpy as np
 
-from .common import num, vec
+from witwin_server.utils.logging import get_logger
+
+from .common import num
+
+logger = get_logger("RadarSolve")
 
 
 @dataclass
 class SensorSpec:
-    """Radar pose + backend read off the RadarSensor component (for ``Radar(...)``)."""
+    """Radar pose + backend for ``Radar(...)``.
+
+    The pose (position / target / up) is derived from the owner SceneObject's
+    ``Transform`` so the simulated radar follows the viewport gizmo: the radar sits
+    at the Transform's world position, looks along the rotated local -Z (matching the
+    cone gizmo), and the up vector is the rotated local +Y.
+    """
 
     position: List[float]
     target: Optional[List[float]]
@@ -31,21 +41,55 @@ class SensorSpec:
     device: str
 
     @classmethod
-    def from_component(cls, comp: Any) -> "SensorSpec":
+    def from_component(cls, radar: Any) -> "SensorSpec":
+        position, target, up = _world_pose(radar.owner)
         return cls(
-            position=vec(comp.position),
-            target=vec(comp.target) if bool(comp.use_target) else None,
-            up=vec(comp.up),
-            fov=num(comp.fov),
-            backend=str(comp.backend),
-            pad_factor=int(comp.pad_factor),
-            device=str(comp.device),
+            position=position,
+            target=target,
+            up=up,
+            fov=num(radar.fov),
+            backend=str(radar.backend),
+            pad_factor=int(radar.pad_factor),
+            device=str(radar.device),
         )
+
+
+def _world_pose(obj: Any) -> tuple:
+    """World position + look-at target + up read off the owner's Transform.
+
+    Returns ``(position, target, up)`` in world coordinates: position is the
+    Transform's world translation; target is ``position + R @ (0,0,-1)`` (looking
+    down the rotated local -Z, matching the cone gizmo's local -Z direction); up is
+    the rotated local +Y. Both direction vectors are normalized so a Transform with
+    non-uniform scale still produces a unit look-at axis.
+    """
+    from witwin_server.utils.mitsuba_utils import get_world_transform
+
+    matrix = np.asarray(get_world_transform(obj), dtype=np.float64)
+    position = matrix[:3, 3].tolist()
+    rotation = matrix[:3, :3]
+    forward = rotation @ np.array([0.0, 0.0, -1.0])
+    upvec = rotation @ np.array([0.0, 1.0, 0.0])
+    forward = _normalize(forward, fallback=(0.0, 0.0, -1.0))
+    upvec = _normalize(upvec, fallback=(0.0, 1.0, 0.0))
+    target = [position[i] + forward[i] for i in range(3)]
+    obj_name = getattr(obj, "name", "?")
+    logger.info(
+        f"_world_pose[{obj_name}]: position={[round(p, 4) for p in position]} "
+        f"forward={[round(f, 4) for f in forward]} up={[round(u, 4) for u in upvec]}")
+    return position, target, list(upvec)
+
+
+def _normalize(vector: np.ndarray, *, fallback: tuple) -> tuple:
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1e-12:
+        return fallback
+    return tuple((vector / norm).tolist())
 
 
 @dataclass
 class TracerSpec:
-    """Ray-tracing parameters read off the RadarTracer component (for ``radar.simulate``)."""
+    """Ray-tracing parameters read off the unified Radar component (for ``radar.simulate``)."""
 
     resolution: int = 128
     epsilon_r: float = 5.0
@@ -55,16 +99,16 @@ class TracerSpec:
     ray_batch_size: int = 65536
 
     @classmethod
-    def from_component(cls, comp: Any) -> "TracerSpec":
-        if comp is None:
+    def from_component(cls, radar: Any) -> "TracerSpec":
+        if radar is None:
             return cls()
         return cls(
-            resolution=int(comp.resolution),
-            epsilon_r=num(comp.epsilon_r),
-            sampling=str(comp.sampling),
-            multipath=bool(comp.multipath),
-            max_reflections=int(comp.max_reflections),
-            ray_batch_size=int(comp.ray_batch_size),
+            resolution=int(radar.resolution),
+            epsilon_r=num(radar.epsilon_r),
+            sampling=str(radar.sampling),
+            multipath=bool(radar.multipath),
+            max_reflections=int(radar.max_reflections),
+            ray_batch_size=int(radar.ray_batch_size),
         )
 
 
@@ -100,12 +144,22 @@ class SolveRunner:
 
         scene_device = "cuda" if torch.cuda.is_available() else "cpu"
         scene, config = RadarAdapter().to_platform(studio_scene, device=scene_device)
+        logger.info(
+            f"SolveRunner.run: scene_device={scene_device}, "
+            f"{len(scene.structures)} structures, tracer={tracer.sampling}@{tracer.resolution}")
         radar = SolveRunner.build_radar(config, sensor)
+        logger.info(
+            f"  wr.Radar built: position={radar.position.tolist()} "
+            f"target={radar.target.tolist()} tx_pos[0]={radar.tx_pos[0].tolist()}")
         signal = radar.simulate(
             scene, resolution=tracer.resolution, epsilon_r=tracer.epsilon_r,
             sampling=tracer.sampling, multipath=tracer.multipath,
             max_reflections=tracer.max_reflections, ray_batch_size=tracer.ray_batch_size,
             t0=t0, motion_sampling=motion_sampling)
+        sig_abs = signal.detach().cpu().abs()
+        logger.info(
+            f"  radar.simulate done: shape={tuple(signal.shape)} "
+            f"mean|sig|={sig_abs.mean().item():.6e} max|sig|={sig_abs.max().item():.6e}")
         return SolveResult(radar=radar, signal=signal)
 
     @staticmethod

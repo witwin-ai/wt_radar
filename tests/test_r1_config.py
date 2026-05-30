@@ -105,7 +105,7 @@ def test_derived_matches_constructed_radar(config_map):
     settings = config_map.settings_to_studio(config)
     rebuilt = config_map.build_config(settings)
     radar = wr.Radar(rebuilt, backend="pytorch", device="cpu")
-    derived = Derived.compute(settings.get_component("RadarConfig"))
+    derived = Derived.compute(settings.get_component("Radar"))
     assert approx(radar.range_resolution, derived["range_resolution_m"])
     assert approx(radar.max_range, derived["max_range_m"])
     assert approx(radar.doppler_resolution, derived["doppler_resolution_mps"])
@@ -116,27 +116,28 @@ def test_derived_matches_constructed_radar(config_map):
 
 def test_loc_count_validation(config_map):
     settings = config_map.settings_to_studio(_config())
-    settings.get_component("RadarConfig").tx_loc = [[0, 0, 0], [4, 0, 0]]  # 2 != num_tx (3)
+    settings.get_component("Radar").tx_loc = [[0, 0, 0], [4, 0, 0]]  # 2 != num_tx (3)
     with pytest.raises(ValueError):
         config_map.build_config(settings)
 
 
 def test_adc_quantization_exclusive(config_map):
     settings = config_map.settings_to_studio(_config())
-    settings.get_component("RadarNoiseModel").enable_quantization = True
-    settings.get_component("RadarReceiverChain").enable_adc = True
+    radar = settings.get_component("Radar")
+    radar.enable_quantization = True
+    radar.enable_adc = True
     with pytest.raises(ValueError):
         config_map.build_config(settings)
 
 
 def test_monotonic_antenna_angles(config_map):
     settings = config_map.settings_to_studio(_config())
-    antenna = settings.get_component("RadarAntennaPattern")
-    antenna.use_default = False
-    antenna.pattern_kind = "separable"
-    antenna.x_angles_deg = [10.0, 5.0]  # not strictly increasing
-    antenna.y_angles_deg = [-90.0, 90.0]
-    antenna.x_values = [1.0, 1.0]
-    antenna.y_values = [1.0, 1.0]
+    radar = settings.get_component("Radar")
+    radar.use_default = False
+    radar.pattern_kind = "separable"
+    radar.x_angles_deg = [10.0, 5.0]  # not strictly increasing
+    radar.y_angles_deg = [-90.0, 90.0]
+    radar.x_values = [1.0, 1.0]
+    radar.y_values = [1.0, 1.0]
     with pytest.raises(ValueError):
         config_map.build_config(settings)

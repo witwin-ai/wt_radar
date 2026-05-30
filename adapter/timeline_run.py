@@ -1,9 +1,10 @@
 """Multi-frame timeline generation (master §5.2) -> ``witwin.radar.Timeline``.
 
-Builds a ``Timeline`` from the ``RadarTimeline`` component's source descriptor (a point
-cloud sequence file, or an SMPL motion file rendered against the scene) and generates the
-MIMO frame stack ``(num_radar_frames, TX, RX, chirps, ADC)``. Keyframe tensors are large
-runtime/result state — the editor stores only the source path, never baked keyframes.
+Builds a ``Timeline`` from the unified Radar component's timeline-source descriptor (a
+point cloud sequence file, or an SMPL motion file rendered against the scene) and
+generates the MIMO frame stack ``(num_radar_frames, TX, RX, chirps, ADC)``. Keyframe
+tensors are large runtime/result state — the editor stores only the source path, never
+baked keyframes.
 
 The point-cloud-sequence source needs no ray tracing (the points drive ``radar.mimo``
 directly). The motion source renders SMPL keyframes through a ``Tracer`` and therefore
@@ -34,7 +35,7 @@ class TimelineRunner:
         radar = SolveRunner.build_radar(config, sensor)
 
         timeline = wr.Timeline(frame_rate=num(comp.frame_rate), device=device)
-        if str(comp.source) == "pointcloud_sequence":
+        if str(comp.timeline_source) == "pointcloud_sequence":
             positions, intensities = TimelineRunner._load_pointclouds(str(comp.pointcloud_path), device)
             timeline.add_pointcloud_sequence(positions, intensities)
         else:

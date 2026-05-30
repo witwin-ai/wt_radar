@@ -33,7 +33,7 @@ def _studio(adapter):
 
 
 def _settings(studio):
-    return next(o for o in studio.objects.values() if o.get_component("RadarConfig") is not None)
+    return next(o for o in studio.objects.values() if o.get_component("Radar") is not None)
 
 
 @pytest.mark.gpu
@@ -46,10 +46,10 @@ def test_post_processor_runs_after_solve(adapter, cuda_ready):
     proc_obj.add_component(RangeDopplerProcessorComponent())
     studio.add_object(proc_obj)
 
-    result = settings.get_component("RadarResult")
-    result.post_processors = [{"object_id": proc_obj.id, "component_type": "RangeDopplerProcessor"}]
-    settings.get_component("RadarSensor").backend = "dirichlet"
-    result.simulate()
+    radar = settings.get_component("Radar")
+    radar.post_processors = [{"object_id": proc_obj.id, "component_type": "RangeDopplerProcessor"}]
+    radar.backend = "dirichlet"
+    radar.simulate()
 
     proc = proc_obj.get_component("RangeDopplerProcessor")
     assert proc.result_figure._data  # imshow populated the processor's figure
@@ -58,7 +58,7 @@ def test_post_processor_runs_after_solve(adapter, cuda_ready):
 @pytest.mark.gpu
 def test_simulate_group(adapter, cuda_ready):
     studio = _studio(adapter)
-    base = SensorSpec.from_component(_settings(studio).get_component("RadarSensor"))
+    base = SensorSpec.from_component(_settings(studio).get_component("Radar"))
     sensors = {
         "front": dataclasses.replace(base, position=[0.0, 0.0, 0.0]),
         "side": dataclasses.replace(base, position=[1.0, 0.0, 0.0]),

@@ -41,7 +41,7 @@ class RadarAdapter:
     def to_studio(self, obj: Any) -> Scene:
         """Translate a radar ``(Scene, RadarConfig)`` pair into a studio ``Scene`` (batched)."""
         platform_scene, config = self._split(obj)
-        studio = Scene(kind="local")
+        studio = Scene()
         studio.begin_batch()
         studio.add_object(ConfigMap.settings_to_studio(config))
         for structure in platform_scene.structures:
@@ -78,7 +78,10 @@ class RadarAdapter:
         for obj in studio_scene.objects.values():
             if obj is settings:
                 continue
-            if obj.get_component("PlatformGeometry") is None:
+            if (
+                obj.get_component("PlatformGeometry") is None
+                and obj.get_component("Mesh") is None
+            ):
                 continue
             structure = RadarStructureMap.to_platform(obj)
             if structure is not None:

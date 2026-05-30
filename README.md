@@ -15,6 +15,9 @@ same repo.
 - **The sensor lives outside the scene.** The load/export contract carries a
   **`(Scene, RadarConfig)` pair**, unlike maxwell/channel which carry a single scene.
   `RadarConfig` maps to a singleton **Radar Settings** object.
+- **Mesh-first scene input.** Like channel/maxwell, the live solver walks ordinary
+  visible Studio `Mesh` objects and exports them directly as radar structures. Users do
+  not need radar-specific sidecar components for static targets.
 - **Two independent hierarchies.** The studio `Transform` parent tree is for static
   pose; the radar **motion graph** (`scene._structure_motions`, a separate acyclic
   rigid-motion graph) is for time-parameterized dynamics. They are never conflated.
@@ -27,9 +30,9 @@ same repo.
 
 ```
 adapter/        RadarAdapter (detect/to_studio/to_platform) + config/structure/motion/solve maps
-components/      RadarConfig, RadarStructureMeta, RadarMotion, RadarSensor, sub-configs, RadarResult
+components/      Unified Radar, optional RadarMotion, post-processors
 examples/        radar (Scene, RadarConfig) factories for the load demo
-library_items.py drag-to-create prefabs (Radar starter, sensor, moving target)
+library_items.py drag-to-create prefabs (Radar demo, settings, plain mesh target)
 tests/           per-phase round-trip + live-solve suites
 ```
 
@@ -42,7 +45,7 @@ radar-side SMPL code; radar's only human-aware feature is the optional `RadarTim
 
 | Phase | Scope |
 |-------|-------|
-| R0 | Scaffolding + structures + `(Scene, RadarConfig)` contract + `RadarStructureMeta` |
+| R0 | Scaffolding + structures + `(Scene, RadarConfig)` contract |
 | R1 | Full sensor config: antenna pattern / noise / polarization / receiver chain + sensor pose/backend + validation |
 | R2 | Dynamics (`RadarMotion` motion graph + parenting/acyclicity); human geometry is wt-human's |
 | R3 | Tracer + 3 solver backends + single-frame signal viz (range-doppler / point cloud / MUSIC / CFAR) + library items |
