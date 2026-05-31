@@ -21,6 +21,9 @@ is hidden from the UI; tests / scripts can still override ``backend`` / ``device
 ``pad_factor`` on the component directly.
 """
 from dataclasses import asdict
+import json
+import threading
+import time
 
 import numpy as np
 
@@ -91,6 +94,13 @@ class RadarComponent(Component):
     _solver_result_handle = ""
     _solver_run_id = ""
     _signal_stream_id = ""
+    _live_thread = None
+    _live_stop_event = None
+    _live_pause_event = None
+    _live_lock = None
+    _live_last_signature = None
+    _live_started_at = 0.0
+    _live_generation = 0
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna"))
@@ -238,6 +248,17 @@ class RadarComponent(Component):
     motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
                                    group=_SOLVE, description="Re-trace per chirp or per frame")
     t0 = float_field(0.0, group=_SOLVE, description="Solve start time (s)")
+    stream_max_fps = float_field(2.0, min=0.1, max=30.0, group=_SOLVE,
+                                 description="Maximum realtime stream solves per second")
+    stream_channels = string_field("raw,rd,pc", group=_SOLVE,
+                                   description="Comma-separated live channels: raw, rd, pc")
+    stream_history_length = int_field(1, min=1, group=_SOLVE,
+                                      description="Stream history frames retained for reconnect")
+    stream_on_change_only = bool_field(True, group=_SOLVE,
+                                       description="Only re-solve when radar settings or scene transforms change")
+    stream_status = string_field("stopped", options=["stopped", "running", "paused", "error"],
+                                 enum_toggle=True, readonly=True, group=_SOLVE,
+                                 description="Realtime stream producer state")
     post_processors = list_field(component_field(component_type="RadarPostProcessor"), default=[],
                                  group=_SOLVE,
                                  description="Extra post-processor views run after each solve")
@@ -332,6 +353,64 @@ class RadarComponent(Component):
         Notifications.success("Radar", "Radar solve complete")
         logger.info("=== Simulate done ===")
         return "Solve complete"
+
+    @button(display_name="Start Stream", group=_SOLVE)
+    def start_stream(self):
+        """Start realtime solve + stream production."""
+        if self.scene is None or self.owner is None:
+            return "Radar must be attached to a scene"
+        self._ensure_live_state()
+        with self._live_lock:
+            if self._live_thread is not None and self._live_thread.is_alive():
+                if self._live_stop_event.is_set():
+                    return "Stream stopping"
+                self._live_pause_event.clear()
+                self.stream_status = "running"
+                self._update_stream_status("active")
+                return "Stream running"
+            self._live_generation += 1
+            generation = self._live_generation
+            self._live_stop_event.clear()
+            self._live_pause_event.clear()
+            self._live_started_at = time.monotonic()
+            self._live_last_signature = None
+            self.stream_status = "running"
+            self._open_signal_stream(self._stream_channel_descriptors(), status="active")
+            self._live_thread = threading.Thread(
+                target=self._live_loop,
+                args=(generation,),
+                name=f"RadarStream-{id(self):x}",
+                daemon=True,
+            )
+            self._live_thread.start()
+        return "Stream started"
+
+    @button(display_name="Pause Stream", group=_SOLVE)
+    def pause_stream(self):
+        """Pause realtime solve production without closing the stream."""
+        self._ensure_live_state()
+        self._live_pause_event.set()
+        self.stream_status = "paused"
+        self._update_stream_status("paused")
+        return "Stream paused"
+
+    @button(display_name="Stop Stream", group=_SOLVE)
+    def stop_stream(self):
+        """Stop realtime production and close the stream."""
+        self._ensure_live_state()
+        with self._live_lock:
+            self._live_generation += 1
+            self._live_stop_event.set()
+            self._live_pause_event.clear()
+            self.stream_status = "stopped"
+            if self._signal_stream_id:
+                try:
+                    api.streams.close(self._signal_stream_id, reason="stopped")
+                except Exception as exc:  # noqa: BLE001 - stop should be idempotent
+                    logger.debug(f"Radar stream close skipped: {exc}")
+            self.signal_stream = None
+            self._signal_stream_id = ""
+        return "Stream stopped"
 
     @button(display_name="Update View", group=_POSTPROC)
     def update_view(self):
@@ -577,34 +656,213 @@ class RadarComponent(Component):
         self._signal_stream_id = f"radar.{owner_id}.signal"
         return self._signal_stream_id
 
-    def _open_signal_stream(self, channels):
+    def _open_signal_stream(self, channels, *, status="active"):
         stream = api.streams.open(
             self._stream_id(),
             kind="radar.signal",
             owner=self._stream_owner(),
             label="Radar Signal",
-            retention={"mode": "latest"},
+            retention={"mode": "ring", "historyLength": int(self.stream_history_length)},
+            metadata={"mode": "live" if str(self.stream_status) == "running" else "solve"},
             channels=channels,
         )
-        self.signal_stream = stream.ref("rd")
+        if status != "active":
+            stream.update(status=status)
+        ref = stream.ref("rd")
+        ref["viewport"] = {
+            "enabled": True,
+            "channelId": "pc",
+            "kind": "points",
+            "maxFps": min(float(self.stream_max_fps), 10.0),
+            "maxPoints": 100000,
+            "pointSize": 0.05,
+            "color": "#30c0ff",
+        }
+        self.signal_stream = ref
         return stream
 
-    def _publish_signal_stream(self):
+    def _publish_signal_stream(self, channels=None):
         try:
-            channels = [
-                {"channelId": "raw", "dtype": "complex64", "shape": ["adc"],
-                 "semantic": "time_series", "label": "Raw IQ"},
-                {"channelId": "rd", "dtype": "float32", "shape": ["doppler", "range"],
-                 "semantic": "heatmap", "label": "Range-Doppler"},
-                {"channelId": "pc", "dtype": "float32", "shape": ["points", 6],
-                 "semantic": "pointcloud_xyz", "label": "Point cloud"},
-            ]
-            stream = self._open_signal_stream(channels)
-            self._publish_rd_stream(stream)
-            self._publish_pc_stream(stream)
-            self._publish_raw_stream(stream)
+            descriptors = self._stream_channel_descriptors()
+            stream = self._open_signal_stream(descriptors)
+            wanted = set(channels or self._selected_stream_channels(default=("raw", "rd", "pc")))
+            if "rd" in wanted:
+                self._publish_rd_stream(stream)
+            if "pc" in wanted:
+                self._publish_pc_stream(stream)
+            if "raw" in wanted:
+                self._publish_raw_stream(stream)
         except Exception as exc:  # noqa: BLE001 - stream output must not break solve preview
             logger.warning(f"Radar stream publish skipped: {exc}")
+
+    def _stream_channel_descriptors(self):
+        return [
+            {"channelId": "raw", "dtype": "complex64", "shape": ["adc"],
+             "semantic": "time_series", "label": "Raw IQ"},
+            {"channelId": "rd", "dtype": "float32", "shape": ["doppler", "range"],
+             "semantic": "heatmap", "label": "Range-Doppler"},
+            {"channelId": "pc", "dtype": "float32", "shape": ["points", 6],
+             "semantic": "pointcloud_xyz", "label": "Point cloud"},
+        ]
+
+    def _selected_stream_channels(self, default=("raw", "rd", "pc")):
+        allowed = {"raw", "rd", "pc"}
+        selected = {
+            part.strip().lower()
+            for part in str(self.stream_channels or "").split(",")
+            if part.strip()
+        }
+        selected = selected & allowed
+        return tuple(selected or default)
+
+    def _update_stream_status(self, status):
+        if not self._signal_stream_id:
+            return
+        try:
+            api.streams.open(
+                self._signal_stream_id,
+                kind="radar.signal",
+                owner=self._stream_owner(),
+                channels=self._stream_channel_descriptors(),
+            ).update(status=status)
+        except Exception as exc:  # noqa: BLE001 - status update is best effort
+            logger.debug(f"Radar stream status update skipped: {exc}")
+
+    def _ensure_live_state(self):
+        if self._live_lock is None:
+            self._live_lock = threading.RLock()
+        if self._live_stop_event is None:
+            self._live_stop_event = threading.Event()
+        if self._live_pause_event is None:
+            self._live_pause_event = threading.Event()
+
+    def _live_owner_active(self):
+        scene = self.scene
+        owner = getattr(self, "owner", None)
+        owner_id = getattr(owner, "id", None)
+        objects = getattr(scene, "objects", None)
+        return bool(scene is not None and owner is not None and owner_id and objects and objects.get(owner_id) is owner)
+
+    def _live_loop(self, generation):
+        self._ensure_live_state()
+        while self._live_generation_active(generation) and not self._live_stop_event.is_set():
+            if not self._live_owner_active():
+                self.stop_stream()
+                break
+            if self._live_pause_event.is_set():
+                time.sleep(0.05)
+                continue
+            interval = 1.0 / max(0.1, float(self.stream_max_fps))
+            started = time.monotonic()
+            signature = self._live_scene_signature()
+            should_solve = not bool(self.stream_on_change_only) or signature != self._live_last_signature
+            if should_solve:
+                ok = self._solve_once_for_stream(generation)
+                if not ok:
+                    self.stream_status = "error"
+                    self._update_stream_status("error")
+                    time.sleep(max(0.25, interval))
+                else:
+                    self._live_last_signature = signature
+            elapsed = time.monotonic() - started
+            time.sleep(max(0.01, interval - elapsed))
+
+    def _live_generation_active(self, generation):
+        return generation == self._live_generation
+
+    def _solve_once_for_stream(self, generation):
+        try:
+            if not self._live_generation_active(generation):
+                return True
+            if self._live_stop_event is not None and self._live_stop_event.is_set():
+                return True
+            spec = SensorSpec.from_component(self)
+            run = api.solvers.solve(
+                "witwin.radar.simulate",
+                scene=self.scene,
+                config=self._solver_config(spec, t0_override=self._live_t0()),
+            )
+            if not self._live_generation_active(generation):
+                return True
+            if run.status != "succeeded":
+                message = (run.error or {}).get("message") or "simulate failed"
+                self._mark_stream_error(message)
+                return False
+            handle = (run.outputs or {}).get("resultHandle")
+            if not handle:
+                self._mark_stream_error("Solver returned no result handle")
+                return False
+            self._solver_result_handle = str(handle)
+            self._solver_run_id = run.run_id
+            self._radar = None
+            self._signal = None
+            if not self._live_generation_active(generation):
+                return True
+            if self._live_stop_event is not None and self._live_stop_event.is_set():
+                return True
+            self.stream_status = "running"
+            self._update_stream_status("active")
+            self._publish_signal_stream(channels=self._selected_stream_channels())
+            return True
+        except Exception as exc:  # noqa: BLE001 - background thread must survive one failed frame
+            logger.warning(f"Radar live solve failed: {exc}")
+            self._mark_stream_error(str(exc))
+            return False
+
+    def _mark_stream_error(self, message):
+        if not self._signal_stream_id:
+            return
+        try:
+            api.streams.error(self._signal_stream_id, message)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"Radar stream error update skipped: {exc}")
+
+    def _live_t0(self):
+        if bool(self.stream_on_change_only):
+            return num(self.t0)
+        return num(self.t0) + max(0.0, time.monotonic() - float(self._live_started_at or time.monotonic()))
+
+    def _live_scene_signature(self):
+        scene = self.scene
+        items = [("radar", self._component_signature())]
+        if scene is not None:
+            for obj_id, obj in sorted(scene.objects.items()):
+                transform = obj.get_component("Transform")
+                if transform is None:
+                    continue
+                items.append((
+                    obj_id,
+                    self._signature_value(getattr(transform, "position", None)),
+                    self._signature_value(getattr(transform, "rotation", None)),
+                    self._signature_value(getattr(transform, "scale", None)),
+                    bool(getattr(obj, "visible", True)),
+                ))
+        return json.dumps(items, sort_keys=True, separators=(",", ":"))
+
+    def _component_signature(self):
+        ignored = {"signal_stream", "signal_figure", "stream_status"}
+        values = {}
+        for name in sorted(getattr(self, "_fields_meta", {})):
+            if name in ignored:
+                continue
+            values[name] = self._signature_value(getattr(self, name))
+        return values
+
+    @staticmethod
+    def _signature_value(value):
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        if isinstance(value, dict):
+            return {str(k): RadarComponent._signature_value(v) for k, v in sorted(value.items())}
+        if isinstance(value, (list, tuple)):
+            return [RadarComponent._signature_value(item) for item in value]
+        if isinstance(value, (float, np.floating)):
+            return round(float(value), 8)
+        if isinstance(value, (int, bool, str)) or value is None:
+            return value
+        return repr(value)
 
     def _publish_raw_stream(self, stream):
         if self._solver_result_handle:
@@ -725,12 +983,12 @@ class RadarComponent(Component):
             return max(0, int(self.rx_index))
         return max(0, min(int(self.rx_index), self._signal.shape[1] - 1))
 
-    def _solver_config(self, spec: SensorSpec) -> dict:
+    def _solver_config(self, spec: SensorSpec, *, t0_override=None) -> dict:
         return {
             "sensor": asdict(spec),
             "tracer": asdict(TracerSpec.from_component(self)),
             "motion_sampling": str(self.motion_sampling),
-            "t0": num(self.t0),
+            "t0": num(self.t0) if t0_override is None else num(t0_override),
         }
 
     def _query_result(self, op: str, params: dict):
