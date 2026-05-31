@@ -94,7 +94,7 @@ def range_doppler(ctx, result, params):
         result.signal,
         tx=tx,
         rx=rx,
-        static_clutter_removal=bool(params.get("static_clutter_removal", True)),
+        static_clutter_removal=bool(params.get("static_clutter_removal", False)),
     )
     rows = []
     cols = []
@@ -121,7 +121,7 @@ def point_cloud(ctx, result, params):
         result.radar,
         result.signal,
         detector=str(params.get("detector") or "cfar"),
-        static_clutter_removal=bool(params.get("static_clutter_removal", True)),
+        static_clutter_removal=bool(params.get("static_clutter_removal", False)),
         guard=tuple(int(v) for v in (params.get("guard") or (2, 4))),
         training=tuple(int(v) for v in (params.get("training") or (4, 8))),
         pfa=float(params.get("pfa") or 1e-3),

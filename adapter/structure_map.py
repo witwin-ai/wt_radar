@@ -39,6 +39,9 @@ class RadarStructureMap:
         import witwin.core as wc
 
         metadata = dict(base.metadata)
+        # The radar triangle sampler traces dynamic_meshes(); Studio-authored
+        # meshes still need to be visible to it even without a RadarMotion component.
+        metadata["dynamic"] = True
 
         return wc.Structure(
             base.geometry,

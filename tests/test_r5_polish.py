@@ -80,6 +80,16 @@ def test_post_processor_runs_after_solve(adapter, monkeypatch):
     assert proc.result_figure._data  # imshow populated the processor's figure
 
 
+def test_post_processors_keep_static_returns_visible_by_default():
+    from wt_radar.components.post_processing import (
+        PointCloudProcessorComponent,
+        RangeDopplerProcessorComponent,
+    )
+
+    assert bool(RangeDopplerProcessorComponent().static_clutter_removal) is False
+    assert bool(PointCloudProcessorComponent().static_clutter_removal) is False
+
+
 @pytest.mark.gpu
 def test_simulate_group(adapter, cuda_ready):
     studio = _studio(adapter)

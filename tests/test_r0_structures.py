@@ -5,7 +5,9 @@ Builds a radar ``Scene`` paired with a ``RadarConfig``, runs the pair through
 Studio-editable config, geometry, and scalar material fields.
 """
 import witwin.radar as wr
-from witwin_server import SceneObject
+import numpy as np
+from witwin_server import Scene, SceneObject
+from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
 
 from _helpers import assert_radar_config_equal, assert_structures_equal, approx
 
@@ -89,6 +91,19 @@ def test_library_target_is_plain_mesh_without_radar_sidecars(wtr):
     assert target.get_component("RadarMotion") is None
 
 
+def test_library_demo_target_is_plain_static_mesh(wtr):
+    class Ctx:
+        name = "Radar Demo"
+        scene = Scene()
+
+    settings = wtr.library_items._make_demo(Ctx)
+    targets = [obj for obj in Ctx.scene.objects.values() if obj.name.startswith("Radar Target")]
+
+    assert settings.get_component("Radar") is not None
+    assert len(targets) == 1
+    assert targets[0].get_component("RadarMotion") is None
+
+
 def test_plain_mesh_exports_as_radar_structure(adapter):
     _, config = _build_pair()
     studio = adapter.to_studio((wr.Scene(device="cpu"), config))
@@ -104,6 +119,7 @@ def test_plain_mesh_exports_as_radar_structure(adapter):
     target = rebuilt_scene.structures[0]
     assert target.name == "plain target"
     assert str(target.geometry.kind) == "mesh"
+    assert target.metadata.get("dynamic") is True
     assert approx(target.material.eps_r, 7.0)
     expected_bounds = ((0.4, 0.6), (-0.2, 0.2), (-1.3, -0.7))
     for got_axis, expected_axis in zip(target.geometry.bounds_world, expected_bounds):
@@ -111,13 +127,47 @@ def test_plain_mesh_exports_as_radar_structure(adapter):
         assert approx(got_axis[1], expected_axis[1])
 
 
-def test_radar_only_metadata_is_dropped(adapter):
+def test_scene_ref_preserves_in_memory_custom_mesh_for_solver(adapter):
+    _, config = _build_pair()
+    studio = adapter.to_studio((wr.Scene(device="cpu"), config))
+    custom = SceneObject(name="custom target", mesh_type="Custom")
+    custom.get_component("Mesh").set_mesh_data(
+        np.array([
+            [-0.25, -0.25, -1.25],
+            [0.25, -0.25, -1.25],
+            [0.25, 0.25, -1.25],
+            [-0.25, 0.25, -1.25],
+            [-0.25, -0.25, -0.75],
+            [0.25, -0.25, -0.75],
+            [0.25, 0.25, -0.75],
+            [-0.25, 0.25, -0.75],
+        ], dtype=np.float32),
+        np.array([
+            [0, 2, 1], [0, 3, 2],
+            [4, 5, 6], [4, 6, 7],
+            [0, 7, 3], [0, 4, 7],
+            [1, 2, 6], [1, 6, 5],
+            [3, 7, 6], [3, 6, 2],
+            [0, 1, 5], [0, 5, 4],
+        ], dtype=np.uint32),
+    )
+    studio.add_object(custom)
+
+    restored = load_scene_ref(make_scene_ref(studio))
+    rebuilt_scene, _ = adapter.to_platform(restored)
+
+    assert len(rebuilt_scene.structures) == 1
+    assert rebuilt_scene.structures[0].name == "custom target"
+    assert rebuilt_scene.structures[0].metadata.get("dynamic") is True
+
+
+def test_radar_only_bsdf_metadata_is_dropped_and_meshes_are_traceable(adapter):
     scene, config = _build_pair()
     rebuilt_scene, _ = adapter.to_platform(adapter.to_studio((scene, config)))
     by_name = {s.name: s for s in rebuilt_scene.structures}
-    assert "dynamic" not in by_name["car"].metadata
+    assert by_name["car"].metadata.get("dynamic") is True
     assert "bsdf" not in by_name["car"].metadata
-    assert "dynamic" not in by_name["wall"].metadata
+    assert by_name["wall"].metadata.get("dynamic") is True
     assert "bsdf" not in by_name["wall"].metadata
 
 

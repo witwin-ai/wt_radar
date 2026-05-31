@@ -41,7 +41,7 @@ class RangeDopplerProcessorComponent(RadarPostProcessorComponent):
 
     tx_index = int_field(0, min=0, description="TX index")
     rx_index = int_field(0, min=0, description="RX index")
-    static_clutter_removal = bool_field(True, description="Remove static clutter")
+    static_clutter_removal = bool_field(False, description="Remove static clutter")
 
     def process(self, radar: Any, signal: Any) -> None:
         tx = max(0, min(int(self.tx_index), signal.shape[0] - 1))
@@ -55,7 +55,7 @@ class RangeDopplerProcessorComponent(RadarPostProcessorComponent):
 class PointCloudProcessorComponent(RadarPostProcessorComponent):
     """Render a top-down (x vs z) point cloud."""
 
-    static_clutter_removal = bool_field(True, description="Remove static clutter")
+    static_clutter_removal = bool_field(False, description="Remove static clutter")
 
     def process(self, radar: Any, signal: Any) -> None:
         pc = SigProc.point_cloud(radar, signal, detector="cfar",

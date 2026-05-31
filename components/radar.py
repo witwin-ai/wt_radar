@@ -246,7 +246,7 @@ class RadarComponent(Component):
                         description="Which signal view to render")
     tx_index = int_field(0, min=0, group=_POSTPROC, description="TX index (raw / range-doppler)")
     rx_index = int_field(0, min=0, group=_POSTPROC, description="RX index (raw / range-doppler)")
-    static_clutter_removal = bool_field(True, group=_POSTPROC,
+    static_clutter_removal = bool_field(False, group=_POSTPROC,
                                         description="Remove static (zero-doppler) clutter")
     show_cfar = bool_field(False, group=_POSTPROC,
                            description="Overlay CFAR detections on the range-doppler map")
@@ -401,7 +401,7 @@ class RadarComponent(Component):
             payload = self._query_result("range_doppler", {
                 "tx": int(getattr(proc, "tx_index", 0)),
                 "rx": int(getattr(proc, "rx_index", 0)),
-                "static_clutter_removal": bool(getattr(proc, "static_clutter_removal", True)),
+                "static_clutter_removal": bool(getattr(proc, "static_clutter_removal", False)),
                 "show_cfar": False,
             })
             mag_db = np.asarray(payload["mag_db"], dtype=np.float32)
@@ -412,7 +412,7 @@ class RadarComponent(Component):
         if name == "PointCloudProcessorComponent":
             payload = self._query_result("point_cloud", {
                 "detector": "cfar",
-                "static_clutter_removal": bool(getattr(proc, "static_clutter_removal", True)),
+                "static_clutter_removal": bool(getattr(proc, "static_clutter_removal", False)),
                 "guard": [2, 4],
                 "training": [4, 8],
                 "pfa": 1e-3,

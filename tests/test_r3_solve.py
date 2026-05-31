@@ -166,6 +166,13 @@ def test_manifest_declares_rfc012_solver():
     assert solvers[0]["maxParallel"] == 1
 
 
+def test_radar_defaults_keep_static_returns_visible(adapter):
+    studio = adapter.to_studio((_scene("cpu"), wr.RadarConfig.from_dict(_CONFIG)))
+    radar = studio_settings(studio).get_component("Radar")
+
+    assert bool(radar.static_clutter_removal) is False
+
+
 def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
     import wt_radar.components.radar as radar_mod
 
@@ -227,6 +234,7 @@ def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
     assert fake.solve_kwargs["config"]["sensor"]["backend"] == "pytorch"
     assert fake.solve_kwargs["config"]["tracer"]["resolution"] == radar.resolution
     assert fake.queries[0][2] == "range_doppler"
+    assert fake.queries[0][3]["static_clutter_removal"] is False
     assert notifications["success"] == [("Radar", "Radar solve complete")]
     assert notifications["error"] == []
 
@@ -252,7 +260,7 @@ def test_show_frame_clears_solver_handle():
 
 @pytest.mark.gpu
 def test_library_demo_round_trips_and_solves(wtr, adapter, cuda_ready):
-    # The "Radar (Demo)" prefab: a settings object + a moving target that solves.
+    # The "Radar (Demo)" prefab: a settings object + a plain target that solves.
     from witwin_server import Scene
 
     from wt_radar.library_items import _settings_object, _target_object

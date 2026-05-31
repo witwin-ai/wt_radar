@@ -3,7 +3,7 @@
 Registers a ``Radar`` category with:
 
 - **Radar (Demo)** — a Radar Settings object (77 GHz FMCW defaults + sensor pose/backend
-  + tracer + the Simulate button) plus a moving box target, so dropping it in is
+  + tracer + the Simulate button) plus a plain static box target, so dropping it in is
   immediately simulable: press **Simulate** on the Radar Settings object to see the
   range-doppler / point-cloud views in-component.
 - **Radar Settings** — just the sensor singleton, to compose a custom scene.
