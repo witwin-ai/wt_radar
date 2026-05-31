@@ -8,9 +8,9 @@ polymorphic ``RadarPostProcessor`` hierarchy stay separate because they live on
 other scene objects.
 
 The grouping consolidates the old split: ``Configuration`` holds the FMCW core
-(frequency / power + ADC + chirp / frame), with ``Bins`` and ``Antenna`` kept
-separate; ``Tracer`` is the ray-tracer + sensor optic (fov); the four
-``Antenna Pattern / Noise / Polarization / Receiver`` foldouts are the optional
+(frequency / power + ADC + chirp / frame + FFT bins); ``Antenna`` holds the array
+geometry plus the antenna-pattern sub-config; ``Tracer`` is the ray-tracer + sensor
+optic (fov); the three ``Noise / Polarization / Receiver`` foldouts are the optional
 ``RadarConfig`` sub-configs; ``Solve`` runs the solve and ``Post Processing`` drives
 the in-component MIMO views + detector/CFAR; ``Timeline`` generates multi-frame sequences.
 
@@ -60,11 +60,9 @@ _CAT = "Simulation/Radar"
 _VIEWS = ["raw_signal", "range_doppler", "point_cloud", "music"]
 
 # Foldout group ids (also used in string `show_if`/`hide_if` lookups by field name).
-_CONFIG = "Configuration"   # FMCW core: frequency/power + ADC + chirp/frame
-_BINS = "Bins"
-_ANTENNA = "Antenna"
+_CONFIG = "Configuration"   # FMCW core: frequency/power + ADC + chirp/frame + FFT bins
+_ANTENNA = "Antenna"        # geometry + antenna pattern
 _TRACER = "Tracer"
-_PATTERN = "AntennaPattern"
 _NOISE = "Noise"
 _POLARIZATION = "Polarization"
 _RECEIVER = "Receiver"
@@ -93,10 +91,8 @@ class RadarComponent(Component):
     _solver_run_id = ""
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
-    define_group(foldout_group(_BINS, display_name="FFT Bins"))
-    define_group(foldout_group(_ANTENNA, display_name="Antenna Geometry"))
+    define_group(foldout_group(_ANTENNA, display_name="Antenna"))
     define_group(foldout_group(_TRACER, display_name="Ray Tracer"))
-    define_group(foldout_group(_PATTERN, display_name="Antenna Pattern", collapsed=True))
     define_group(foldout_group(_NOISE, display_name="Noise Model", collapsed=True))
     define_group(foldout_group(_POLARIZATION, display_name="Polarization", collapsed=True))
     define_group(foldout_group(_RECEIVER, display_name="Receiver Chain", collapsed=True))
@@ -127,9 +123,9 @@ class RadarComponent(Component):
     frame_per_second = float_field(10.0, min=0.0, group=_CONFIG, description="Frame rate (Hz)")
 
     # --- FFT bins (RadarConfig) ---------------------------------------------
-    num_doppler_bins = int_field(128, min=1, group=_BINS, description="Doppler FFT bins")
-    num_range_bins = int_field(256, min=1, group=_BINS, description="Range bins")
-    num_angle_bins = int_field(64, min=1, group=_BINS, description="Angle FFT bins")
+    num_doppler_bins = int_field(128, min=1, group=_CONFIG, description="Doppler FFT bins")
+    num_range_bins = int_field(256, min=1, group=_CONFIG, description="Range bins")
+    num_angle_bins = int_field(64, min=1, group=_CONFIG, description="Angle FFT bins")
 
     # --- antenna geometry (RadarConfig; half-wavelength units) --------------
     num_tx = int_field(3, min=1, group=_ANTENNA, description="Number of TX antennas (== len(tx_loc))")
@@ -163,20 +159,20 @@ class RadarComponent(Component):
     device = string_field("cuda", options=["cuda", "cpu"], hidden=True)
 
     # --- antenna pattern sub-config (RadarAntennaPattern) -------------------
-    use_default = bool_field(True, group=_PATTERN,
+    use_default = bool_field(True, group=_ANTENNA,
                              description="Use the default half-wave dipole pattern")
     pattern_kind = string_field("separable", options=["separable", "map"], enum_toggle=True,
-                                hide_if="use_default", group=_PATTERN,
+                                hide_if="use_default", group=_ANTENNA,
                                 description="Separable per-axis cuts or a 2D gain map")
-    x_angles_deg = list_field(float_field(0.0), default=[], hide_if="use_default", group=_PATTERN,
+    x_angles_deg = list_field(float_field(0.0), default=[], hide_if="use_default", group=_ANTENNA,
                               description="Azimuth angles (deg, strictly increasing, >=2)")
-    y_angles_deg = list_field(float_field(0.0), default=[], hide_if="use_default", group=_PATTERN,
+    y_angles_deg = list_field(float_field(0.0), default=[], hide_if="use_default", group=_ANTENNA,
                               description="Elevation angles (deg, strictly increasing, >=2)")
-    x_values = list_field(float_field(0.0), default=[], show_if=_SEPARABLE, group=_PATTERN,
+    x_values = list_field(float_field(0.0), default=[], show_if=_SEPARABLE, group=_ANTENNA,
                           description="Per-azimuth gain (>=0, len == x_angles)")
-    y_values = list_field(float_field(0.0), default=[], show_if=_SEPARABLE, group=_PATTERN,
+    y_values = list_field(float_field(0.0), default=[], show_if=_SEPARABLE, group=_ANTENNA,
                           description="Per-elevation gain (>=0, len == y_angles)")
-    values_2d_json = string_field("", widget="textarea", show_if=_MAP, group=_PATTERN,
+    values_2d_json = string_field("", widget="textarea", show_if=_MAP, group=_ANTENNA,
                                   description="2D gain map as JSON rows x cols "
                                               "(rows=y_angles, cols=x_angles, >=0)")
 
