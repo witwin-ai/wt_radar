@@ -65,3 +65,11 @@ PYTHONPATH=/path/to/witwin-studio/server python -m pytest tests/ -q
 
 If the radar stack can't be imported, the suite skips itself rather than erroring.
 The dirichlet/slang backends require a CUDA device; the pytorch backend runs on CPU.
+
+On Windows, the dirichlet and slang backends compile through SlangTorch and write a
+per-source cache under the external radar package, for example
+`E:\Code\witwin-platform\radar\witwin\radar\solvers\.slangtorch_cache`. If pytest appears
+to hang before any RayD trace logs, check SlangTorch's lock path first. In this workspace
+the non-elevated sandbox could not acquire
+`dirichlet.slangb9c103f6b206b8e5.lock`; clearing `.slangtorch_cache` and running the GPU
+suite with permission to write/lock the external radar package fixed the apparent hang.
