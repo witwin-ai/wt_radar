@@ -48,10 +48,11 @@ class _FakeSolvers:
 
     def query(self, solver_id, result_handle, op, params, **kwargs):
         self.query_calls.append((op, result_handle, params, kwargs))
+        handle_index = int(str(result_handle).rsplit("-", 1)[-1])
         if op == "raw_signal":
             return {"data": {"tx": 0, "rx": 0, "real": [1.0, 0.0], "imag": [0.0, 1.0]}}
         if op == "range_doppler":
-            return {"data": {"mag_db": [[1.0, 2.0], [3.0, 4.0]]}}
+            return {"data": {"tx": 0, "rx": 0, "mag_db": [[float(handle_index), 2.0], [3.0, 4.0]]}}
         if op == "point_cloud":
             return {"data": {"points": [[1.0, 2.0, 3.0, 0.0, -10.0, 3.7]]}}
         raise AssertionError(op)
@@ -136,10 +137,18 @@ def test_realtime_stream_republishes_when_radar_transform_changes(monkeypatch):
             lambda: {entry[0] for entry in stream.published} >= {"raw", "rd", "pc"},
             "initial raw/rd/pc stream publish",
         )
+        _wait_for(
+            lambda: radar.signal_figure._data.get("values", [[None]])[0][0] == 1.0,
+            "initial live figure preview",
+        )
         first_count = len(fake.solvers.solve_calls)
 
         settings.get_component("Transform").position = [1.0, 2.0, 3.0]
         _wait_for(lambda: len(fake.solvers.solve_calls) >= first_count + 1, "solve after transform move")
+        _wait_for(
+            lambda: radar.signal_figure._data.get("values", [[None]])[0][0] == 2.0,
+            "updated live figure preview",
+        )
 
         assert radar.pause_stream() == "Stream paused"
         paused_count = len(fake.solvers.solve_calls)

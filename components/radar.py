@@ -593,8 +593,8 @@ class RadarComponent(Component):
                 "pfa": num(self.pfa),
             })
             mag_db = np.asarray(payload["mag_db"], dtype=np.float32)
-            tx = int(payload["tx"])
-            rx = int(payload["rx"])
+            tx = int(payload.get("tx", self.tx_index))
+            rx = int(payload.get("rx", self.rx_index))
             rows = payload.get("cfar_rows") or []
             cols = payload.get("cfar_cols") or []
         else:
@@ -828,12 +828,20 @@ class RadarComponent(Component):
                 return True
             self.stream_status = "running"
             self._update_stream_status("active")
+            self._update_live_preview()
             self._publish_signal_stream(channels=self._selected_stream_channels())
             return True
         except Exception as exc:  # noqa: BLE001 - background thread must survive one failed frame
             logger.warning(f"Radar live solve failed: {exc}")
             self._mark_stream_error(str(exc))
             return False
+
+    def _update_live_preview(self):
+        try:
+            message = self.update_view()
+            logger.info(f"Radar live preview updated: {message}")
+        except Exception as exc:  # noqa: BLE001 - preview must not break stream publishing
+            logger.warning(f"Radar live preview update skipped: {exc}")
 
     def _mark_stream_error(self, message):
         if not self._signal_stream_id:
