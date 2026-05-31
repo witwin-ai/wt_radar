@@ -202,7 +202,19 @@ def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
             }
 
     fake = FakeSolvers()
+    notifications = {"success": [], "error": []}
+
+    class FakeNotifications:
+        @staticmethod
+        def success(title, message):
+            notifications["success"].append((title, message))
+
+        @staticmethod
+        def error(title, message):
+            notifications["error"].append((title, message))
+
     monkeypatch.setattr(radar_mod, "api", type("FakeApi", (), {"solvers": fake})())
+    monkeypatch.setattr(radar_mod, "Notifications", FakeNotifications)
 
     msg = radar.simulate()
 
@@ -211,10 +223,12 @@ def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
     assert radar._solver_run_id == "radar-run"
     assert fake.solve_kwargs["solver_id"] == "witwin.radar.simulate"
     assert fake.solve_kwargs["scene"] is studio
-    assert fake.solve_kwargs["surface_progress"] is True
+    assert "surface_progress" not in fake.solve_kwargs
     assert fake.solve_kwargs["config"]["sensor"]["backend"] == "pytorch"
     assert fake.solve_kwargs["config"]["tracer"]["resolution"] == radar.resolution
     assert fake.queries[0][2] == "range_doppler"
+    assert notifications["success"] == [("Radar", "Radar solve complete")]
+    assert notifications["error"] == []
 
 
 def test_show_frame_clears_solver_handle():

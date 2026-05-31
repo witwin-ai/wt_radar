@@ -314,7 +314,6 @@ class RadarComponent(Component):
             "witwin.radar.simulate",
             scene=self.scene,
             config=self._solver_config(spec),
-            surface_progress=True,
         )
         if run.status != "succeeded":
             message = (run.error or {}).get("message") or "simulate failed"
