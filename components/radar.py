@@ -39,6 +39,7 @@ from witwin_server.core.components import (
     foldout_group,
     int_field,
     list_field,
+    stream_ref_field,
     string_field,
     vector3_field,
 )
@@ -89,6 +90,7 @@ class RadarComponent(Component):
     _timeline_radar = None
     _solver_result_handle = ""
     _solver_run_id = ""
+    _signal_stream_id = ""
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna"))
@@ -239,6 +241,7 @@ class RadarComponent(Component):
     post_processors = list_field(component_field(component_type="RadarPostProcessor"), default=[],
                                  group=_SOLVE,
                                  description="Extra post-processor views run after each solve")
+    signal_stream = stream_ref_field(default_channel="rd", group=_SOLVE, title="Live Signal")
     signal_figure = figure(title="Radar Signal", group=_SOLVE)
 
     # --- post processing: signal views + detector/CFAR (RadarResult) --------
@@ -324,6 +327,7 @@ class RadarComponent(Component):
         self._radar = None
         self._signal = None
         self.update_view()
+        self._publish_signal_stream()
         self._run_post_processors()
         Notifications.success("Radar", "Radar solve complete")
         logger.info("=== Simulate done ===")
@@ -363,6 +367,7 @@ class RadarComponent(Component):
         self._frames = frames
         self._solver_result_handle = ""
         self._solver_run_id = ""
+        self._publish_signal_stream()
         self.show_frame()
         Notifications.success("Radar", f"Timeline: {frames.shape[0]} frames {tuple(frames.shape)}")
         return f"{frames.shape[0]} frames"
@@ -378,6 +383,7 @@ class RadarComponent(Component):
         self._solver_result_handle = ""
         self._solver_run_id = ""
         self.update_view()
+        self._publish_signal_stream()
         return f"Frame {index}"
 
     # --- post-processors ----------------------------------------------------
@@ -551,6 +557,139 @@ class RadarComponent(Component):
         fig.title(f"Point cloud ({pc.shape[0]} pts)").xlabel("x (m)").ylabel("z (m)")
         logger.info(f"  point cloud: {pc.shape[0]} detections")
         return f"{pc.shape[0]} points"
+
+    def _stream_owner(self):
+        owner = {
+            "kind": "component",
+            "componentName": "Radar",
+            "fieldName": "signal_stream",
+        }
+        if getattr(self, "_owner", None) is not None:
+            owner["objectId"] = self._owner.id
+        if self._solver_run_id:
+            owner["runId"] = self._solver_run_id
+        return owner
+
+    def _stream_id(self):
+        if self._signal_stream_id:
+            return self._signal_stream_id
+        owner_id = getattr(getattr(self, "_owner", None), "id", None) or hex(id(self))[2:]
+        self._signal_stream_id = f"radar.{owner_id}.signal"
+        return self._signal_stream_id
+
+    def _open_signal_stream(self, channels):
+        stream = api.streams.open(
+            self._stream_id(),
+            kind="radar.signal",
+            owner=self._stream_owner(),
+            label="Radar Signal",
+            retention={"mode": "latest"},
+            channels=channels,
+        )
+        self.signal_stream = stream.ref("rd")
+        return stream
+
+    def _publish_signal_stream(self):
+        try:
+            channels = [
+                {"channelId": "raw", "dtype": "complex64", "shape": ["adc"],
+                 "semantic": "time_series", "label": "Raw IQ"},
+                {"channelId": "rd", "dtype": "float32", "shape": ["doppler", "range"],
+                 "semantic": "heatmap", "label": "Range-Doppler"},
+                {"channelId": "pc", "dtype": "float32", "shape": ["points", 6],
+                 "semantic": "pointcloud_xyz", "label": "Point cloud"},
+            ]
+            stream = self._open_signal_stream(channels)
+            self._publish_rd_stream(stream)
+            self._publish_pc_stream(stream)
+            self._publish_raw_stream(stream)
+        except Exception as exc:  # noqa: BLE001 - stream output must not break solve preview
+            logger.warning(f"Radar stream publish skipped: {exc}")
+
+    def _publish_raw_stream(self, stream):
+        if self._solver_result_handle:
+            payload = self._query_result("raw_signal", {"tx": int(self.tx_index), "rx": int(self.rx_index)})
+            real = np.asarray(payload.get("real") or [], dtype=np.float32)
+            imag = np.asarray(payload.get("imag") or [], dtype=np.float32)
+            if real.size == 0 or imag.size != real.size:
+                return
+            iq = np.empty(real.size * 2, dtype=np.float32)
+            iq[0::2] = real
+            iq[1::2] = imag
+            stream.publish("raw", iq, metadata={
+                "dtype": "complex64",
+                "shape": [int(real.size)],
+                "tx": int(payload.get("tx", self.tx_index)),
+                "rx": int(payload.get("rx", self.rx_index)),
+                "chirp": 0,
+            })
+            return
+
+        if self._signal is None:
+            return
+        sig = self._signal.detach().cpu().numpy()
+        iq = np.empty(sig.size * 2, dtype=np.float32)
+        flat = sig.reshape(-1)
+        iq[0::2] = flat.real.astype(np.float32, copy=False)
+        iq[1::2] = flat.imag.astype(np.float32, copy=False)
+        stream.publish("raw", iq, metadata={"dtype": "complex64", "shape": list(sig.shape)})
+
+    def _publish_rd_stream(self, stream):
+        if self._solver_result_handle:
+            payload = self._query_result("range_doppler", {
+                "tx": int(self.tx_index),
+                "rx": int(self.rx_index),
+                "static_clutter_removal": bool(self.static_clutter_removal),
+                "show_cfar": False,
+            })
+            mag_db = np.asarray(payload.get("mag_db") or [], dtype=np.float32)
+        else:
+            if self._signal is None or self._radar is None:
+                return
+            mag_db = SigProc.range_doppler(
+                self._radar,
+                self._signal,
+                tx=self._tx(),
+                rx=self._rx(),
+                static_clutter_removal=bool(self.static_clutter_removal),
+            ).mag_db.astype(np.float32, copy=False)
+        if mag_db.size == 0:
+            return
+        stream.publish("rd", np.ascontiguousarray(mag_db, dtype=np.float32), metadata={
+            "dtype": "float32",
+            "shape": list(mag_db.shape),
+        })
+
+    def _publish_pc_stream(self, stream):
+        if self._solver_result_handle:
+            payload = self._query_result("point_cloud", {
+                "detector": str(self.detector),
+                "static_clutter_removal": bool(self.static_clutter_removal),
+                "guard": list(self._guard()),
+                "training": list(self._training()),
+                "pfa": num(self.pfa),
+                "energy_top_k": int(self.energy_top_k),
+            })
+            pc = np.asarray([] if payload.get("points") is None else payload.get("points"), dtype=np.float32)
+        else:
+            if self._signal is None or self._radar is None:
+                return
+            pc = np.asarray(SigProc.point_cloud(
+                self._radar,
+                self._signal,
+                detector=str(self.detector),
+                static_clutter_removal=bool(self.static_clutter_removal),
+                guard=self._guard(),
+                training=self._training(),
+                pfa=num(self.pfa),
+                energy_top_k=int(self.energy_top_k),
+            ), dtype=np.float32)
+        if pc.ndim == 1:
+            pc = pc.reshape((0, 6)) if pc.size == 0 else pc.reshape((1, pc.size))
+        stream.publish("pc", np.ascontiguousarray(pc, dtype=np.float32), metadata={
+            "dtype": "float32",
+            "shape": list(pc.shape),
+        })
 
     def _show_music(self):
         try:
