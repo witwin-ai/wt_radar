@@ -7,12 +7,12 @@ exposing every setting through foldout groups. The marker the adapter keys off i
 polymorphic ``RadarPostProcessor`` hierarchy stay separate because they live on
 other scene objects.
 
-The grouping mirrors the old split so authors find familiar sections:
-``Frequency / ADC / Frame / Bins / Antenna`` are the 17 ``RadarConfig`` core fields;
-``Tracer`` is the ray-tracer + sensor optic (fov); the four
+The grouping consolidates the old split: ``Configuration`` holds the FMCW core
+(frequency / power + ADC + chirp / frame), with ``Bins`` and ``Antenna`` kept
+separate; ``Tracer`` is the ray-tracer + sensor optic (fov); the four
 ``Antenna Pattern / Noise / Polarization / Receiver`` foldouts are the optional
-``RadarConfig`` sub-configs; ``Solve / View / Detector`` drive the in-component MIMO
-view; ``Timeline`` generates multi-frame sequences.
+``RadarConfig`` sub-configs; ``Solve`` runs the solve and ``Post Processing`` drives
+the in-component MIMO views + detector/CFAR; ``Timeline`` generates multi-frame sequences.
 
 The sensor **pose** (position + look direction + up) is read from the owner SceneObject's
 ``Transform`` at solve time — moving / rotating the Radar Settings object in the viewport
@@ -57,9 +57,7 @@ _CAT = "Simulation/Radar"
 _VIEWS = ["raw_signal", "range_doppler", "point_cloud", "music"]
 
 # Foldout group ids (also used in string `show_if`/`hide_if` lookups by field name).
-_FREQUENCY = "Frequency"
-_ADC = "ADC"
-_FRAME = "Frame"
+_CONFIG = "Configuration"   # FMCW core: frequency/power + ADC + chirp/frame
 _BINS = "Bins"
 _ANTENNA = "Antenna"
 _TRACER = "Tracer"
@@ -68,8 +66,7 @@ _NOISE = "Noise"
 _POLARIZATION = "Polarization"
 _RECEIVER = "Receiver"
 _SOLVE = "Solve"
-_VIEW = "View"
-_DETECTOR = "Detector"
+_POSTPROC = "PostProcessing"   # signal views + detector/CFAR run on the solved signal
 _TIMELINE = "Timeline"
 
 # show_if / hide_if dict conditions reused across multiple fields.
@@ -90,9 +87,7 @@ class RadarComponent(Component):
     _frames = None   # runtime timeline frame stack; never serialized
     _timeline_radar = None
 
-    define_group(foldout_group(_FREQUENCY, display_name="Frequency / Power"))
-    define_group(foldout_group(_ADC, display_name="ADC / Sampling"))
-    define_group(foldout_group(_FRAME, display_name="Chirp / Frame"))
+    define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_BINS, display_name="FFT Bins"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna Geometry"))
     define_group(foldout_group(_TRACER, display_name="Ray Tracer"))
@@ -101,31 +96,30 @@ class RadarComponent(Component):
     define_group(foldout_group(_POLARIZATION, display_name="Polarization", collapsed=True))
     define_group(foldout_group(_RECEIVER, display_name="Receiver Chain", collapsed=True))
     define_group(foldout_group(_SOLVE, display_name="Solve"))
-    define_group(foldout_group(_VIEW, display_name="View"))
-    define_group(foldout_group(_DETECTOR, display_name="Detector / CFAR", collapsed=True))
+    define_group(foldout_group(_POSTPROC, display_name="Post Processing"))
     define_group(foldout_group(_TIMELINE, display_name="Timeline", collapsed=True))
 
-    # --- Frequency / power (RadarConfig) ------------------------------------
+    # --- frequency / power (RadarConfig) ------------------------------------
     fc = float_field(77e9, min=1e9, max=300e9, units=FREQUENCY_UNITS, default_unit="GHz",
-                     group=_FREQUENCY, description="Carrier / start frequency")
+                     group=_CONFIG, description="Carrier / start frequency")
     slope = float_field(60.012, min=0.0, units=SLOPE_UNITS, default_unit="MHz/us",
-                        group=_FREQUENCY, description="Chirp frequency slope")
-    power = float_field(15.0, group=_FREQUENCY, description="TX power (dBm)")
+                        group=_CONFIG, description="Chirp frequency slope")
+    power = float_field(15.0, group=_CONFIG, description="TX power (dBm)")
 
     # --- ADC / sampling (RadarConfig) ---------------------------------------
-    adc_samples = int_field(256, min=1, group=_ADC, description="ADC samples per chirp (fast time)")
+    adc_samples = int_field(256, min=1, group=_CONFIG, description="ADC samples per chirp (fast time)")
     sample_rate = float_field(4400.0, min=0.0, units=SAMPLE_RATE_UNITS, default_unit="ksps",
-                              group=_ADC, description="ADC sample rate")
+                              group=_CONFIG, description="ADC sample rate")
     adc_start_time = float_field(6.0, min=0.0, units=TIME_UNITS, default_unit="us",
-                                 group=_ADC, description="ADC start delay")
+                                 group=_CONFIG, description="ADC start delay")
 
     # --- chirp / frame (RadarConfig) ----------------------------------------
     idle_time = float_field(7.0, min=0.0, units=TIME_UNITS, default_unit="us",
-                            group=_FRAME, description="Idle time between chirps")
+                            group=_CONFIG, description="Idle time between chirps")
     ramp_end_time = float_field(58.0, min=0.0, units=TIME_UNITS, default_unit="us",
-                                group=_FRAME, description="Active chirp ramp time")
-    chirp_per_frame = int_field(128, min=1, group=_FRAME, description="Chirps per frame (slow time / Doppler)")
-    frame_per_second = float_field(10.0, min=0.0, group=_FRAME, description="Frame rate (Hz)")
+                                group=_CONFIG, description="Active chirp ramp time")
+    chirp_per_frame = int_field(128, min=1, group=_CONFIG, description="Chirps per frame (slow time / Doppler)")
+    frame_per_second = float_field(10.0, min=0.0, group=_CONFIG, description="Frame rate (Hz)")
 
     # --- FFT bins (RadarConfig) ---------------------------------------------
     num_doppler_bins = int_field(128, min=1, group=_BINS, description="Doppler FFT bins")
@@ -237,7 +231,7 @@ class RadarComponent(Component):
     reference_impedance_ohm = float_field(50.0, min=0.0, group=_RECEIVER,
                                           description="Reference impedance (ohm, >0)")
 
-    # --- solve / view / detector (RadarResult) ------------------------------
+    # --- solve (RadarResult) ------------------------------------------------
     motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
                                    group=_SOLVE, description="Re-trace per chirp or per frame")
     t0 = float_field(0.0, group=_SOLVE, description="Solve start time (s)")
@@ -246,23 +240,24 @@ class RadarComponent(Component):
                                  description="Extra post-processor views run after each solve")
     signal_figure = figure(title="Radar Signal", group=_SOLVE)
 
-    view = string_field("range_doppler", options=_VIEWS, enum_toggle=True, group=_VIEW,
+    # --- post processing: signal views + detector/CFAR (RadarResult) --------
+    view = string_field("range_doppler", options=_VIEWS, enum_toggle=True, group=_POSTPROC,
                         description="Which signal view to render")
-    tx_index = int_field(0, min=0, group=_VIEW, description="TX index (raw / range-doppler)")
-    rx_index = int_field(0, min=0, group=_VIEW, description="RX index (raw / range-doppler)")
-    static_clutter_removal = bool_field(True, group=_VIEW,
+    tx_index = int_field(0, min=0, group=_POSTPROC, description="TX index (raw / range-doppler)")
+    rx_index = int_field(0, min=0, group=_POSTPROC, description="RX index (raw / range-doppler)")
+    static_clutter_removal = bool_field(True, group=_POSTPROC,
                                         description="Remove static (zero-doppler) clutter")
-    show_cfar = bool_field(False, group=_VIEW,
+    show_cfar = bool_field(False, group=_POSTPROC,
                            description="Overlay CFAR detections on the range-doppler map")
 
-    detector = string_field("cfar", options=["cfar", "topk"], enum_toggle=True, group=_DETECTOR,
+    detector = string_field("cfar", options=["cfar", "topk"], enum_toggle=True, group=_POSTPROC,
                             description="Point-cloud detector")
-    guard_doppler = int_field(2, min=0, group=_DETECTOR, description="CFAR guard cells (doppler)")
-    guard_range = int_field(4, min=0, group=_DETECTOR, description="CFAR guard cells (range)")
-    training_doppler = int_field(4, min=0, group=_DETECTOR, description="CFAR training cells (doppler)")
-    training_range = int_field(8, min=0, group=_DETECTOR, description="CFAR training cells (range)")
-    pfa = float_field(1e-3, min=0.0, group=_DETECTOR, description="CFAR probability of false alarm")
-    energy_top_k = int_field(128, min=1, group=_DETECTOR,
+    guard_doppler = int_field(2, min=0, group=_POSTPROC, description="CFAR guard cells (doppler)")
+    guard_range = int_field(4, min=0, group=_POSTPROC, description="CFAR guard cells (range)")
+    training_doppler = int_field(4, min=0, group=_POSTPROC, description="CFAR training cells (doppler)")
+    training_range = int_field(8, min=0, group=_POSTPROC, description="CFAR training cells (range)")
+    pfa = float_field(1e-3, min=0.0, group=_POSTPROC, description="CFAR probability of false alarm")
+    energy_top_k = int_field(128, min=1, group=_POSTPROC,
                              description="Top-K energy detections (topk detector)")
 
     # --- timeline (RadarTimeline) -------------------------------------------
@@ -334,7 +329,7 @@ class RadarComponent(Component):
         logger.info("=== Simulate done ===")
         return "Solve complete"
 
-    @button(display_name="Update View", group=_VIEW)
+    @button(display_name="Update View", group=_POSTPROC)
     def update_view(self):
         """Render the selected view from the last solved signal."""
         if self._signal is None:
