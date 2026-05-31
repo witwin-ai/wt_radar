@@ -5,6 +5,7 @@ several named radars on one rebuilt scene. Needs CUDA.
 """
 import dataclasses
 
+import numpy as np
 import pytest
 import witwin.radar as wr
 
@@ -36,8 +37,8 @@ def _settings(studio):
     return next(o for o in studio.objects.values() if o.get_component("Radar") is not None)
 
 
-@pytest.mark.gpu
-def test_post_processor_runs_after_solve(adapter, cuda_ready):
+def test_post_processor_runs_after_solve(adapter, monkeypatch):
+    import wt_radar.components.radar as radar_mod
     from wt_radar.components.post_processing import RangeDopplerProcessorComponent
 
     studio = _studio(adapter)
@@ -49,6 +50,30 @@ def test_post_processor_runs_after_solve(adapter, cuda_ready):
     radar = settings.get_component("Radar")
     radar.post_processors = [{"object_id": proc_obj.id, "component_type": "RangeDopplerProcessor"}]
     radar.backend = "dirichlet"
+
+    class FakeRun:
+        status = "succeeded"
+        outputs = {"resultHandle": "radar-handle"}
+        run_id = "radar-run"
+        error = None
+
+    class FakeSolvers:
+        def solve(self, solver_id, **kwargs):
+            return FakeRun()
+
+        def query(self, solver_id, result_handle, op, params, **kwargs):
+            assert op == "range_doppler"
+            return {
+                "data": {
+                    "tx": 0,
+                    "rx": 0,
+                    "mag_db": np.ones((4, 5), dtype=np.float32),
+                    "cfar_rows": [],
+                    "cfar_cols": [],
+                }
+            }
+
+    monkeypatch.setattr(radar_mod, "api", type("FakeApi", (), {"solvers": FakeSolvers()})())
     radar.simulate()
 
     proc = proc_obj.get_component("RangeDopplerProcessor")

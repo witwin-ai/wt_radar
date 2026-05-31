@@ -9,6 +9,7 @@ pytorch-backend signal matches a direct platform call within tolerance; and the 
 Live solve needs CUDA (the mitsuba ray tracer is CUDA-only), so the whole module is
 gated on a CUDA device via the ``cuda_ready`` fixture.
 """
+import json
 import numpy as np
 import pytest
 import torch
@@ -153,6 +154,86 @@ def test_built_radar_tx_pos_follows_transform(adapter):
     # tx_pos[0] is antenna 0 at local (0,0,0) -> equals radar position in world.
     assert radar_a.tx_pos[0].tolist() == pytest.approx([10.0, 0.0, 0.0], abs=1e-4)
     assert radar_b.tx_pos[0].tolist() == pytest.approx([-7.0, 0.0, 0.0], abs=1e-4)
+
+
+def test_manifest_declares_rfc012_solver():
+    manifest = json.loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "witwin.manifest.json").read_text())
+    solvers = manifest["contributes"]["solvers"]
+    assert solvers[0]["id"] == "witwin.radar.simulate"
+    assert solvers[0]["entry"] == "solver_host.py"
+    assert solvers[0]["runtime"]["python"] == "${env:WITWIN_RADAR_PYTHON}"
+    assert solvers[0]["lifecycle"] == "warm"
+    assert solvers[0]["maxParallel"] == 1
+
+
+def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
+    import wt_radar.components.radar as radar_mod
+
+    studio = adapter.to_studio((_scene("cpu"), wr.RadarConfig.from_dict(_CONFIG)))
+    radar = studio_settings(studio).get_component("Radar")
+    radar.backend = "pytorch"
+    radar.device = "cpu"
+
+    class FakeRun:
+        status = "succeeded"
+        outputs = {"resultHandle": "radar-handle"}
+        run_id = "radar-run"
+        error = None
+
+    class FakeSolvers:
+        def __init__(self):
+            self.solve_kwargs = None
+            self.queries = []
+
+        def solve(self, solver_id, **kwargs):
+            self.solve_kwargs = {"solver_id": solver_id, **kwargs}
+            return FakeRun()
+
+        def query(self, solver_id, result_handle, op, params, **kwargs):
+            self.queries.append((solver_id, result_handle, op, params, kwargs))
+            return {
+                "data": {
+                    "tx": 0,
+                    "rx": 0,
+                    "mag_db": np.ones((4, 5), dtype=np.float32),
+                    "cfar_rows": [],
+                    "cfar_cols": [],
+                }
+            }
+
+    fake = FakeSolvers()
+    monkeypatch.setattr(radar_mod, "api", type("FakeApi", (), {"solvers": fake})())
+
+    msg = radar.simulate()
+
+    assert msg == "Solve complete"
+    assert radar._solver_result_handle == "radar-handle"
+    assert radar._solver_run_id == "radar-run"
+    assert fake.solve_kwargs["solver_id"] == "witwin.radar.simulate"
+    assert fake.solve_kwargs["scene"] is studio
+    assert fake.solve_kwargs["surface_progress"] is True
+    assert fake.solve_kwargs["config"]["sensor"]["backend"] == "pytorch"
+    assert fake.solve_kwargs["config"]["tracer"]["resolution"] == radar.resolution
+    assert fake.queries[0][2] == "range_doppler"
+
+
+def test_show_frame_clears_solver_handle():
+    from wt_radar.components.radar import RadarComponent
+
+    radar = RadarComponent()
+    radar._frames = torch.zeros((1, 1, 1, 1, 1), dtype=torch.complex64)
+    radar._timeline_radar = object()
+    radar._solver_result_handle = "stale-handle"
+    radar._solver_run_id = "stale-run"
+    observed = []
+    radar.update_view = lambda: observed.append((radar._solver_result_handle, radar._signal.shape))
+
+    msg = radar.show_frame()
+
+    assert msg == "Frame 0"
+    assert radar._solver_result_handle == ""
+    assert radar._solver_run_id == ""
+    assert observed == [("", torch.Size([1, 1, 1, 1]))]
 
 
 @pytest.mark.gpu

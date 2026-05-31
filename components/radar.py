@@ -20,9 +20,12 @@ moves the simulated radar. The solver backend defaults to ``dirichlet`` on ``cud
 is hidden from the UI; tests / scripts can still override ``backend`` / ``device`` /
 ``pad_factor`` on the component directly.
 """
+from dataclasses import asdict
+
 import numpy as np
 
 from witwin_server import Notifications
+from witwin_server.api import api
 from witwin_server.core.components import (
     Component,
     GizmoContext,
@@ -86,6 +89,8 @@ class RadarComponent(Component):
     _radar = None    # runtime Radar
     _frames = None   # runtime timeline frame stack; never serialized
     _timeline_radar = None
+    _solver_result_handle = ""
+    _solver_run_id = ""
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_BINS, display_name="FFT Bins"))
@@ -301,38 +306,38 @@ class RadarComponent(Component):
     @button(display_name="Simulate", group=_SOLVE)
     def simulate(self):
         """Rebuild + solve the live scene, keep the signal, and render the current view."""
-        import torch
         logger.info("=== Simulate clicked ===")
-        if not torch.cuda.is_available():
-            Notifications.warning("Radar", "Live solve requires a CUDA device (mitsuba ray tracing)")
-            return "CUDA required"
         spec = SensorSpec.from_component(self)
         logger.info(f"Sensor pose:  position={spec.position}  target={spec.target}  up={spec.up}")
         logger.info(f"Sensor:       backend={spec.backend} device={spec.device} fov={spec.fov}")
-        result = SolveRunner.run(
-            self.scene,
-            sensor=spec,
-            tracer=TracerSpec.from_component(self),
-            motion_sampling=str(self.motion_sampling), t0=num(self.t0))
-        self._radar = result.radar
-        self._signal = result.signal
-        # Cheap fingerprints so back-to-back clicks visibly differ in the log even before
-        # the figure renders. If these stay constant across clicks the solve is stuck.
-        sig_abs = result.signal.detach().cpu().abs()
-        logger.info(
-            f"Signal:       shape={tuple(result.signal.shape)} "
-            f"mean|sig|={sig_abs.mean().item():.6e} max|sig|={sig_abs.max().item():.6e}")
-        logger.info(f"Updating view ({self.view}) ...")
+        run = api.solvers.solve(
+            "witwin.radar.simulate",
+            scene=self.scene,
+            config=self._solver_config(spec),
+            surface_progress=True,
+        )
+        if run.status != "succeeded":
+            message = (run.error or {}).get("message") or "simulate failed"
+            Notifications.error("Radar", message)
+            return f"Solve failed: {message}"
+        handle = (run.outputs or {}).get("resultHandle")
+        if not handle:
+            Notifications.error("Radar", "Solver returned no result handle")
+            return "Solve failed: no result handle"
+        self._solver_result_handle = str(handle)
+        self._solver_run_id = run.run_id
+        self._radar = None
+        self._signal = None
         self.update_view()
         self._run_post_processors()
-        Notifications.success("Radar", f"Solved: MIMO signal {tuple(result.signal.shape)}")
+        Notifications.success("Radar", "Radar solve complete")
         logger.info("=== Simulate done ===")
         return "Solve complete"
 
     @button(display_name="Update View", group=_POSTPROC)
     def update_view(self):
         """Render the selected view from the last solved signal."""
-        if self._signal is None:
+        if not self._solver_result_handle and self._signal is None:
             logger.info("Update View: no signal yet — run Simulate first")
             return "Simulate first"
         view = str(self.view)
@@ -361,6 +366,8 @@ class RadarComponent(Component):
             studio_scene=self.scene)
         self._timeline_radar = radar
         self._frames = frames
+        self._solver_result_handle = ""
+        self._solver_run_id = ""
         self.show_frame()
         Notifications.success("Radar", f"Timeline: {frames.shape[0]} frames {tuple(frames.shape)}")
         return f"{frames.shape[0]} frames"
@@ -373,6 +380,8 @@ class RadarComponent(Component):
         index = max(0, min(int(self.frame_index), self._frames.shape[0] - 1))
         self._signal = self._frames[index]
         self._radar = self._timeline_radar
+        self._solver_result_handle = ""
+        self._solver_run_id = ""
         self.update_view()
         return f"Frame {index}"
 
@@ -386,7 +395,45 @@ class RadarComponent(Component):
         for ref in refs:
             proc = self._resolve_processor(scene, ref)
             if proc is not None and bool(getattr(proc, "enabled", True)):
-                proc.process(self._radar, self._signal)
+                if self._solver_result_handle:
+                    self._run_remote_post_processor(proc)
+                else:
+                    proc.process(self._radar, self._signal)
+
+    def _run_remote_post_processor(self, proc):
+        name = proc.__class__.__name__
+        if name == "RangeDopplerProcessorComponent":
+            payload = self._query_result("range_doppler", {
+                "tx": int(getattr(proc, "tx_index", 0)),
+                "rx": int(getattr(proc, "rx_index", 0)),
+                "static_clutter_removal": bool(getattr(proc, "static_clutter_removal", True)),
+                "show_cfar": False,
+            })
+            mag_db = np.asarray(payload["mag_db"], dtype=np.float32)
+            tx = int(payload.get("tx", getattr(proc, "tx_index", 0)))
+            rx = int(payload.get("rx", getattr(proc, "rx_index", 0)))
+            proc.result_figure.clear().imshow(mag_db).title(f"RD Tx{tx} Rx{rx}")
+            return
+        if name == "PointCloudProcessorComponent":
+            payload = self._query_result("point_cloud", {
+                "detector": "cfar",
+                "static_clutter_removal": bool(getattr(proc, "static_clutter_removal", True)),
+                "guard": [2, 4],
+                "training": [4, 8],
+                "pfa": 1e-3,
+                "energy_top_k": 128,
+            })
+            points = payload.get("points")
+            pc = np.asarray([] if points is None else points, dtype=np.float32)
+            fig = proc.result_figure.clear()
+            if pc.size == 0:
+                fig.title("Point cloud (no detections)")
+            else:
+                fig.scatter(pc[:, 0].tolist(), pc[:, 2].tolist(),
+                            label="points", color="#30c0ff", size=10)
+                fig.title(f"Point cloud ({pc.shape[0]} pts)").xlabel("x (m)").ylabel("z (m)")
+            return
+        logger.warning(f"Skipping remote Radar post-processor {name}: no query adapter")
 
     @staticmethod
     def _resolve_processor(scene, ref):
@@ -408,18 +455,32 @@ class RadarComponent(Component):
     # --- views --------------------------------------------------------------
 
     def _show_raw(self):
-        sig = self._signal.detach().cpu().numpy()
-        n_tx, n_rx, _, n_adc = sig.shape
-        x = list(range(n_adc))
-        sel = sig[self._tx(), self._rx(), 0]
+        if self._solver_result_handle:
+            payload = self._query_result("raw_signal", {"tx": int(self.tx_index), "rx": int(self.rx_index)})
+            x = payload["x"]
+            n_tx = int(payload["n_tx"])
+            n_rx = int(payload["n_rx"])
+            tx = int(payload["tx"])
+            rx = int(payload["rx"])
+            real = payload["real"]
+            imag = payload["imag"]
+            batches = payload["batches"]
+        else:
+            sig = self._signal.detach().cpu().numpy()
+            n_tx, n_rx, _, n_adc = sig.shape
+            x = list(range(n_adc))
+            tx = self._tx()
+            rx = self._rx()
+            sel = sig[tx, rx, 0]
+            real = sel.real.tolist()
+            imag = sel.imag.tolist()
+            batches = [[self._pair_series(sig[t, r, 0], x) for r in range(n_rx)] for t in range(n_tx)]
         fig = self.signal_figure.clear()
-        fig.line(x, sel.real.tolist(), label="Real", color="#ff9500")
-        fig.line(x, sel.imag.tolist(), label="Imag", color="#00aaff")
-        fig.title(f"Raw MIMO (Tx{self._tx()} Rx{self._rx()}, chirp 0)").xlabel("ADC sample").ylabel("Amplitude")
-        batches = [[self._pair_series(sig[t, r, 0], x) for r in range(n_rx)] for t in range(n_tx)]
+        fig.line(x, real, label="Real", color="#ff9500")
+        fig.line(x, imag, label="Imag", color="#00aaff")
+        fig.title(f"Raw MIMO (Tx{tx} Rx{rx}, chirp 0)").xlabel("ADC sample").ylabel("Amplitude")
         fig.batch2d(batches, [f"Tx{t}" for t in range(n_tx)], [f"Rx{r}" for r in range(n_rx)])
-        logger.info(f"  raw view -> selected Tx{self._tx()} Rx{self._rx()}, "
-                    f"|real|.max={abs(sel.real).max():.4e} |imag|.max={abs(sel.imag).max():.4e}")
+        logger.info(f"  raw view -> selected Tx{tx} Rx{rx}")
         return "Raw signal updated"
 
     @staticmethod
@@ -429,27 +490,63 @@ class RadarComponent(Component):
             {"x": x, "y": sample.imag.tolist(), "label": "Imag", "color": "#00aaff"}]}
 
     def _show_rd(self):
-        rd = SigProc.range_doppler(self._radar, self._signal, tx=self._tx(), rx=self._rx(),
-                                   static_clutter_removal=bool(self.static_clutter_removal))
-        logger.info(f"  rd-map: shape={rd.mag_db.shape} "
-                    f"min={float(rd.mag_db.min()):.2f}dB max={float(rd.mag_db.max()):.2f}dB "
-                    f"mean={float(rd.mag_db.mean()):.2f}dB")
-        fig = self.signal_figure.clear().imshow(rd.mag_db)
-        fig.title(f"Range-Doppler (Tx{self._tx()} Rx{self._rx()}, dB)").xlabel("Range bin").ylabel("Doppler bin")
+        if self._solver_result_handle:
+            payload = self._query_result("range_doppler", {
+                "tx": int(self.tx_index),
+                "rx": int(self.rx_index),
+                "static_clutter_removal": bool(self.static_clutter_removal),
+                "show_cfar": bool(self.show_cfar),
+                "guard": list(self._guard()),
+                "training": list(self._training()),
+                "pfa": num(self.pfa),
+            })
+            mag_db = np.asarray(payload["mag_db"], dtype=np.float32)
+            tx = int(payload["tx"])
+            rx = int(payload["rx"])
+            rows = payload.get("cfar_rows") or []
+            cols = payload.get("cfar_cols") or []
+        else:
+            rd = SigProc.range_doppler(self._radar, self._signal, tx=self._tx(), rx=self._rx(),
+                                       static_clutter_removal=bool(self.static_clutter_removal))
+            mag_db = rd.mag_db
+            tx = self._tx()
+            rx = self._rx()
+            rows = []
+            cols = []
+            if bool(self.show_cfar):
+                mask = SigProc.cfar_mask(rd.rd_map, guard=self._guard(),
+                                         training=self._training(), pfa=num(self.pfa))
+                rows, cols = np.nonzero(mask)
+                rows = rows.tolist()
+                cols = cols.tolist()
+        logger.info(f"  rd-map: shape={mag_db.shape} "
+                    f"min={float(mag_db.min()):.2f}dB max={float(mag_db.max()):.2f}dB "
+                    f"mean={float(mag_db.mean()):.2f}dB")
+        fig = self.signal_figure.clear().imshow(mag_db)
+        fig.title(f"Range-Doppler (Tx{tx} Rx{rx}, dB)").xlabel("Range bin").ylabel("Doppler bin")
         if bool(self.show_cfar):
-            mask = SigProc.cfar_mask(rd.rd_map, guard=self._guard(),
-                                     training=self._training(), pfa=num(self.pfa))
-            rows, cols = np.nonzero(mask)
-            logger.info(f"  cfar hits: {int(cols.size)}")
-            if cols.size:
-                fig.scatter(cols.tolist(), rows.tolist(), label="CFAR", color="#ff3030", size=8)
+            logger.info(f"  cfar hits: {len(cols)}")
+            if cols:
+                fig.scatter(cols, rows, label="CFAR", color="#ff3030", size=8)
         return "Range-doppler updated"
 
     def _show_pc(self):
-        pc = SigProc.point_cloud(
-            self._radar, self._signal, detector=str(self.detector),
-            static_clutter_removal=bool(self.static_clutter_removal), guard=self._guard(),
-            training=self._training(), pfa=num(self.pfa), energy_top_k=int(self.energy_top_k))
+        if self._solver_result_handle:
+            payload = self._query_result("point_cloud", {
+                "detector": str(self.detector),
+                "static_clutter_removal": bool(self.static_clutter_removal),
+                "guard": list(self._guard()),
+                "training": list(self._training()),
+                "pfa": num(self.pfa),
+                "energy_top_k": int(self.energy_top_k),
+            })
+            points = payload.get("points")
+            pc = np.asarray([] if points is None else points, dtype=np.float32)
+        else:
+            pc = SigProc.point_cloud(
+                self._radar, self._signal, detector=str(self.detector),
+                static_clutter_removal=bool(self.static_clutter_removal), guard=self._guard(),
+                training=self._training(), pfa=num(self.pfa), energy_top_k=int(self.energy_top_k))
         fig = self.signal_figure.clear()
         if pc.shape[0] == 0:
             fig.title("Point cloud (no detections)")
@@ -462,7 +559,11 @@ class RadarComponent(Component):
 
     def _show_music(self):
         try:
-            img = SigProc.music_image(self._radar, self._signal, num_pixels=64)
+            if self._solver_result_handle:
+                payload = self._query_result("music", {"num_pixels": 64})
+                img = np.asarray(payload["image"], dtype=np.float32)
+            else:
+                img = SigProc.music_image(self._radar, self._signal, num_pixels=64)
         except Exception as exc:  # noqa: BLE001 - optional view; small UPAs make MUSIC ill-posed
             Notifications.warning("Radar", f"MUSIC needs a larger UPA (e.g. 20x20): {type(exc).__name__}")
             logger.warning(f"  MUSIC unavailable: {type(exc).__name__}")
@@ -481,7 +582,29 @@ class RadarComponent(Component):
         return (int(self.training_doppler), int(self.training_range))
 
     def _tx(self):
+        if self._signal is None:
+            return max(0, int(self.tx_index))
         return max(0, min(int(self.tx_index), self._signal.shape[0] - 1))
 
     def _rx(self):
+        if self._signal is None:
+            return max(0, int(self.rx_index))
         return max(0, min(int(self.rx_index), self._signal.shape[1] - 1))
+
+    def _solver_config(self, spec: SensorSpec) -> dict:
+        return {
+            "sensor": asdict(spec),
+            "tracer": asdict(TracerSpec.from_component(self)),
+            "motion_sampling": str(self.motion_sampling),
+            "t0": num(self.t0),
+        }
+
+    def _query_result(self, op: str, params: dict):
+        response = api.solvers.query(
+            "witwin.radar.simulate",
+            self._solver_result_handle,
+            op,
+            params,
+            run_id=self._solver_run_id or None,
+        )
+        return response.get("data") or {}

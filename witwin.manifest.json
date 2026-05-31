@@ -7,6 +7,25 @@
   "license": "GPL-3.0-or-later",
   "engines": { "witwin": "^1.0.0" },
   "dependencies": ["scipy", "numpy"],
+  "contributes": {
+    "solvers": [
+      {
+        "id": "witwin.radar.simulate",
+        "title": "Radar FMCW",
+        "entry": "solver_host.py",
+        "runtime": { "python": "${env:WITWIN_RADAR_PYTHON}" },
+        "lifecycle": "warm",
+        "idleTimeoutSec": 300,
+        "cancelGraceSec": 5,
+        "maxParallel": 1,
+        "capabilities": {
+          "cancel": true,
+          "partials": true,
+          "query": ["raw_signal", "range_doppler", "point_cloud", "music"]
+        }
+      }
+    ]
+  },
   "icon": "radar",
   "enabled": true
 }
