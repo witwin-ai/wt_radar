@@ -16,6 +16,9 @@ import wt_radar  # noqa: E402,F401  (registers Radar components before Scene.fro
 from witwin_server.features.solvers.sdk import query, serve  # noqa: E402
 from wt_radar.adapter.solve import SensorSpec, SigProc, SolveRunner, TracerSpec  # noqa: E402
 
+_LIVE_CACHES: Dict[str, Dict[str, Any]] = {}
+_MAX_LIVE_CACHES = 8
+
 
 def _sensor(config: Dict[str, Any]) -> SensorSpec:
     return SensorSpec(**dict(config.get("sensor") or {}))
@@ -42,9 +45,19 @@ def solve(ctx, scene, config):
     sensor = _sensor(config)
     tracer = _tracer(config)
     t0 = float(config.get("t0") or 0.0)
+    live = dict(config.get("live") or {})
+    live_session_id = str(live.get("session_id") or "")
+    live_signature = str(live.get("signature") or "")
+    live_cache = None
+    if live_session_id and live_signature:
+        live_cache = _LIVE_CACHES.setdefault(live_session_id, {})
+        if len(_LIVE_CACHES) > _MAX_LIVE_CACHES:
+            for session_id in list(_LIVE_CACHES)[:-_MAX_LIVE_CACHES]:
+                _LIVE_CACHES.pop(session_id, None)
     ctx.log(
         "Radar solver: solve received "
-        f"backend={sensor.backend} device={sensor.device} t0={t0:.6f}"
+        f"backend={sensor.backend} device={sensor.device} t0={t0:.6f} "
+        f"live_cache={'on' if live_cache is not None else 'off'}"
     )
     ctx.progress(0.0, "building Radar scene")
     result = SolveRunner.run(
@@ -53,6 +66,8 @@ def solve(ctx, scene, config):
         tracer=tracer,
         motion_sampling=str(config.get("motion_sampling") or "per_chirp"),
         t0=t0,
+        live_cache=live_cache,
+        cache_key=live_signature or None,
     )
     ctx.log(f"Radar solver: solve complete signal_shape={tuple(result.signal.shape)}")
     ctx.progress(1.0, "Radar solve complete")
@@ -149,4 +164,5 @@ def music(ctx, result, params):
     return {"image": _as_numpy(image, dtype=np.float32)}
 
 
-serve(solve)
+if __name__ == "__main__":
+    serve(solve)

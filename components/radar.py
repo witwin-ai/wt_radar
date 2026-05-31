@@ -345,6 +345,7 @@ class RadarComponent(Component):
             return "Solve failed: no result handle"
         self._solver_result_handle = str(handle)
         self._solver_run_id = run.run_id
+        self._clear_query_cache()
         self._radar = None
         self._signal = None
         self.update_view()
@@ -379,6 +380,7 @@ class RadarComponent(Component):
             self._live_pause_event.clear()
             self._live_started_at = time.monotonic()
             self._live_last_signature = None
+            self._clear_query_cache()
             self.stream_status = "running"
             self._open_signal_stream(self._stream_channel_descriptors(), status="active")
             self._live_thread = threading.Thread(
@@ -413,6 +415,7 @@ class RadarComponent(Component):
             self._live_stop_event.set()
             self._live_pause_event.clear()
             self.stream_status = "stopped"
+            self._clear_query_cache()
             if self._signal_stream_id:
                 try:
                     api.streams.close(self._signal_stream_id, reason="stopped")
@@ -458,6 +461,7 @@ class RadarComponent(Component):
         self._frames = frames
         self._solver_result_handle = ""
         self._solver_run_id = ""
+        self._clear_query_cache()
         self._publish_signal_stream()
         self.show_frame()
         Notifications.success("Radar", f"Timeline: {frames.shape[0]} frames {tuple(frames.shape)}")
@@ -473,6 +477,7 @@ class RadarComponent(Component):
         self._radar = self._timeline_radar
         self._solver_result_handle = ""
         self._solver_run_id = ""
+        self._clear_query_cache()
         self.update_view()
         self._publish_signal_stream()
         return f"Frame {index}"
@@ -583,15 +588,7 @@ class RadarComponent(Component):
 
     def _show_rd(self):
         if self._solver_result_handle:
-            payload = self._query_result("range_doppler", {
-                "tx": int(self.tx_index),
-                "rx": int(self.rx_index),
-                "static_clutter_removal": bool(self.static_clutter_removal),
-                "show_cfar": bool(self.show_cfar),
-                "guard": list(self._guard()),
-                "training": list(self._training()),
-                "pfa": num(self.pfa),
-            })
+            payload = self._query_result("range_doppler", self._rd_query_params())
             mag_db = np.asarray(payload["mag_db"], dtype=np.float32)
             tx = int(payload.get("tx", self.tx_index))
             rx = int(payload.get("rx", self.rx_index))
@@ -775,7 +772,7 @@ class RadarComponent(Component):
             should_solve = not bool(self.stream_on_change_only) or signature != self._live_last_signature
             if should_solve:
                 logger.info(f"Radar live loop solving: generation={generation} signature_changed={signature != self._live_last_signature}")
-                ok = self._solve_once_for_stream(generation)
+                ok = self._solve_once_for_stream(generation, signature)
                 if not ok:
                     self.stream_status = "error"
                     self._update_stream_status("error")
@@ -789,7 +786,7 @@ class RadarComponent(Component):
     def _live_generation_active(self, generation):
         return generation == self._live_generation
 
-    def _solve_once_for_stream(self, generation):
+    def _solve_once_for_stream(self, generation, signature=None):
         try:
             if not self._live_generation_active(generation):
                 return True
@@ -797,6 +794,7 @@ class RadarComponent(Component):
                 return True
             spec = SensorSpec.from_component(self)
             t0 = self._live_t0()
+            solve_signature = signature if signature is not None else self._live_scene_signature()
             logger.info(
                 "Radar live solve request: "
                 f"backend={spec.backend} device={spec.device} position={spec.position} t0={t0:.6f}"
@@ -805,7 +803,12 @@ class RadarComponent(Component):
             run = api.solvers.solve(
                 "witwin.radar.simulate",
                 scene=self.scene,
-                config=self._solver_config(spec, t0_override=t0),
+                config=self._solver_config(
+                    spec,
+                    t0_override=t0,
+                    live_session_id=self._stream_id(),
+                    live_signature=solve_signature,
+                ),
             )
             logger.info(f"Radar live solve returned: status={run.status} run_id={run.run_id}")
             if not self._live_generation_active(generation):
@@ -814,12 +817,16 @@ class RadarComponent(Component):
                 message = (run.error or {}).get("message") or "simulate failed"
                 self._mark_stream_error(message)
                 return False
+            if self._live_scene_signature() != solve_signature:
+                logger.info("Radar live solve result is stale; skipping preview and stream publish")
+                return True
             handle = (run.outputs or {}).get("resultHandle")
             if not handle:
                 self._mark_stream_error("Solver returned no result handle")
                 return False
             self._solver_result_handle = str(handle)
             self._solver_run_id = run.run_id
+            self._clear_query_cache()
             self._radar = None
             self._signal = None
             if not self._live_generation_active(generation):
@@ -962,12 +969,7 @@ class RadarComponent(Component):
 
     def _publish_rd_stream(self, stream):
         if self._solver_result_handle:
-            payload = self._query_result("range_doppler", {
-                "tx": int(self.tx_index),
-                "rx": int(self.rx_index),
-                "static_clutter_removal": bool(self.static_clutter_removal),
-                "show_cfar": False,
-            })
+            payload = self._query_result("range_doppler", self._rd_query_params(show_cfar=False))
             mag_db = np.asarray(payload.get("mag_db") or [], dtype=np.float32)
         else:
             if self._signal is None or self._radar is None:
@@ -1066,15 +1068,35 @@ class RadarComponent(Component):
             return max(0, int(self.rx_index))
         return max(0, min(int(self.rx_index), self._signal.shape[1] - 1))
 
-    def _solver_config(self, spec: SensorSpec, *, t0_override=None) -> dict:
-        return {
+    def _solver_config(self, spec: SensorSpec, *, t0_override=None, live_session_id=None,
+                       live_signature=None) -> dict:
+        config = {
             "sensor": asdict(spec),
             "tracer": asdict(TracerSpec.from_component(self)),
             "motion_sampling": str(self.motion_sampling),
             "t0": num(self.t0) if t0_override is None else num(t0_override),
         }
+        if live_session_id and live_signature:
+            config["live"] = {
+                "session_id": str(live_session_id),
+                "signature": str(live_signature),
+            }
+        return config
 
     def _query_result(self, op: str, params: dict):
+        cache = getattr(self, "_query_cache", None)
+        if cache is None:
+            cache = {}
+            self._query_cache = cache
+        cache_key = (
+            str(self._solver_result_handle or ""),
+            str(self._solver_run_id or ""),
+            str(op),
+            json.dumps(params, sort_keys=True, separators=(",", ":"), default=str),
+        )
+        if cache_key in cache:
+            logger.info(f"Radar solver query cache hit: op={op}")
+            return cache[cache_key]
         response = api.solvers.query(
             "witwin.radar.simulate",
             self._solver_result_handle,
@@ -1082,4 +1104,28 @@ class RadarComponent(Component):
             params,
             run_id=self._solver_run_id or None,
         )
-        return response.get("data") or {}
+        data = response.get("data") or {}
+        cache[cache_key] = data
+        return data
+
+    def _clear_query_cache(self):
+        self._query_cache = {}
+
+    def _rd_query_params(self, *, tx=None, rx=None, static_clutter_removal=None, show_cfar=None):
+        show = bool(self.show_cfar) if show_cfar is None else bool(show_cfar)
+        params = {
+            "tx": int(self.tx_index if tx is None else tx),
+            "rx": int(self.rx_index if rx is None else rx),
+            "static_clutter_removal": (
+                bool(self.static_clutter_removal)
+                if static_clutter_removal is None else bool(static_clutter_removal)
+            ),
+            "show_cfar": show,
+        }
+        if show:
+            params.update({
+                "guard": list(self._guard()),
+                "training": list(self._training()),
+                "pfa": num(self.pfa),
+            })
+        return params

@@ -11,6 +11,7 @@ Live solve needs CUDA for renderable scenes regardless of the solver backend: th
 binds to ``Radar.device``, so simulation uses the scene device even when a stored sensor
 spec was authored as CPU-only for inspection.
 """
+import time
 from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
@@ -136,12 +137,23 @@ class SolveRunner:
 
     @staticmethod
     def run(studio_scene: Any, *, sensor: SensorSpec, tracer: TracerSpec,
-            motion_sampling: str, t0: float) -> SolveResult:
+            motion_sampling: str, t0: float, live_cache: Optional[dict] = None,
+            cache_key: Optional[str] = None) -> SolveResult:
         """Rebuild the (Scene, RadarConfig) pair on CUDA, construct the Radar, and simulate."""
         import torch
         from .radar_adapter import RadarAdapter
 
         scene_device = "cuda" if torch.cuda.is_available() else "cpu"
+        if live_cache is not None and cache_key is not None:
+            cached = SolveRunner._try_live_cache(
+                live_cache,
+                cache_key=cache_key,
+                t0=t0,
+            )
+            if cached is not None:
+                return cached
+
+        build_started = time.perf_counter()
         scene, config = RadarAdapter().to_platform(studio_scene, device=scene_device)
         logger.info(
             f"SolveRunner.run: scene_device={scene_device}, "
@@ -150,16 +162,218 @@ class SolveRunner:
         logger.info(
             f"  wr.Radar built: position={radar.position.tolist()} "
             f"target={radar.target.tolist()} tx_pos[0]={radar.tx_pos[0].tolist()}")
-        signal = radar.simulate(
-            scene, resolution=tracer.resolution, epsilon_r=tracer.epsilon_r,
-            sampling=tracer.sampling, multipath=tracer.multipath,
-            max_reflections=tracer.max_reflections, ray_batch_size=tracer.ray_batch_size,
-            t0=t0, motion_sampling=motion_sampling)
+        if live_cache is not None and cache_key is not None:
+            result = SolveRunner._run_live_cache_miss(
+                live_cache,
+                cache_key=cache_key,
+                scene=scene,
+                radar=radar,
+                tracer=tracer,
+                motion_sampling=motion_sampling,
+                t0=t0,
+                build_elapsed=time.perf_counter() - build_started,
+            )
+        else:
+            simulate_started = time.perf_counter()
+            signal = radar.simulate(
+                scene, resolution=tracer.resolution, epsilon_r=tracer.epsilon_r,
+                sampling=tracer.sampling, multipath=tracer.multipath,
+                max_reflections=tracer.max_reflections, ray_batch_size=tracer.ray_batch_size,
+                t0=t0, motion_sampling=motion_sampling)
+            result = SolveResult(radar=radar, signal=signal)
+            logger.info(
+                f"  radar.simulate elapsed_ms={(time.perf_counter() - simulate_started) * 1000.0:.2f}")
+        SolveRunner._log_signal("radar solve done", result.signal)
+        return result
+
+    @staticmethod
+    def _try_live_cache(live_cache: dict, *, cache_key: str, t0: float) -> Optional[SolveResult]:
+        """Reuse fixed scene/radar/path state for repeated live frames with the same signature."""
+        if live_cache.get("cache_key") != cache_key:
+            return None
+        if not bool(live_cache.get("fast_frame_reusable", False)):
+            return None
+        radar = live_cache.get("radar")
+        if radar is None:
+            return None
+
+        started = time.perf_counter()
+        try:
+            path_cache = live_cache.get("path_cache")
+            if path_cache is not None:
+                signal = radar.mimo_from_paths(path_cache)
+                mode = "mimo_from_paths"
+            else:
+                trace = live_cache.get("trace")
+                if trace is None:
+                    return None
+                signal = radar.mimo_from_trace(trace, t0=t0)
+                mode = "mimo_from_trace"
+        except Exception as exc:  # noqa: BLE001 - stale/incompatible fast path should rebuild
+            logger.warning(f"  live cache fast path failed; rebuilding: {type(exc).__name__}: {exc}")
+            live_cache.clear()
+            return None
+
+        logger.info(
+            f"  live cache hit: mode={mode} elapsed_ms={(time.perf_counter() - started) * 1000.0:.2f}")
+        return SolveResult(radar=radar, signal=signal)
+
+    @staticmethod
+    def _run_live_cache_miss(live_cache: dict, *, cache_key: str, scene: Any, radar: Any,
+                             tracer: TracerSpec, motion_sampling: str, t0: float,
+                             build_elapsed: float) -> SolveResult:
+        """Trace once and cache the MIMO path representation for live repeats."""
+        tracer_obj, tracer_reused = SolveRunner._live_tracer(
+            live_cache,
+            scene,
+            radar,
+            tracer,
+        )
+        trace_started = time.perf_counter()
+        trace_time = t0 if bool(getattr(scene, "has_motion", False)) else None
+        trace = tracer_obj.trace(time=trace_time)
+        trace_elapsed = time.perf_counter() - trace_started
+
+        path_cache = None
+        signal_started = time.perf_counter()
+        mode = "mimo_from_trace"
+        can_cache_paths = not (bool(getattr(scene, "has_motion", False)) and motion_sampling == "per_chirp")
+        if can_cache_paths:
+            try:
+                path_cache = radar.path_cache_from_trace(trace)
+                signal = radar.mimo_from_paths(path_cache)
+                mode = "mimo_from_paths"
+            except (AttributeError, NotImplementedError) as exc:
+                logger.info(f"  live path cache unavailable; using mimo_from_trace: {type(exc).__name__}")
+                signal = radar.mimo_from_trace(trace, t0=t0)
+            except Exception as exc:  # noqa: BLE001 - fall back to the documented trace path
+                logger.warning(f"  live path cache build failed; using mimo_from_trace: {type(exc).__name__}: {exc}")
+                signal = radar.mimo_from_trace(trace, t0=t0)
+        else:
+            signal = radar.mimo_from_trace(trace, t0=t0)
+        signal_elapsed = time.perf_counter() - signal_started
+
+        live_cache.clear()
+        live_cache.update({
+            "cache_key": cache_key,
+            "radar": radar,
+            "trace": trace,
+            "path_cache": path_cache,
+            "tracer": tracer_obj,
+            "tracer_spec_key": SolveRunner._tracer_spec_key(tracer),
+            "scene_topology_key": SolveRunner._scene_topology_key(scene),
+            "fast_frame_reusable": not bool(getattr(scene, "has_motion", False)),
+        })
+        logger.info(
+            "  live cache miss: "
+            f"build_ms={build_elapsed * 1000.0:.2f} trace_ms={trace_elapsed * 1000.0:.2f} "
+            f"signal_ms={signal_elapsed * 1000.0:.2f} mode={mode} "
+            f"path_cached={path_cache is not None} tracer_reused={tracer_reused}")
+        return SolveResult(radar=radar, signal=signal)
+
+    @staticmethod
+    def _log_signal(prefix: str, signal: Any) -> None:
         sig_abs = signal.detach().cpu().abs()
         logger.info(
-            f"  radar.simulate done: shape={tuple(signal.shape)} "
+            f"  {prefix}: shape={tuple(signal.shape)} "
             f"mean|sig|={sig_abs.mean().item():.6e} max|sig|={sig_abs.max().item():.6e}")
-        return SolveResult(radar=radar, signal=signal)
+
+    @staticmethod
+    def _live_tracer(live_cache: dict, scene: Any, radar: Any, tracer: TracerSpec) -> tuple[Any, bool]:
+        from witwin.radar.trace import Tracer
+
+        tracer_spec_key = SolveRunner._tracer_spec_key(tracer)
+        topology_key = SolveRunner._scene_topology_key(scene)
+        cached = live_cache.get("tracer")
+        if (
+            cached is not None
+            and live_cache.get("tracer_spec_key") == tracer_spec_key
+            and live_cache.get("scene_topology_key") == topology_key
+        ):
+            cached.scene = scene
+            cached.radar = radar
+            SolveRunner._mark_scene_vertices_dirty(scene)
+            return cached, True
+
+        return Tracer(
+            scene,
+            radar,
+            resolution=tracer.resolution,
+            epsilon_r=tracer.epsilon_r,
+            sampling=tracer.sampling,
+            multipath=tracer.multipath,
+            max_reflections=tracer.max_reflections,
+            ray_batch_size=tracer.ray_batch_size,
+        ), False
+
+    @staticmethod
+    def _tracer_spec_key(tracer: TracerSpec) -> tuple:
+        return (
+            int(tracer.resolution),
+            float(tracer.epsilon_r),
+            str(tracer.sampling),
+            bool(tracer.multipath),
+            int(tracer.max_reflections),
+            int(tracer.ray_batch_size),
+        )
+
+    @staticmethod
+    def _mark_scene_vertices_dirty(scene: Any) -> None:
+        dirty_full = getattr(scene, "DIRTY_FULL", None)
+        dirty_vertices = getattr(scene, "DIRTY_VERTICES", None)
+        if dirty_full is None or dirty_vertices is None:
+            return
+        if int(getattr(scene, "dirty_level", dirty_full)) >= int(dirty_full):
+            try:
+                scene._dirty_level = int(dirty_vertices)
+            except Exception:  # noqa: BLE001 - dirty hint is an optimization only
+                return
+
+    @staticmethod
+    def _scene_topology_key(scene: Any) -> tuple:
+        rows = []
+        for structure in getattr(scene, "structures", []) or []:
+            geometry = getattr(structure, "geometry", None)
+            material = getattr(structure, "material", None)
+            rows.append((
+                str(getattr(structure, "name", "")),
+                type(geometry).__module__ + "." + type(geometry).__name__,
+                SolveRunner._array_shape(getattr(geometry, "vertices", None)),
+                SolveRunner._array_shape_and_bytes(getattr(geometry, "faces", None)),
+                SolveRunner._material_eps(material),
+                bool(getattr(structure, "enabled", True)),
+            ))
+        return tuple(rows)
+
+    @staticmethod
+    def _array_shape(value: Any):
+        if value is None:
+            return None
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        try:
+            return tuple(np.asarray(value).shape)
+        except Exception:  # noqa: BLE001 - non-array geometry metadata is not topology-critical
+            return None
+
+    @staticmethod
+    def _array_shape_and_bytes(value: Any):
+        if value is None:
+            return None
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        try:
+            array = np.asarray(value)
+        except Exception:  # noqa: BLE001
+            return None
+        return tuple(array.shape), array.tobytes()
+
+    @staticmethod
+    def _material_eps(material: Any) -> Optional[float]:
+        try:
+            return float(material.evaluate_static().eps_r)
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def run_group(studio_scene: Any, *, sensors: "dict[str, SensorSpec]", tracer: TracerSpec,

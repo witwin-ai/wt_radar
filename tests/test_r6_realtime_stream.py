@@ -141,6 +141,25 @@ def test_realtime_stream_republishes_when_radar_transform_changes(monkeypatch):
             lambda: radar.signal_figure._data.get("values", [[None]])[0][0] == 1.0,
             "initial live figure preview",
         )
+        assert [
+            call for call in fake.solvers.query_calls
+            if call[0] == "range_doppler" and call[1] == "handle-1"
+        ] == [
+            (
+                "range_doppler",
+                "handle-1",
+                {
+                    "tx": 0,
+                    "rx": 0,
+                    "static_clutter_removal": False,
+                    "show_cfar": False,
+                },
+                {"run_id": "run-1"},
+            )
+        ]
+        first_config = fake.solvers.solve_calls[0][1]["config"]
+        assert first_config["live"]["session_id"] == "radar.radar_settings.signal"
+        assert first_config["live"]["signature"]
         first_count = len(fake.solvers.solve_calls)
 
         settings.get_component("Transform").position = [1.0, 2.0, 3.0]
@@ -149,6 +168,22 @@ def test_realtime_stream_republishes_when_radar_transform_changes(monkeypatch):
             lambda: radar.signal_figure._data.get("values", [[None]])[0][0] == 2.0,
             "updated live figure preview",
         )
+        assert [
+            call for call in fake.solvers.query_calls
+            if call[0] == "range_doppler" and call[1] == "handle-2"
+        ] == [
+            (
+                "range_doppler",
+                "handle-2",
+                {
+                    "tx": 0,
+                    "rx": 0,
+                    "static_clutter_removal": False,
+                    "show_cfar": False,
+                },
+                {"run_id": "run-2"},
+            )
+        ]
 
         assert radar.pause_stream() == "Stream paused"
         paused_count = len(fake.solvers.solve_calls)
@@ -192,3 +227,46 @@ def test_realtime_stream_continuous_mode_advances_t0(monkeypatch):
     assert len(t0_values) >= 2
     assert t0_values[0] >= 1.5
     assert t0_values[-1] > t0_values[0]
+
+
+def test_realtime_stream_skips_publish_for_stale_solve(monkeypatch):
+    import threading
+
+    import wt_radar.components.radar as radar_mod
+
+    class SlowSolvers(_FakeSolvers):
+        def __init__(self):
+            super().__init__()
+            self.first_started = threading.Event()
+            self.release_first = threading.Event()
+
+        def solve(self, solver_id, **kwargs):
+            index = len(self.solve_calls) + 1
+            self.solve_calls.append((solver_id, kwargs))
+            if index == 1:
+                self.first_started.set()
+                assert self.release_first.wait(timeout=3.0)
+            return _FakeRun(index)
+
+    fake = _FakeApi()
+    fake.solvers = SlowSolvers()
+    monkeypatch.setattr(radar_mod, "api", fake)
+    radar, settings = _radar_in_scene()
+    radar.stream_max_fps = 20.0
+    radar.stream_on_change_only = True
+    radar.stream_channels = "rd"
+
+    assert radar.start_stream() == "Stream started"
+    try:
+        assert fake.solvers.first_started.wait(timeout=3.0)
+        settings.get_component("Transform").position = [5.0, 2.0, 3.0]
+        fake.solvers.release_first.set()
+        _wait_for(lambda: len(fake.solvers.solve_calls) >= 2, "fresh solve after stale one")
+        stream = next(iter(fake.streams.streams.values()))
+        _wait_for(lambda: len(stream.published) >= 1, "fresh stream publish")
+    finally:
+        radar.stop_stream()
+        _wait_for(lambda: radar._live_thread is None or not radar._live_thread.is_alive(), "live thread stop")
+
+    assert all(call[1] != "handle-1" for call in fake.solvers.query_calls)
+    assert any(call[1] == "handle-2" for call in fake.solvers.query_calls)
