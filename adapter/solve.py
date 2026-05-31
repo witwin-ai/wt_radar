@@ -2,15 +2,16 @@
 
 ``SolveRunner`` is the export->solve half of the edit loop: it rebuilds the platform
 ``(Scene, RadarConfig)`` pair from the live studio scene (on a CUDA scene, because the
-mitsuba ray tracer is CUDA-only), constructs a ``Radar`` from the RadarSensor pose/backend,
+RayD tracer is CUDA-only), constructs a ``Radar`` from the RadarSensor pose/backend,
 and runs ``radar.simulate(...)`` to produce the MIMO data cube. ``SigProc`` wraps the
 platform ``sigproc`` (range-doppler / point cloud / MUSIC / CFAR) for the in-component
 figure. Result tensors are runtime state — never serialized into the scene.
 
-Live solve needs CUDA regardless of the solver backend (the tracer is mitsuba-CUDA); the
-dirichlet/slang solver backends also need CUDA, while pytorch runs its solve math on CPU.
+Live solve needs CUDA for renderable scenes regardless of the solver backend: the tracer
+binds to ``Radar.device``, so simulation uses the scene device even when a stored sensor
+spec was authored as CPU-only for inspection.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, List, Optional, Tuple
 
 import numpy as np
@@ -138,8 +139,6 @@ class SolveRunner:
             motion_sampling: str, t0: float) -> SolveResult:
         """Rebuild the (Scene, RadarConfig) pair on CUDA, construct the Radar, and simulate."""
         import torch
-        import witwin.radar as wr
-
         from .radar_adapter import RadarAdapter
 
         scene_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -147,7 +146,7 @@ class SolveRunner:
         logger.info(
             f"SolveRunner.run: scene_device={scene_device}, "
             f"{len(scene.structures)} structures, tracer={tracer.sampling}@{tracer.resolution}")
-        radar = SolveRunner.build_radar(config, sensor)
+        radar = SolveRunner.build_radar(config, SolveRunner._sensor_for_scene_device(sensor, scene_device))
         logger.info(
             f"  wr.Radar built: position={radar.position.tolist()} "
             f"target={radar.target.tolist()} tx_pos[0]={radar.tx_pos[0].tolist()}")
@@ -173,12 +172,22 @@ class SolveRunner:
 
         scene_device = "cuda" if torch.cuda.is_available() else "cpu"
         scene, config = RadarAdapter().to_platform(studio_scene, device=scene_device)
-        radars = {name: SolveRunner.build_radar(config, spec) for name, spec in sensors.items()}
+        radars = {
+            name: SolveRunner.build_radar(config, SolveRunner._sensor_for_scene_device(spec, scene_device))
+            for name, spec in sensors.items()
+        }
         return wr.Radar.simulate_group(
             scene, radars=radars, resolution=tracer.resolution, epsilon_r=tracer.epsilon_r,
             sampling=tracer.sampling, multipath=tracer.multipath,
             max_reflections=tracer.max_reflections, ray_batch_size=tracer.ray_batch_size,
             t0=t0, motion_sampling=motion_sampling)
+
+    @staticmethod
+    def _sensor_for_scene_device(sensor: SensorSpec, scene_device: str) -> SensorSpec:
+        """Return the sensor device needed by the active platform scene."""
+        if str(scene_device).startswith("cuda") and str(sensor.device) != "cuda":
+            return replace(sensor, device="cuda")
+        return sensor
 
     @staticmethod
     def build_radar(config: Any, sensor: SensorSpec) -> Any:

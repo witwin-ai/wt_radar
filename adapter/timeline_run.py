@@ -32,7 +32,7 @@ class TimelineRunner:
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         scene, config = RadarAdapter().to_platform(studio_scene, device=device)
-        radar = SolveRunner.build_radar(config, sensor)
+        radar = SolveRunner.build_radar(config, SolveRunner._sensor_for_scene_device(sensor, device))
 
         timeline = wr.Timeline(frame_rate=num(comp.frame_rate), device=device)
         if str(comp.timeline_source) == "pointcloud_sequence":

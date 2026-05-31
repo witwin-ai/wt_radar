@@ -15,7 +15,6 @@ import pytest
 import torch
 import witwin.radar as wr
 
-from wt_radar.adapter.radar_adapter import RadarAdapter
 from wt_radar.adapter.solve import SensorSpec, SigProc, SolveRunner, TracerSpec
 
 _CONFIG = {
@@ -86,7 +85,7 @@ def test_sigproc_views(adapter, cuda_ready):
 def test_pytorch_matches_direct(adapter, cuda_ready):
     # The adapter-rebuilt scene must trace identically to a directly-built one.
     direct_scene = _scene("cuda")
-    direct = wr.Radar(wr.RadarConfig.from_dict(_CONFIG), backend="pytorch", device="cpu")
+    direct = wr.Radar(wr.RadarConfig.from_dict(_CONFIG), backend="pytorch", device="cuda")
     sig_direct = direct.simulate(direct_scene, resolution=_RESOLUTION, sampling="triangle")
     sig_adapter = _solve_via_adapter(adapter, "pytorch").signal
     assert tuple(sig_adapter.shape) == tuple(sig_direct.shape)
