@@ -56,7 +56,7 @@ from ..adapter.common import (
     Derived,
     num,
 )
-from ..adapter.solve import SensorSpec, SigProc, SolveRunner, TracerSpec
+from ..adapter.solve import SensorSpec, SigProc, TracerSpec
 
 logger = get_logger("Radar")
 
@@ -357,16 +357,21 @@ class RadarComponent(Component):
     @button(display_name="Start Stream", group=_SOLVE)
     def start_stream(self):
         """Start realtime solve + stream production."""
+        logger.info("=== Radar Start Stream clicked ===")
         if self.scene is None or self.owner is None:
+            logger.warning("Radar stream start ignored: component is not attached to a scene")
             return "Radar must be attached to a scene"
         self._ensure_live_state()
         with self._live_lock:
             if self._live_thread is not None and self._live_thread.is_alive():
                 if self._live_stop_event.is_set():
+                    logger.info("Radar stream start ignored: existing stream is stopping")
                     return "Stream stopping"
                 self._live_pause_event.clear()
                 self.stream_status = "running"
                 self._update_stream_status("active")
+                Notifications.info("Radar", "Realtime stream resumed")
+                logger.info(f"Radar stream resumed: thread={self._live_thread.name}")
                 return "Stream running"
             self._live_generation += 1
             generation = self._live_generation
@@ -383,6 +388,8 @@ class RadarComponent(Component):
                 daemon=True,
             )
             self._live_thread.start()
+            logger.info(f"Radar stream thread started: generation={generation} thread={self._live_thread.name}")
+        Notifications.info("Radar", "Realtime stream started")
         return "Stream started"
 
     @button(display_name="Pause Stream", group=_SOLVE)
@@ -392,12 +399,15 @@ class RadarComponent(Component):
         self._live_pause_event.set()
         self.stream_status = "paused"
         self._update_stream_status("paused")
+        Notifications.info("Radar", "Realtime stream paused")
+        logger.info("Radar stream paused")
         return "Stream paused"
 
     @button(display_name="Stop Stream", group=_SOLVE)
     def stop_stream(self):
         """Stop realtime production and close the stream."""
         self._ensure_live_state()
+        logger.info("Radar stream stop requested")
         with self._live_lock:
             self._live_generation += 1
             self._live_stop_event.set()
@@ -410,6 +420,8 @@ class RadarComponent(Component):
                     logger.debug(f"Radar stream close skipped: {exc}")
             self.signal_stream = None
             self._signal_stream_id = ""
+        Notifications.info("Radar", "Realtime stream stopped")
+        logger.info("Radar stream stopped")
         return "Stream stopped"
 
     @button(display_name="Update View", group=_POSTPROC)
@@ -685,13 +697,16 @@ class RadarComponent(Component):
         try:
             descriptors = self._stream_channel_descriptors()
             stream = self._open_signal_stream(descriptors)
+            stream_id = getattr(stream, "id", getattr(stream, "stream_id", self._stream_id()))
             wanted = set(channels or self._selected_stream_channels(default=("raw", "rd", "pc")))
+            logger.info(f"Radar stream publish started: stream={stream_id} channels={sorted(wanted)}")
             if "rd" in wanted:
                 self._publish_rd_stream(stream)
             if "pc" in wanted:
                 self._publish_pc_stream(stream)
             if "raw" in wanted:
                 self._publish_raw_stream(stream)
+            logger.info(f"Radar stream publish complete: stream={stream_id}")
         except Exception as exc:  # noqa: BLE001 - stream output must not break solve preview
             logger.warning(f"Radar stream publish skipped: {exc}")
 
@@ -745,8 +760,10 @@ class RadarComponent(Component):
 
     def _live_loop(self, generation):
         self._ensure_live_state()
+        logger.info(f"Radar live loop entered: generation={generation}")
         while self._live_generation_active(generation) and not self._live_stop_event.is_set():
             if not self._live_owner_active():
+                logger.info("Radar live loop stopping: owner is no longer active")
                 self.stop_stream()
                 break
             if self._live_pause_event.is_set():
@@ -757,6 +774,7 @@ class RadarComponent(Component):
             signature = self._live_scene_signature()
             should_solve = not bool(self.stream_on_change_only) or signature != self._live_last_signature
             if should_solve:
+                logger.info(f"Radar live loop solving: generation={generation} signature_changed={signature != self._live_last_signature}")
                 ok = self._solve_once_for_stream(generation)
                 if not ok:
                     self.stream_status = "error"
@@ -766,6 +784,7 @@ class RadarComponent(Component):
                     self._live_last_signature = signature
             elapsed = time.monotonic() - started
             time.sleep(max(0.01, interval - elapsed))
+        logger.info(f"Radar live loop exited: generation={generation}")
 
     def _live_generation_active(self, generation):
         return generation == self._live_generation
@@ -777,11 +796,17 @@ class RadarComponent(Component):
             if self._live_stop_event is not None and self._live_stop_event.is_set():
                 return True
             spec = SensorSpec.from_component(self)
+            t0 = self._live_t0()
+            logger.info(
+                "Radar live solve request: "
+                f"backend={spec.backend} device={spec.device} position={spec.position} t0={t0:.6f}"
+            )
             run = api.solvers.solve(
                 "witwin.radar.simulate",
                 scene=self.scene,
-                config=self._solver_config(spec, t0_override=self._live_t0()),
+                config=self._solver_config(spec, t0_override=t0),
             )
+            logger.info(f"Radar live solve returned: status={run.status} run_id={run.run_id}")
             if not self._live_generation_active(generation):
                 return True
             if run.status != "succeeded":

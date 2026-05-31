@@ -12,9 +12,9 @@ PLUGIN_PARENT = Path(__file__).resolve().parent.parent
 if str(PLUGIN_PARENT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_PARENT))
 
-import wt_radar  # noqa: F401  (registers Radar components before Scene.from_dict)
-from witwin_server.features.solvers.sdk import query, serve
-from wt_radar.adapter.solve import SensorSpec, SigProc, SolveRunner, TracerSpec
+import wt_radar  # noqa: E402,F401  (registers Radar components before Scene.from_dict)
+from witwin_server.features.solvers.sdk import query, serve  # noqa: E402
+from wt_radar.adapter.solve import SensorSpec, SigProc, SolveRunner, TracerSpec  # noqa: E402
 
 
 def _sensor(config: Dict[str, Any]) -> SensorSpec:
@@ -39,20 +39,29 @@ def _as_numpy(value: Any, dtype=None) -> np.ndarray:
 
 def solve(ctx, scene, config):
     config = config or {}
+    sensor = _sensor(config)
+    tracer = _tracer(config)
+    t0 = float(config.get("t0") or 0.0)
+    ctx.log(
+        "Radar solver: solve received "
+        f"backend={sensor.backend} device={sensor.device} t0={t0:.6f}"
+    )
     ctx.progress(0.0, "building Radar scene")
     result = SolveRunner.run(
         scene,
-        sensor=_sensor(config),
-        tracer=_tracer(config),
+        sensor=sensor,
+        tracer=tracer,
         motion_sampling=str(config.get("motion_sampling") or "per_chirp"),
-        t0=float(config.get("t0") or 0.0),
+        t0=t0,
     )
+    ctx.log(f"Radar solver: solve complete signal_shape={tuple(result.signal.shape)}")
     ctx.progress(1.0, "Radar solve complete")
     return result
 
 
 @query("raw_signal")
 def raw_signal(ctx, result, params):
+    ctx.log("Radar solver query: raw_signal")
     sig = result.signal.detach().cpu().numpy()
     n_tx, n_rx, _, n_adc = sig.shape
     tx = _clamp_index(params.get("tx"), n_tx)
@@ -86,6 +95,7 @@ def _pair_series(sample, x):
 
 @query("range_doppler")
 def range_doppler(ctx, result, params):
+    ctx.log("Radar solver query: range_doppler")
     sig_shape = result.signal.shape
     tx = _clamp_index(params.get("tx"), int(sig_shape[0]))
     rx = _clamp_index(params.get("rx"), int(sig_shape[1]))
@@ -117,6 +127,7 @@ def range_doppler(ctx, result, params):
 
 @query("point_cloud")
 def point_cloud(ctx, result, params):
+    ctx.log("Radar solver query: point_cloud")
     pc = SigProc.point_cloud(
         result.radar,
         result.signal,
@@ -132,6 +143,7 @@ def point_cloud(ctx, result, params):
 
 @query("music")
 def music(ctx, result, params):
+    ctx.log("Radar solver query: music")
     image = SigProc.music_image(result.radar, result.signal,
                                 num_pixels=int(params.get("num_pixels") or 64))
     return {"image": _as_numpy(image, dtype=np.float32)}
