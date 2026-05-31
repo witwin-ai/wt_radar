@@ -801,6 +801,7 @@ class RadarComponent(Component):
                 "Radar live solve request: "
                 f"backend={spec.backend} device={spec.device} position={spec.position} t0={t0:.6f}"
             )
+            logger.info(f"Radar live scene state: {self._live_scene_summary()}")
             run = api.solvers.solve(
                 "witwin.radar.simulate",
                 scene=self.scene,
@@ -864,6 +865,30 @@ class RadarComponent(Component):
                 ))
         return json.dumps(items, sort_keys=True, separators=(",", ":"))
 
+    def _live_scene_summary(self, limit=8):
+        scene = self.scene
+        if scene is None:
+            return "scene=None"
+        objects = getattr(scene, "objects", {}) or {}
+        rows = []
+        for obj_id, obj in sorted(objects.items()):
+            transform = obj.get_component("Transform")
+            if transform is None:
+                continue
+            has_geometry = obj.get_component("PlatformGeometry") is not None or obj.get_component("Mesh") is not None
+            if obj is not self.owner and not has_geometry:
+                continue
+            name = getattr(obj, "name", obj_id)
+            role = "radar" if obj is self.owner else "structure"
+            pos = self._signature_value(getattr(transform, "position", None))
+            rot = self._signature_value(getattr(transform, "rotation", None))
+            scale = self._signature_value(getattr(transform, "scale", None))
+            rows.append(f"{role}:{name} pos={pos} rot={rot} scale={scale} visible={bool(getattr(obj, 'visible', True))}")
+            if len(rows) >= int(limit):
+                break
+        suffix = "" if len(rows) == len(objects) else f" shown={len(rows)}"
+        return f"objects={len(objects)}{suffix} | " + " | ".join(rows)
+
     def _component_signature(self):
         ignored = {"signal_stream", "signal_figure", "stream_status"}
         values = {}
@@ -906,6 +931,11 @@ class RadarComponent(Component):
                 "rx": int(payload.get("rx", self.rx_index)),
                 "chirp": 0,
             })
+            amp = np.sqrt(real * real + imag * imag)
+            logger.info(
+                "Radar stream raw frame: "
+                f"shape={[int(real.size)]} mean_amp={float(amp.mean()):.6e} max_amp={float(amp.max()):.6e}"
+            )
             return
 
         if self._signal is None:
@@ -916,6 +946,11 @@ class RadarComponent(Component):
         iq[0::2] = flat.real.astype(np.float32, copy=False)
         iq[1::2] = flat.imag.astype(np.float32, copy=False)
         stream.publish("raw", iq, metadata={"dtype": "complex64", "shape": list(sig.shape)})
+        amp = np.abs(sig)
+        logger.info(
+            "Radar stream raw frame: "
+            f"shape={list(sig.shape)} mean_amp={float(amp.mean()):.6e} max_amp={float(amp.max()):.6e}"
+        )
 
     def _publish_rd_stream(self, stream):
         if self._solver_result_handle:
@@ -942,6 +977,11 @@ class RadarComponent(Component):
             "dtype": "float32",
             "shape": list(mag_db.shape),
         })
+        logger.info(
+            "Radar stream rd frame: "
+            f"shape={list(mag_db.shape)} min={float(mag_db.min()):.6e} "
+            f"max={float(mag_db.max()):.6e} mean={float(mag_db.mean()):.6e}"
+        )
 
     def _publish_pc_stream(self, stream):
         if self._solver_result_handle:
@@ -973,6 +1013,16 @@ class RadarComponent(Component):
             "dtype": "float32",
             "shape": list(pc.shape),
         })
+        if pc.size == 0:
+            logger.info(f"Radar stream pc frame: shape={list(pc.shape)} empty")
+        else:
+            mins = pc[:, :3].min(axis=0).tolist()
+            maxs = pc[:, :3].max(axis=0).tolist()
+            logger.info(
+                "Radar stream pc frame: "
+                f"shape={list(pc.shape)} xyz_min={[round(float(v), 4) for v in mins]} "
+                f"xyz_max={[round(float(v), 4) for v in maxs]}"
+            )
 
     def _show_music(self):
         try:
