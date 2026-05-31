@@ -161,7 +161,7 @@ def test_manifest_declares_rfc012_solver():
     solvers = manifest["contributes"]["solvers"]
     assert solvers[0]["id"] == "witwin.radar.simulate"
     assert solvers[0]["entry"] == "solver_host.py"
-    assert solvers[0]["runtime"]["python"] == "${env:WITWIN_RADAR_PYTHON}"
+    assert solvers[0]["runtime"]["python"] == "${backend:python}"
     assert solvers[0]["lifecycle"] == "warm"
     assert solvers[0]["maxParallel"] == 1
 

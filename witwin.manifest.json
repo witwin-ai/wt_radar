@@ -13,7 +13,7 @@
         "id": "witwin.radar.simulate",
         "title": "Radar FMCW",
         "entry": "solver_host.py",
-        "runtime": { "python": "${env:WITWIN_RADAR_PYTHON}" },
+        "runtime": { "python": "${backend:python}" },
         "lifecycle": "warm",
         "idleTimeoutSec": 300,
         "cancelGraceSec": 5,
