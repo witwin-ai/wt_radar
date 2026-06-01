@@ -198,6 +198,34 @@ def test_realtime_stream_defaults_to_change_only_rd_preview(monkeypatch):
     assert stream.refs[0]["viewport"]["maxFps"] == 30.0
 
 
+def test_realtime_stream_view_change_switches_signal_channel(monkeypatch):
+    import wt_radar.components.radar as radar_mod
+
+    fake = _FakeApi()
+    monkeypatch.setattr(radar_mod, "api", fake)
+    radar, _settings = _radar_in_scene()
+
+    assert radar.start_stream() == "Stream started"
+    try:
+        _wait_for(lambda: len(_calls(fake, "live_start")) == 1, "live_start call")
+        stream = fake.streams.streams["radar.radar_settings.signal"]
+        assert stream.refs[-1]["channelId"] == "rd"
+
+        live_updates_before = len(_calls(fake, "live_update"))
+        radar.view = "raw_signal"
+
+        _wait_for(lambda: stream.refs[-1]["channelId"] == "raw", "raw stream ref")
+        assert radar.signal_stream["defaultChannel"] == "raw"
+        _wait_for(lambda: len(_calls(fake, "live_update")) > live_updates_before, "live_update after view change")
+    finally:
+        radar.stop_stream()
+        _wait_for(lambda: radar._live_thread is None or not radar._live_thread.is_alive(), "live thread stop")
+
+    update = _calls(fake, "live_update")[-1]
+    assert update[2]["channels"] == ["raw", "rd"]
+    assert update[2]["config"]["live"]["channels"] == ["raw", "rd"]
+
+
 def test_realtime_stream_migrates_legacy_continuous_defaults(monkeypatch):
     import wt_radar.components.radar as radar_mod
 

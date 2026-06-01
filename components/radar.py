@@ -118,6 +118,11 @@ class RadarComponent(Component):
         "pfa",
         "energy_top_k",
     })
+    _VIEW_STREAM_CHANNELS = {
+        "raw_signal": "raw",
+        "range_doppler": "rd",
+        "point_cloud": "pc",
+    }
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna"))
@@ -335,9 +340,15 @@ class RadarComponent(Component):
             return
         if getattr(self, "_auto_refreshing_view", False):
             return
-        if not self._has_preview_result():
+        stream_status = str(self.stream_status)
+        if stream_status in {"running", "paused"}:
+            if field_name == "view":
+                self._open_signal_stream(
+                    self._stream_channel_descriptors(),
+                    status="active" if stream_status == "running" else stream_status,
+                )
             return
-        if str(self.stream_status) in {"running", "paused"}:
+        if not self._has_preview_result():
             return
         self._auto_refreshing_view = True
         try:
@@ -780,7 +791,10 @@ class RadarComponent(Component):
         )
         if status != "active":
             stream.update(status=status)
-        ref = stream.ref("rd")
+        ref_channel = self._stream_ref_channel()
+        ref = stream.ref(ref_channel)
+        ref["defaultChannel"] = ref_channel
+        ref["channelId"] = ref_channel
         ref["viewport"] = {
             "enabled": True,
             "channelId": "pc",
@@ -828,7 +842,18 @@ class RadarComponent(Component):
             if part.strip()
         }
         selected = tuple(channel for channel in allowed if channel in selected)
+        view_channel = self._stream_channel_for_view()
+        if view_channel:
+            selected_set = set(selected or default)
+            selected_set.add(view_channel)
+            selected = tuple(channel for channel in allowed if channel in selected_set)
         return tuple(selected or default)
+
+    def _stream_channel_for_view(self):
+        return self._VIEW_STREAM_CHANNELS.get(str(self.view))
+
+    def _stream_ref_channel(self):
+        return self._stream_channel_for_view() or self._selected_stream_channels(default=("rd",))[0]
 
     def _update_stream_status(self, status):
         if not self._signal_stream_id:
