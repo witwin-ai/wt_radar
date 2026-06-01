@@ -1,4 +1,5 @@
 import time
+import threading
 
 import numpy as np
 import witwin.radar as wr
@@ -28,40 +29,32 @@ _CONFIG = {
 }
 
 
-class _FakeRun:
-    status = "succeeded"
-    error = None
-
-    def __init__(self, index):
-        self.outputs = {"resultHandle": f"handle-{index}"}
-        self.run_id = f"run-{index}"
-
-
 class _FakeSolvers:
     def __init__(self):
         self.solve_calls = []
         self.query_calls = []
+        self.call_calls = []
 
     def solve(self, solver_id, **kwargs):
         self.solve_calls.append((solver_id, kwargs))
-        return _FakeRun(len(self.solve_calls))
+        raise AssertionError("live stream path must not call api.solvers.solve")
 
     def query(self, solver_id, result_handle, op, params, **kwargs):
-        self.query_calls.append((op, result_handle, params, kwargs))
-        handle_index = int(str(result_handle).rsplit("-", 1)[-1])
-        if op == "raw_signal":
-            return {"data": {"tx": 0, "rx": 0, "real": [1.0, 0.0], "imag": [0.0, 1.0]}}
-        if op == "range_doppler":
-            return {"data": {"tx": 0, "rx": 0, "mag_db": [[float(handle_index), 2.0], [3.0, 4.0]]}}
-        if op == "point_cloud":
-            return {"data": {"points": [[1.0, 2.0, 3.0, 0.0, -10.0, 3.7]]}}
-        raise AssertionError(op)
+        self.query_calls.append((solver_id, result_handle, op, params, kwargs))
+        raise AssertionError("live stream path must not call api.solvers.query")
+
+    def call(self, solver_id, method, params=None, **kwargs):
+        self.call_calls.append((solver_id, method, params or {}, kwargs))
+        if method == "live_start":
+            return {"sessionId": (params or {}).get("session_id"), "status": "started"}
+        if method == "live_status":
+            return {"status": "running"}
+        return {"ok": True}
 
 
 class _FakeStream:
     def __init__(self, stream_id):
         self.stream_id = stream_id
-        self.published = []
         self.statuses = []
         self.refs = []
 
@@ -72,9 +65,6 @@ class _FakeStream:
         ref = {"streamId": self.stream_id, "channelId": channel}
         self.refs.append(ref)
         return ref
-
-    def publish(self, channel, payload, metadata=None):
-        self.published.append((channel, tuple(np.asarray(payload).shape), metadata or {}))
 
 
 class _FakeStreams:
@@ -91,8 +81,8 @@ class _FakeStreams:
     def close(self, stream_id, reason=None):
         self.closed.append((stream_id, reason))
 
-    def error(self, stream_id, message):
-        self.errors.append((stream_id, message))
+    def error(self, stream_id, message, **kwargs):
+        self.errors.append((stream_id, message, kwargs))
 
 
 class _FakeApi:
@@ -119,7 +109,11 @@ def _wait_for(predicate, label, timeout=3.0):
     raise AssertionError(f"timed out waiting for {label}")
 
 
-def test_realtime_stream_republishes_when_radar_transform_changes(monkeypatch):
+def _calls(fake, method):
+    return [call for call in fake.solvers.call_calls if call[1] == method]
+
+
+def test_realtime_stream_uses_solver_live_session_and_updates_on_transform(monkeypatch):
     import wt_radar.components.radar as radar_mod
 
     fake = _FakeApi()
@@ -131,69 +125,39 @@ def test_realtime_stream_republishes_when_radar_transform_changes(monkeypatch):
 
     assert radar.start_stream() == "Stream started"
     try:
-        _wait_for(lambda: len(fake.solvers.solve_calls) >= 1, "initial realtime solve")
-        stream = next(iter(fake.streams.streams.values()))
-        _wait_for(
-            lambda: {entry[0] for entry in stream.published} >= {"raw", "rd", "pc"},
-            "initial raw/rd/pc stream publish",
-        )
-        _wait_for(
-            lambda: radar.signal_figure._data.get("values", [[None]])[0][0] == 1.0,
-            "initial live figure preview",
-        )
-        assert [
-            call for call in fake.solvers.query_calls
-            if call[0] == "range_doppler" and call[1] == "handle-1"
-        ] == [
-            (
-                "range_doppler",
-                "handle-1",
-                {
-                    "tx": 0,
-                    "rx": 0,
-                    "static_clutter_removal": False,
-                    "show_cfar": False,
-                },
-                {"run_id": "run-1"},
-            )
-        ]
-        first_config = fake.solvers.solve_calls[0][1]["config"]
-        assert first_config["live"]["session_id"] == "radar.radar_settings.signal"
-        assert first_config["live"]["signature"]
-        first_count = len(fake.solvers.solve_calls)
+        _wait_for(lambda: len(_calls(fake, "live_start")) == 1, "live_start call")
+        assert fake.solvers.solve_calls == []
+        assert fake.solvers.query_calls == []
+
+        start = _calls(fake, "live_start")[0]
+        assert start[0] == "witwin.radar.simulate"
+        assert start[2]["session_id"] == "radar.radar_settings.signal"
+        assert start[2]["stream_id"] == "radar.radar_settings.signal"
+        assert start[2]["channels"] == ["raw", "rd", "pc"]
+        assert start[2]["max_fps"] == 20.0
+        assert start[2]["config"]["live"]["stream_id"] == "radar.radar_settings.signal"
+        assert start[2]["config"]["live"]["motion_sampling"] == "per_frame"
+        assert start[3]["scene"] is radar.scene
+        assert fake.streams.streams["radar.radar_settings.signal"].refs[0]["viewport"]["maxFps"] == 20.0
 
         settings.get_component("Transform").position = [1.0, 2.0, 3.0]
-        _wait_for(lambda: len(fake.solvers.solve_calls) >= first_count + 1, "solve after transform move")
-        _wait_for(
-            lambda: radar.signal_figure._data.get("values", [[None]])[0][0] == 2.0,
-            "updated live figure preview",
-        )
-        assert [
-            call for call in fake.solvers.query_calls
-            if call[0] == "range_doppler" and call[1] == "handle-2"
-        ] == [
-            (
-                "range_doppler",
-                "handle-2",
-                {
-                    "tx": 0,
-                    "rx": 0,
-                    "static_clutter_removal": False,
-                    "show_cfar": False,
-                },
-                {"run_id": "run-2"},
-            )
-        ]
+        _wait_for(lambda: len(_calls(fake, "live_update")) >= 1, "live_update after transform")
+        update = _calls(fake, "live_update")[-1]
+        assert update[2]["session_id"] == "radar.radar_settings.signal"
+        assert update[2]["config"]["sensor"]["position"] == [1.0, 2.0, 3.0]
+        assert update[3]["scene"] is radar.scene
 
         assert radar.pause_stream() == "Stream paused"
-        paused_count = len(fake.solvers.solve_calls)
+        assert len(_calls(fake, "live_pause")) == 1
+        paused_updates = len(_calls(fake, "live_update"))
         settings.get_component("Transform").position = [2.0, 2.0, 3.0]
-        time.sleep(0.2)
-        assert len(fake.solvers.solve_calls) == paused_count
+        time.sleep(0.15)
+        assert len(_calls(fake, "live_update")) == paused_updates
 
         assert radar.start_stream() == "Stream running"
+        assert len(_calls(fake, "live_resume")) == 1
         settings.get_component("Transform").position = [3.0, 2.0, 3.0]
-        _wait_for(lambda: len(fake.solvers.solve_calls) >= paused_count + 1, "solve after resume")
+        _wait_for(lambda: len(_calls(fake, "live_update")) > paused_updates, "live_update after resume")
     finally:
         radar.stop_stream()
         _wait_for(lambda: radar._live_thread is None or not radar._live_thread.is_alive(), "live thread stop")
@@ -201,72 +165,371 @@ def test_realtime_stream_republishes_when_radar_transform_changes(monkeypatch):
     assert radar.stream_status == "stopped"
     assert radar.signal_stream is None
     assert fake.streams.closed[-1] == ("radar.radar_settings.signal", "stopped")
+    assert len(_calls(fake, "live_stop")) == 1
     assert fake.streams.errors == []
-    assert fake.solvers.solve_calls[-1][1]["config"]["sensor"]["position"] == [3.0, 2.0, 3.0]
+    assert fake.solvers.solve_calls == []
+    assert fake.solvers.query_calls == []
 
 
-def test_realtime_stream_continuous_mode_advances_t0(monkeypatch):
+def test_realtime_stream_default_frame_rate_is_ten_and_viewport_can_reach_thirty(monkeypatch):
     import wt_radar.components.radar as radar_mod
 
     fake = _FakeApi()
     monkeypatch.setattr(radar_mod, "api", fake)
     radar, _settings = _radar_in_scene()
-    radar.stream_max_fps = 20.0
+
+    assert radar.stream_max_fps == 10.0
+    radar.stream_max_fps = 30.0
+    assert radar.start_stream() == "Stream started"
+    try:
+        _wait_for(lambda: len(_calls(fake, "live_start")) == 1, "live_start call")
+    finally:
+        radar.stop_stream()
+        _wait_for(lambda: radar._live_thread is None or not radar._live_thread.is_alive(), "live thread stop")
+
+    params = _calls(fake, "live_start")[0][2]
+    assert params["max_fps"] == 30.0
+    assert radar.signal_stream is None
+    stream = fake.streams.streams["radar.radar_settings.signal"]
+    assert stream.refs[0]["viewport"]["maxFps"] == 30.0
+
+
+def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch):
+    import wt_radar.solver_host as solver_host
+
+    class FakeCtx:
+        run_id = "live-run"
+
+        def __init__(self):
+            self.published = []
+            self.logs = []
+
+        def stream_publish(self, stream_id, channel_id, payload=None, **kwargs):
+            self.published.append((stream_id, channel_id, np.asarray(payload).shape, kwargs.get("metadata") or {}))
+
+        def log(self, message, level="info"):
+            self.logs.append((level, message))
+
+        def stream_error(self, stream_id, message, **kwargs):
+            self.logs.append(("error", message))
+
+    calls = []
+    fake_signal = np.ones((1, 1, 2, 8), dtype=np.complex64)
+    fake_result = type("Result", (), {"radar": object(), "signal": fake_signal})()
+
+    def fake_run(scene, *, sensor, tracer, motion_sampling, t0, live_cache=None, cache_key=None):
+        calls.append({
+            "scene": scene,
+            "motion_sampling": motion_sampling,
+            "t0": t0,
+            "cache": live_cache,
+            "cache_key": cache_key,
+        })
+        return fake_result
+
+    class FakeRD:
+        mag_db = np.ones((4, 8), dtype=np.float32)
+
+    monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: {"scene": ref})
+    monkeypatch.setattr(solver_host.SolveRunner, "run", fake_run)
+    monkeypatch.setattr(solver_host.SigProc, "range_doppler", lambda *args, **kwargs: FakeRD())
+    monkeypatch.setattr(
+        solver_host.SigProc,
+        "point_cloud",
+        lambda *args, **kwargs: np.zeros((2, 6), dtype=np.float32),
+    )
+
+    ctx = FakeCtx()
+    result = solver_host.live_start(ctx, {
+        "session_id": "session-1",
+        "stream_id": "radar.demo.signal",
+        "channels": ["raw", "rd", "pc"],
+        "max_fps": 30.0,
+        "sceneRef": {"initial": True},
+        "config": {
+            "sensor": {
+                "position": [0.0, 0.0, 0.0],
+                "target": [0.0, 0.0, -1.0],
+                "up": [0.0, 1.0, 0.0],
+                "fov": 70.0,
+                "backend": "dirichlet",
+                "pad_factor": 1,
+                "device": "cuda",
+            },
+            "tracer": {},
+            "t0": 2.5,
+            "live": {
+                "signature": "sig-1",
+                "stream_on_change_only": True,
+                "motion_sampling": "per_frame",
+            },
+        },
+    })
+    try:
+        assert result["status"] == "started"
+        _wait_for(lambda: len(ctx.published) >= 3, "initial live frame publish")
+        assert len(calls) == 1
+        assert calls[0]["motion_sampling"] == "per_frame"
+        assert calls[0]["t0"] == 2.5
+        assert calls[0]["cache_key"] == "sig-1"
+        assert {item[1] for item in ctx.published} == {"raw", "rd", "pc"}
+        assert any(item[1] == "raw" and item[3]["dtype"] == "complex64" for item in ctx.published)
+        assert any(item[1] == "rd" and item[2] == (4, 8) for item in ctx.published)
+        assert any(item[1] == "pc" and item[2] == (2, 6) for item in ctx.published)
+
+        solver_host.live_update(ctx, {
+            "session_id": "session-1",
+            "sceneRef": {"updated": True},
+            "config": {
+                "sensor": {
+                    "position": [1.0, 0.0, 0.0],
+                    "target": [1.0, 0.0, -1.0],
+                    "up": [0.0, 1.0, 0.0],
+                    "fov": 70.0,
+                    "backend": "dirichlet",
+                    "pad_factor": 1,
+                    "device": "cuda",
+                },
+                "tracer": {},
+                "t0": 3.0,
+                "live": {
+                    "signature": "sig-2",
+                    "stream_on_change_only": True,
+                    "motion_sampling": "per_frame",
+                },
+            },
+        })
+        _wait_for(lambda: len(calls) == 2, "live frame after update")
+        assert calls[-1]["cache_key"] == "sig-2"
+    finally:
+        solver_host.live_stop(ctx, {"session_id": "session-1"})
+
+
+def test_solver_live_stop_suppresses_inflight_publish(monkeypatch):
+    import wt_radar.solver_host as solver_host
+
+    class FakeCtx:
+        run_id = "live-run"
+
+        def __init__(self):
+            self.published = []
+
+        def stream_publish(self, *args, **kwargs):
+            self.published.append((args, kwargs))
+
+        def log(self, message, level="info"):
+            pass
+
+        def stream_error(self, stream_id, message, **kwargs):
+            pass
+
+    entered = threading.Event()
+    release = threading.Event()
+    fake_signal = np.ones((1, 1, 2, 8), dtype=np.complex64)
+    fake_result = type("Result", (), {"radar": object(), "signal": fake_signal})()
+
+    def fake_run(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=3.0)
+        return fake_result
+
+    class FakeRD:
+        mag_db = np.ones((4, 8), dtype=np.float32)
+
+    monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: {"scene": ref})
+    monkeypatch.setattr(solver_host.SolveRunner, "run", fake_run)
+    monkeypatch.setattr(solver_host.SigProc, "range_doppler", lambda *args, **kwargs: FakeRD())
+
+    ctx = FakeCtx()
+    solver_host.live_start(ctx, {
+        "session_id": "stop-session",
+        "stream_id": "radar.demo.signal",
+        "channels": ["rd"],
+        "sceneRef": {},
+        "config": {
+            "sensor": {
+                "position": [0.0, 0.0, 0.0],
+                "target": [0.0, 0.0, -1.0],
+                "up": [0.0, 1.0, 0.0],
+                "fov": 70.0,
+                "backend": "dirichlet",
+                "pad_factor": 1,
+                "device": "cuda",
+            },
+            "tracer": {},
+            "live": {"signature": "sig-stop", "stream_on_change_only": True},
+        },
+    })
+    assert entered.wait(timeout=3.0)
+    stop_done = threading.Event()
+
+    def stop_session():
+        solver_host.live_stop(ctx, {"session_id": "stop-session"})
+        stop_done.set()
+
+    threading.Thread(target=stop_session, daemon=True).start()
+    time.sleep(0.05)
+    release.set()
+    assert stop_done.wait(timeout=3.0)
+    time.sleep(0.05)
+    assert ctx.published == []
+
+
+def test_solver_live_stop_does_not_trigger_extra_idle_solve(monkeypatch):
+    import wt_radar.solver_host as solver_host
+
+    class FakeCtx:
+        run_id = "live-run"
+
+        def __init__(self):
+            self.published = []
+
+        def stream_publish(self, stream_id, channel_id, payload=None, **kwargs):
+            self.published.append((stream_id, channel_id))
+
+        def log(self, message, level="info"):
+            pass
+
+        def stream_error(self, stream_id, message, **kwargs):
+            pass
+
+    calls = []
+    fake_signal = np.ones((1, 1, 2, 8), dtype=np.complex64)
+    fake_result = type("Result", (), {"radar": object(), "signal": fake_signal})()
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs.get("cache_key"))
+        return fake_result
+
+    class FakeRD:
+        mag_db = np.ones((4, 8), dtype=np.float32)
+
+    monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: {"scene": ref})
+    monkeypatch.setattr(solver_host.SolveRunner, "run", fake_run)
+    monkeypatch.setattr(solver_host.SigProc, "range_doppler", lambda *args, **kwargs: FakeRD())
+
+    ctx = FakeCtx()
+    solver_host.live_start(ctx, {
+        "session_id": "idle-stop-session",
+        "stream_id": "radar.demo.signal",
+        "channels": ["rd"],
+        "max_fps": 30.0,
+        "sceneRef": {},
+        "config": {
+            "sensor": {
+                "position": [0.0, 0.0, 0.0],
+                "target": [0.0, 0.0, -1.0],
+                "up": [0.0, 1.0, 0.0],
+                "fov": 70.0,
+                "backend": "dirichlet",
+                "pad_factor": 1,
+                "device": "cuda",
+            },
+            "tracer": {},
+            "live": {"signature": "sig-idle", "stream_on_change_only": True},
+        },
+    })
+    _wait_for(lambda: len(calls) == 1, "initial live frame")
+    time.sleep(0.08)
+    solver_host.live_stop(ctx, {"session_id": "idle-stop-session"})
+    time.sleep(0.05)
+
+    assert calls == ["sig-idle"]
+
+
+def test_solver_live_restart_suppresses_previous_session_publish(monkeypatch):
+    import wt_radar.solver_host as solver_host
+
+    class FakeCtx:
+        run_id = "live-run"
+
+        def __init__(self):
+            self.published = []
+
+        def stream_publish(self, stream_id, channel_id, payload=None, **kwargs):
+            self.published.append((stream_id, channel_id, kwargs.get("metadata") or {}))
+
+        def log(self, message, level="info"):
+            pass
+
+        def stream_error(self, stream_id, message, **kwargs):
+            pass
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    fake_signal = np.ones((1, 1, 2, 8), dtype=np.complex64)
+    fake_result = type("Result", (), {"radar": object(), "signal": fake_signal})()
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs.get("cache_key"))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(timeout=3.0)
+        return fake_result
+
+    class FakeRD:
+        mag_db = np.ones((4, 8), dtype=np.float32)
+
+    monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: {"scene": ref})
+    monkeypatch.setattr(solver_host.SolveRunner, "run", fake_run)
+    monkeypatch.setattr(solver_host.SigProc, "range_doppler", lambda *args, **kwargs: FakeRD())
+
+    ctx = FakeCtx()
+    base_config = {
+        "sensor": {
+            "position": [0.0, 0.0, 0.0],
+            "target": [0.0, 0.0, -1.0],
+            "up": [0.0, 1.0, 0.0],
+            "fov": 70.0,
+            "backend": "dirichlet",
+            "pad_factor": 1,
+            "device": "cuda",
+        },
+        "tracer": {},
+    }
+    solver_host.live_start(ctx, {
+        "session_id": "restart-session",
+        "stream_id": "radar.demo.signal",
+        "channels": ["rd"],
+        "sceneRef": {},
+        "config": {**base_config, "live": {"signature": "old", "stream_on_change_only": True}},
+    })
+    assert entered.wait(timeout=3.0)
+    solver_host.live_start(ctx, {
+        "session_id": "restart-session",
+        "stream_id": "radar.demo.signal",
+        "channels": ["rd"],
+        "sceneRef": {},
+        "config": {**base_config, "live": {"signature": "new", "stream_on_change_only": True}},
+    })
+    release.set()
+    _wait_for(lambda: "new" in calls, "new live session frame")
+    solver_host.live_stop(ctx, {"session_id": "restart-session"})
+
+    assert len(ctx.published) == 1
+    assert calls.count("old") == 1
+    assert "new" in calls
+
+
+def test_realtime_live_update_does_not_send_elapsed_t0_to_solver(monkeypatch):
+    import wt_radar.components.radar as radar_mod
+
+    fake = _FakeApi()
+    monkeypatch.setattr(radar_mod, "api", fake)
+    radar, settings = _radar_in_scene()
     radar.stream_on_change_only = False
-    radar.stream_channels = "rd"
     radar.t0 = 1.5
 
     assert radar.start_stream() == "Stream started"
     try:
-        _wait_for(lambda: len(fake.solvers.solve_calls) >= 2, "continuous realtime solves")
+        _wait_for(lambda: len(_calls(fake, "live_start")) == 1, "live_start call")
+        time.sleep(0.05)
+        settings.get_component("Transform").position = [9.0, 0.0, 0.0]
+        _wait_for(lambda: len(_calls(fake, "live_update")) >= 1, "live_update call")
     finally:
         radar.stop_stream()
         _wait_for(lambda: radar._live_thread is None or not radar._live_thread.is_alive(), "live thread stop")
 
-    t0_values = [call[1]["config"]["t0"] for call in fake.solvers.solve_calls]
-    assert len(t0_values) >= 2
-    assert t0_values[0] >= 1.5
-    assert t0_values[-1] > t0_values[0]
-
-
-def test_realtime_stream_skips_publish_for_stale_solve(monkeypatch):
-    import threading
-
-    import wt_radar.components.radar as radar_mod
-
-    class SlowSolvers(_FakeSolvers):
-        def __init__(self):
-            super().__init__()
-            self.first_started = threading.Event()
-            self.release_first = threading.Event()
-
-        def solve(self, solver_id, **kwargs):
-            index = len(self.solve_calls) + 1
-            self.solve_calls.append((solver_id, kwargs))
-            if index == 1:
-                self.first_started.set()
-                assert self.release_first.wait(timeout=3.0)
-            return _FakeRun(index)
-
-    fake = _FakeApi()
-    fake.solvers = SlowSolvers()
-    monkeypatch.setattr(radar_mod, "api", fake)
-    radar, settings = _radar_in_scene()
-    radar.stream_max_fps = 20.0
-    radar.stream_on_change_only = True
-    radar.stream_channels = "rd"
-
-    assert radar.start_stream() == "Stream started"
-    try:
-        assert fake.solvers.first_started.wait(timeout=3.0)
-        settings.get_component("Transform").position = [5.0, 2.0, 3.0]
-        fake.solvers.release_first.set()
-        _wait_for(lambda: len(fake.solvers.solve_calls) >= 2, "fresh solve after stale one")
-        stream = next(iter(fake.streams.streams.values()))
-        _wait_for(lambda: len(stream.published) >= 1, "fresh stream publish")
-    finally:
-        radar.stop_stream()
-        _wait_for(lambda: radar._live_thread is None or not radar._live_thread.is_alive(), "live thread stop")
-
-    assert all(call[1] != "handle-1" for call in fake.solvers.query_calls)
-    assert any(call[1] == "handle-2" for call in fake.solvers.query_calls)
+    assert _calls(fake, "live_start")[0][2]["config"]["t0"] == 1.5
+    assert _calls(fake, "live_update")[-1][2]["config"]["t0"] == 1.5

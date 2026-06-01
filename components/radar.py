@@ -101,6 +101,7 @@ class RadarComponent(Component):
     _live_last_signature = None
     _live_started_at = 0.0
     _live_generation = 0
+    _live_session_id = ""
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna"))
@@ -248,7 +249,7 @@ class RadarComponent(Component):
     motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
                                    group=_SOLVE, description="Re-trace per chirp or per frame")
     t0 = float_field(0.0, group=_SOLVE, description="Solve start time (s)")
-    stream_max_fps = float_field(2.0, min=0.1, max=30.0, group=_SOLVE,
+    stream_max_fps = float_field(10.0, min=0.1, max=30.0, group=_SOLVE,
                                  description="Maximum realtime stream solves per second")
     stream_channels = string_field("raw,rd,pc", group=_SOLVE,
                                    description="Comma-separated live channels: raw, rd, pc")
@@ -357,7 +358,7 @@ class RadarComponent(Component):
 
     @button(display_name="Start Stream", group=_SOLVE)
     def start_stream(self):
-        """Start realtime solve + stream production."""
+        """Start solver-side realtime stream production."""
         logger.info("=== Radar Start Stream clicked ===")
         if self.scene is None or self.owner is None:
             logger.warning("Radar stream start ignored: component is not attached to a scene")
@@ -368,6 +369,18 @@ class RadarComponent(Component):
                 if self._live_stop_event.is_set():
                     logger.info("Radar stream start ignored: existing stream is stopping")
                     return "Stream stopping"
+                try:
+                    api.solvers.call(
+                        "witwin.radar.simulate",
+                        "live_resume",
+                        params={"session_id": self._live_session_id or self._stream_id()},
+                        timeout=5,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.stream_status = "error"
+                    self._mark_stream_error(str(exc))
+                    logger.warning(f"Radar stream resume failed: {exc}")
+                    return f"Stream failed: {exc}"
                 self._live_pause_event.clear()
                 self.stream_status = "running"
                 self._update_stream_status("active")
@@ -379,10 +392,31 @@ class RadarComponent(Component):
             self._live_stop_event.clear()
             self._live_pause_event.clear()
             self._live_started_at = time.monotonic()
-            self._live_last_signature = None
             self._clear_query_cache()
             self.stream_status = "running"
             self._open_signal_stream(self._stream_channel_descriptors(), status="active")
+            signature = self._live_scene_signature()
+            self._live_last_signature = signature
+            params = self._live_solver_params(signature)
+            logger.info(
+                "Radar live start request: "
+                f"session={params['session_id']} channels={params['channels']} "
+                f"max_fps={params['max_fps']:.2f} scene={self._live_scene_summary()}"
+            )
+            try:
+                response = api.solvers.call(
+                    "witwin.radar.simulate",
+                    "live_start",
+                    params=params,
+                    scene=self.scene,
+                    timeout=10,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.stream_status = "error"
+                self._mark_stream_error(str(exc))
+                logger.warning(f"Radar live start failed: {exc}")
+                return f"Stream failed: {exc}"
+            self._live_session_id = str((response or {}).get("sessionId") or params["session_id"])
             self._live_thread = threading.Thread(
                 target=self._live_loop,
                 args=(generation,),
@@ -398,6 +432,15 @@ class RadarComponent(Component):
     def pause_stream(self):
         """Pause realtime solve production without closing the stream."""
         self._ensure_live_state()
+        try:
+            api.solvers.call(
+                "witwin.radar.simulate",
+                "live_pause",
+                params={"session_id": self._live_session_id or self._stream_id()},
+                timeout=5,
+            )
+        except Exception as exc:  # noqa: BLE001 - local pause still prevents update traffic
+            logger.warning(f"Radar stream pause control failed: {exc}")
         self._live_pause_event.set()
         self.stream_status = "paused"
         self._update_stream_status("paused")
@@ -410,12 +453,31 @@ class RadarComponent(Component):
         """Stop realtime production and close the stream."""
         self._ensure_live_state()
         logger.info("Radar stream stop requested")
+        thread = None
+        session_id = ""
         with self._live_lock:
             self._live_generation += 1
             self._live_stop_event.set()
             self._live_pause_event.clear()
             self.stream_status = "stopped"
             self._clear_query_cache()
+            thread = self._live_thread
+            session_id = self._live_session_id or self._signal_stream_id
+            self._live_thread = None
+            self._live_session_id = ""
+        if session_id:
+            try:
+                api.solvers.call(
+                    "witwin.radar.simulate",
+                    "live_stop",
+                    params={"session_id": session_id},
+                    timeout=5,
+                )
+            except Exception as exc:  # noqa: BLE001 - stop should still close local stream
+                logger.debug(f"Radar live_stop skipped: {exc}")
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        with self._live_lock:
             if self._signal_stream_id:
                 try:
                     api.streams.close(self._signal_stream_id, reason="stopped")
@@ -682,7 +744,7 @@ class RadarComponent(Component):
             "enabled": True,
             "channelId": "pc",
             "kind": "points",
-            "maxFps": min(float(self.stream_max_fps), 10.0),
+            "maxFps": min(max(float(self.stream_max_fps), 0.1), 30.0),
             "maxPoints": 100000,
             "pointSize": 0.05,
             "color": "#30c0ff",
@@ -718,13 +780,13 @@ class RadarComponent(Component):
         ]
 
     def _selected_stream_channels(self, default=("raw", "rd", "pc")):
-        allowed = {"raw", "rd", "pc"}
+        allowed = ("raw", "rd", "pc")
         selected = {
             part.strip().lower()
             for part in str(self.stream_channels or "").split(",")
             if part.strip()
         }
-        selected = selected & allowed
+        selected = tuple(channel for channel in allowed if channel in selected)
         return tuple(selected or default)
 
     def _update_stream_status(self, status):
@@ -766,13 +828,12 @@ class RadarComponent(Component):
             if self._live_pause_event.is_set():
                 time.sleep(0.05)
                 continue
-            interval = 1.0 / max(0.1, float(self.stream_max_fps))
+            interval = 1.0 / min(max(0.1, float(self.stream_max_fps)), 30.0)
             started = time.monotonic()
             signature = self._live_scene_signature()
-            should_solve = not bool(self.stream_on_change_only) or signature != self._live_last_signature
-            if should_solve:
-                logger.info(f"Radar live loop solving: generation={generation} signature_changed={signature != self._live_last_signature}")
-                ok = self._solve_once_for_stream(generation, signature)
+            if signature != self._live_last_signature:
+                logger.info(f"Radar live loop updating solver: generation={generation}")
+                ok = self._send_live_update(generation, signature)
                 if not ok:
                     self.stream_status = "error"
                     self._update_stream_status("error")
@@ -785,6 +846,30 @@ class RadarComponent(Component):
 
     def _live_generation_active(self, generation):
         return generation == self._live_generation
+
+    def _send_live_update(self, generation, signature):
+        try:
+            if not self._live_generation_active(generation):
+                return True
+            if self._live_stop_event is not None and self._live_stop_event.is_set():
+                return True
+            params = self._live_solver_params(signature)
+            logger.info(
+                "Radar live update request: "
+                f"session={params['session_id']} position={params['config']['sensor']['position']}"
+            )
+            api.solvers.call(
+                "witwin.radar.simulate",
+                "live_update",
+                params=params,
+                scene=self.scene,
+                timeout=5,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 - background control thread must survive one failed update
+            logger.warning(f"Radar live update failed: {exc}")
+            self._mark_stream_error(str(exc))
+            return False
 
     def _solve_once_for_stream(self, generation, signature=None):
         try:
@@ -1068,6 +1153,26 @@ class RadarComponent(Component):
             return max(0, int(self.rx_index))
         return max(0, min(int(self.rx_index), self._signal.shape[1] - 1))
 
+    def _live_solver_params(self, signature, *, spec=None, t0_override=None):
+        spec = spec or SensorSpec.from_component(self)
+        session_id = self._stream_id()
+        channels = list(self._selected_stream_channels(default=("raw", "rd", "pc")))
+        max_fps = min(max(float(self.stream_max_fps), 0.1), 30.0)
+        config = self._solver_config(
+            spec,
+            t0_override=t0_override,
+            live_session_id=session_id,
+            live_signature=signature,
+        )
+        return {
+            "session_id": session_id,
+            "stream_id": session_id,
+            "channels": channels,
+            "max_fps": max_fps,
+            "history_length": int(self.stream_history_length),
+            "config": config,
+        }
+
     def _solver_config(self, spec: SensorSpec, *, t0_override=None, live_session_id=None,
                        live_signature=None) -> dict:
         config = {
@@ -1079,7 +1184,21 @@ class RadarComponent(Component):
         if live_session_id and live_signature:
             config["live"] = {
                 "session_id": str(live_session_id),
+                "stream_id": str(live_session_id),
                 "signature": str(live_signature),
+                "channels": list(self._selected_stream_channels(default=("raw", "rd", "pc"))),
+                "max_fps": min(max(float(self.stream_max_fps), 0.1), 30.0),
+                "stream_on_change_only": bool(self.stream_on_change_only),
+                "motion_sampling": "per_frame",
+                "tx": int(self.tx_index),
+                "rx": int(self.rx_index),
+                "static_clutter_removal": bool(self.static_clutter_removal),
+                "show_cfar": bool(self.show_cfar),
+                "detector": str(self.detector),
+                "guard": list(self._guard()),
+                "training": list(self._training()),
+                "pfa": num(self.pfa),
+                "energy_top_k": int(self.energy_top_k),
             }
         return config
 
