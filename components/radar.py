@@ -531,7 +531,6 @@ class RadarComponent(Component):
         logger.info("Radar stream stopped")
         return "Stream stopped"
 
-    @button(display_name="Update View", group=_POSTPROC)
     def update_view(self):
         """Render the selected view from the last solved signal."""
         if not self._solver_result_handle and self._signal is None:

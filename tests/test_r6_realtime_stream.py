@@ -236,6 +236,15 @@ def test_post_processing_field_change_refreshes_existing_preview():
     assert published == [None]
 
 
+def test_update_view_is_internal_not_a_properties_button():
+    radar, _settings = _radar_in_scene()
+
+    buttons = radar.to_dict()["buttons"]
+
+    assert "update_view" not in {button["name"] for button in buttons}
+    assert "Update View" not in {button["display_name"] for button in buttons}
+
+
 def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch):
     import wt_radar.solver_host as solver_host
 
