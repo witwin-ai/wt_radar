@@ -12,7 +12,7 @@ binds to ``Radar.device``, so simulation uses the scene device even when a store
 spec was authored as CPU-only for inspection.
 """
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from typing import Any, List, Optional, Tuple
 
 import numpy as np
@@ -138,7 +138,8 @@ class SolveRunner:
     @staticmethod
     def run(studio_scene: Any, *, sensor: SensorSpec, tracer: TracerSpec,
             motion_sampling: str, t0: float, live_cache: Optional[dict] = None,
-            cache_key: Optional[str] = None) -> SolveResult:
+            cache_key: Optional[str] = None,
+            platform_cache_key: Optional[str] = None) -> SolveResult:
         """Rebuild the (Scene, RadarConfig) pair on CUDA, construct the Radar, and simulate."""
         import torch
         from .radar_adapter import RadarAdapter
@@ -153,21 +154,57 @@ class SolveRunner:
             if cached is not None:
                 return cached
 
+        sensor = SolveRunner._sensor_for_scene_device(sensor, scene_device)
         build_started = time.perf_counter()
-        scene, config = RadarAdapter().to_platform(studio_scene, device=scene_device)
+        platform_reused = False
+        scene_config = None
+        if live_cache is not None and cache_key is not None and platform_cache_key is not None:
+            scene_config = SolveRunner._try_reuse_platform_scene(
+                live_cache,
+                platform_cache_key=platform_cache_key,
+            )
+        if scene_config is None:
+            scene, config = RadarAdapter().to_platform(studio_scene, device=scene_device)
+        else:
+            scene, config = scene_config
+            platform_reused = True
         logger.info(
             f"SolveRunner.run: scene_device={scene_device}, "
-            f"{len(scene.structures)} structures, tracer={tracer.sampling}@{tracer.resolution}")
-        radar = SolveRunner.build_radar(config, SolveRunner._sensor_for_scene_device(sensor, scene_device))
-        logger.info(
-            f"  wr.Radar built: position={radar.position.tolist()} "
-            f"target={radar.target.tolist()} tx_pos[0]={radar.tx_pos[0].tolist()}")
+            f"{len(scene.structures)} structures, tracer={tracer.sampling}@{tracer.resolution} "
+            f"platform_reused={platform_reused}")
+        radar_config_key = SolveRunner._radar_config_key(config)
+        radar_sensor_runtime_key = SolveRunner._radar_sensor_runtime_key(sensor)
+        radar_reused = False
+        radar = None
+        if live_cache is not None and cache_key is not None:
+            radar = SolveRunner._try_reuse_pose_radar(
+                live_cache,
+                config_key=radar_config_key,
+                sensor_runtime_key=radar_sensor_runtime_key,
+                sensor=sensor,
+            )
+            radar_reused = radar is not None
+        if radar is None:
+            radar = SolveRunner.build_radar(config, sensor)
+            logger.info(
+                f"  wr.Radar built: position={radar.position.tolist()} "
+                f"target={radar.target.tolist()} tx_pos[0]={radar.tx_pos[0].tolist()}")
+        else:
+            logger.info(
+                f"  wr.Radar pose reused: position={radar.position.tolist()} "
+                f"target={radar.target.tolist()} tx_pos[0]={radar.tx_pos[0].tolist()}")
         if live_cache is not None and cache_key is not None:
             result = SolveRunner._run_live_cache_miss(
                 live_cache,
                 cache_key=cache_key,
+                platform_cache_key=platform_cache_key,
                 scene=scene,
+                platform_config=config,
                 radar=radar,
+                radar_config_key=radar_config_key,
+                radar_sensor_runtime_key=radar_sensor_runtime_key,
+                radar_reused=radar_reused,
+                platform_reused=platform_reused,
                 tracer=tracer,
                 motion_sampling=motion_sampling,
                 t0=t0,
@@ -219,7 +256,41 @@ class SolveRunner:
         return SolveResult(radar=radar, signal=signal)
 
     @staticmethod
-    def _run_live_cache_miss(live_cache: dict, *, cache_key: str, scene: Any, radar: Any,
+    def _try_reuse_pose_radar(live_cache: dict, *, config_key: tuple,
+                              sensor_runtime_key: tuple, sensor: SensorSpec) -> Any | None:
+        radar = live_cache.get("radar")
+        if radar is None or not hasattr(radar, "set_pose"):
+            return None
+        if live_cache.get("radar_config_key") != config_key:
+            return None
+        if live_cache.get("radar_sensor_runtime_key") != sensor_runtime_key:
+            return None
+        try:
+            return radar.set_pose(
+                position=sensor.position,
+                target=sensor.target,
+                up=sensor.up,
+                fov=sensor.fov,
+            )
+        except Exception as exc:  # noqa: BLE001 - stale/incompatible radar should rebuild
+            logger.warning(f"  live radar pose reuse failed; rebuilding: {type(exc).__name__}: {exc}")
+            return None
+
+    @staticmethod
+    def _try_reuse_platform_scene(live_cache: dict, *, platform_cache_key: str) -> Optional[tuple[Any, Any]]:
+        if live_cache.get("platform_cache_key") != platform_cache_key:
+            return None
+        scene = live_cache.get("platform_scene")
+        if scene is None or "platform_config" not in live_cache:
+            return None
+        return scene, live_cache.get("platform_config")
+
+    @staticmethod
+    def _run_live_cache_miss(live_cache: dict, *, cache_key: str,
+                             platform_cache_key: Optional[str],
+                             scene: Any, platform_config: Any, radar: Any,
+                             radar_config_key: tuple, radar_sensor_runtime_key: tuple,
+                             radar_reused: bool, platform_reused: bool,
                              tracer: TracerSpec, motion_sampling: str, t0: float,
                              build_elapsed: float) -> SolveResult:
         """Trace once and cache the MIMO path representation for live repeats."""
@@ -256,6 +327,11 @@ class SolveRunner:
         live_cache.clear()
         live_cache.update({
             "cache_key": cache_key,
+            "platform_cache_key": platform_cache_key,
+            "platform_scene": scene,
+            "platform_config": platform_config,
+            "radar_config_key": radar_config_key,
+            "radar_sensor_runtime_key": radar_sensor_runtime_key,
             "radar": radar,
             "trace": trace,
             "path_cache": path_cache,
@@ -268,7 +344,8 @@ class SolveRunner:
             "  live cache miss: "
             f"build_ms={build_elapsed * 1000.0:.2f} trace_ms={trace_elapsed * 1000.0:.2f} "
             f"signal_ms={signal_elapsed * 1000.0:.2f} mode={mode} "
-            f"path_cached={path_cache is not None} tracer_reused={tracer_reused}")
+            f"path_cached={path_cache is not None} tracer_reused={tracer_reused} "
+            f"radar_reused={radar_reused} platform_reused={platform_reused}")
         return SolveResult(radar=radar, signal=signal)
 
     @staticmethod
@@ -402,6 +479,43 @@ class SolveRunner:
         if str(scene_device).startswith("cuda") and str(sensor.device) != "cuda":
             return replace(sensor, device="cuda")
         return sensor
+
+    @staticmethod
+    def _radar_sensor_runtime_key(sensor: SensorSpec) -> tuple:
+        return (
+            str(sensor.backend),
+            int(sensor.pad_factor),
+            str(sensor.device),
+        )
+
+    @staticmethod
+    def _radar_config_key(config: Any) -> tuple:
+        return ("config", SolveRunner._stable_key(config))
+
+    @staticmethod
+    def _stable_key(value: Any):
+        if is_dataclass(value):
+            value = asdict(value)
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        if isinstance(value, dict):
+            return tuple((str(k), SolveRunner._stable_key(v)) for k, v in sorted(value.items()))
+        if isinstance(value, (list, tuple)):
+            return tuple(SolveRunner._stable_key(item) for item in value)
+        if isinstance(value, (float, np.floating)):
+            return round(float(value), 12)
+        if isinstance(value, (int, bool, str)) or value is None:
+            return value
+        if hasattr(value, "__dict__"):
+            public = {
+                str(k): v
+                for k, v in vars(value).items()
+                if not str(k).startswith("_")
+            }
+            return SolveRunner._stable_key(public)
+        return repr(value)
 
     @staticmethod
     def build_radar(config: Any, sensor: SensorSpec) -> Any:

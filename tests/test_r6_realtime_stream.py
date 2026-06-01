@@ -145,7 +145,7 @@ def test_realtime_stream_uses_solver_live_session_and_updates_on_transform(monke
         update = _calls(fake, "live_update")[-1]
         assert update[2]["session_id"] == "radar.radar_settings.signal"
         assert update[2]["config"]["sensor"]["position"] == [1.0, 2.0, 3.0]
-        assert update[3]["scene"] is radar.scene
+        assert "scene" not in update[3]
 
         assert radar.pause_stream() == "Stream paused"
         assert len(_calls(fake, "live_pause")) == 1
@@ -171,7 +171,7 @@ def test_realtime_stream_uses_solver_live_session_and_updates_on_transform(monke
     assert fake.solvers.query_calls == []
 
 
-def test_realtime_stream_defaults_to_thirty_fps_continuous_live(monkeypatch):
+def test_realtime_stream_defaults_to_change_only_rd_preview(monkeypatch):
     import wt_radar.components.radar as radar_mod
 
     fake = _FakeApi()
@@ -179,7 +179,8 @@ def test_realtime_stream_defaults_to_thirty_fps_continuous_live(monkeypatch):
     radar, _settings = _radar_in_scene()
 
     assert radar.stream_max_fps == 30.0
-    assert radar.stream_on_change_only is False
+    assert radar.stream_on_change_only is True
+    assert radar.stream_channels == "rd"
     assert radar.start_stream() == "Stream started"
     try:
         _wait_for(lambda: len(_calls(fake, "live_start")) == 1, "live_start call")
@@ -189,10 +190,35 @@ def test_realtime_stream_defaults_to_thirty_fps_continuous_live(monkeypatch):
 
     params = _calls(fake, "live_start")[0][2]
     assert params["max_fps"] == 30.0
-    assert params["config"]["live"]["stream_on_change_only"] is False
+    assert params["channels"] == ["rd"]
+    assert params["config"]["live"]["channels"] == ["rd"]
+    assert params["config"]["live"]["stream_on_change_only"] is True
     assert radar.signal_stream is None
     stream = fake.streams.streams["radar.radar_settings.signal"]
     assert stream.refs[0]["viewport"]["maxFps"] == 30.0
+
+
+def test_realtime_stream_migrates_legacy_continuous_defaults(monkeypatch):
+    import wt_radar.components.radar as radar_mod
+
+    fake = _FakeApi()
+    monkeypatch.setattr(radar_mod, "api", fake)
+    radar, _settings = _radar_in_scene()
+    radar.stream_on_change_only = False
+    radar.stream_channels = "raw,rd,pc"
+
+    assert radar.start_stream() == "Stream started"
+    try:
+        _wait_for(lambda: len(_calls(fake, "live_start")) == 1, "live_start call")
+    finally:
+        radar.stop_stream()
+        _wait_for(lambda: radar._live_thread is None or not radar._live_thread.is_alive(), "live thread stop")
+
+    params = _calls(fake, "live_start")[0][2]
+    assert radar.stream_on_change_only is True
+    assert radar.stream_channels == "rd"
+    assert params["channels"] == ["rd"]
+    assert params["config"]["live"]["stream_on_change_only"] is True
 
 
 def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch):
@@ -218,13 +244,15 @@ def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch
     fake_signal = np.ones((1, 1, 2, 8), dtype=np.complex64)
     fake_result = type("Result", (), {"radar": object(), "signal": fake_signal})()
 
-    def fake_run(scene, *, sensor, tracer, motion_sampling, t0, live_cache=None, cache_key=None):
+    def fake_run(scene, *, sensor, tracer, motion_sampling, t0, live_cache=None,
+                 cache_key=None, platform_cache_key=None):
         calls.append({
             "scene": scene,
             "motion_sampling": motion_sampling,
             "t0": t0,
             "cache": live_cache,
             "cache_key": cache_key,
+            "platform_cache_key": platform_cache_key,
         })
         return fake_result
 

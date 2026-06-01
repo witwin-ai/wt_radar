@@ -71,7 +71,7 @@
 conda run -n witwin2 python -m pytest plugins\wt_radar\tests\test_r6_realtime_stream.py -q
 ```
 
-当前结果：`12 passed`。
+当前结果：`13 passed`。
 
 ## 调试方法
 
@@ -191,17 +191,17 @@ live cache hit: mode=...
 
 如果 `trace_ms` 是秒级，瓶颈在光线追踪/trace 构建，不在前端。
 
-### 4. `raw,rd,pc` 三通道增加后处理和传输压力
+### 4. `raw,rd,pc` 三通道会增加后处理和传输压力
 
-当前默认 `stream_channels` 是 `raw,rd,pc`。RD 预览只看 `rd`，但每个 radar frame 还会做 raw 和 point cloud 发布。
+旧默认 `stream_channels` 是 `raw,rd,pc`。RD 预览只看 `rd`，但每个 radar frame 还会做 raw 和 point cloud 发布。
 
-调试实时预览时建议临时改成：
+实时预览当前默认改成：
 
 ```text
 rd
 ```
 
-这样可以排除 raw/pc 后处理和传输造成的额外压力。
+这样可以排除 raw/pc 后处理和传输造成的额外压力；需要诊断 raw/pc 时再显式打开。
 
 ### 5. WebSocket backpressure / drain 问题
 
@@ -220,6 +220,134 @@ solver-side benchmark 可以达到 30fps，不代表 Studio component 控件实�
 - `streamStore` seq。
 - canvas draw fps。
 - payload hash 变化。
+
+## 2026-05-31 实时渲染优化记录
+
+这次 latency 修复的目标不是“拖拽中每一帧都同步”，而是先保证 gizmo 松开后能很快看到新结果。最终有效的是减少控制消息、缩小重建范围、复用 solver 运行时对象。
+
+### 使用的优化技巧
+
+#### 1. 先区分前端绘制慢还是后端没发帧
+
+不要只看 heatmap 图片是否刷新。`StreamRefWidget` 的 `#seq` 是更直接的信号：
+
+- `#seq` 不变：后端/传输/solver 没有发布新帧。
+- `#seq` 变但图片不变：前端绘图、payload materialize、range 或 canvas 路径有问题。
+
+这次确认 `drawMs` 约 1ms、`displayLatencyMs` 约 20ms，所以主要 latency 不在 canvas，而在 solver/update/publish 链路。
+
+#### 2. 实时预览默认只发布需要看的通道
+
+RD 预览只需要 `rd`。实时调试时默认使用：
+
+```text
+stream_on_change_only = True
+stream_channels = rd
+```
+
+避免每次 pose 更新还额外做 raw/point-cloud 后处理和传输。raw/pc 可以作为诊断通道，但不应该是低延迟预览的默认负载。
+
+#### 3. control plane 和 data plane 不要互相饥饿
+
+高频 `live_update` 是控制消息，stream frame 是数据消息。把 gizmo 拖拽中的每个 tick 都变成 scene update，会让 solver session 一直处于“状态刚变”的状态，最终 publish 被饿死。
+
+当前策略：
+
+- gizmo 默认仍然只在 `mouseUp` 同步最终 transform。
+- live session 完成一帧后只在 stop/pause 时丢弃；普通 update 到达不再让已完成帧作废。
+- 如果将来做 drag-live，需要单独 latest-only pose control channel，而不是复用常规 scene update。
+
+#### 4. pose-only update 不要重发整场景
+
+只移动雷达 sensor 时，geometry、materials、motion graph 没变。`live_update` 现在会比较并传递 `scene_payload_signature`：
+
+- 只有 radar/sensor pose 变化：只发送 solver config，不带 `scene`。
+- geometry/structure/config 会影响 platform scene：才重新发送 scene。
+
+这避免了每次松开 gizmo 都经过 sceneRef 序列化、load_scene_ref 和 adapter rebuild。
+
+#### 5. cache miss 也要拆粒度，不要把所有 miss 当作全量重建
+
+旧逻辑里 signature 变了就会：
+
+```text
+RadarAdapter.to_platform(...)
+wr.Radar(...)
+Tracer(...)
+trace(...)
+sigproc(...)
+```
+
+这对 sensor pose-only 变化太重。现在 live cache 拆成几层：
+
+- platform scene/config：同一 solver session 且 `scene_payload_signature` 没变时复用。
+- `wr.Radar`：RadarConfig、backend、device、pad_factor 不变时复用。
+- sensor pose：通过 `Radar.set_pose(position, target, up, fov)` 更新。
+- tracer：scene topology 和 tracer spec 不变时复用。
+- trace/path cache：cache key 完全相同时才复用。
+
+因此松开 gizmo 后的常见路径变为：
+
+```text
+reuse platform scene/config
+reuse wr.Radar
+Radar.set_pose(...)
+reuse Tracer
+trace(...)
+RD publish
+```
+
+这比重建 `wr.Radar` 和 `to_platform` 快很多，也避免 CUDA/Dirichlet 初始化反复出现在交互路径里。
+
+#### 6. heatmap 的显示 range 要用“显示范围”，不要直接用数据极值
+
+RD map 是 dB heatmap，直接用整张图的 min/max 很容易被一个强 outlier 或直达径拉坏，表现为大面积蓝底和红色十字/横线饱和。
+
+前端 heatmap 现在的默认规则：
+
+- 显式 `min/max`、`vmin/vmax`、`displayMin/displayMax` 优先。
+- float 数据没有显式范围时，用稳健高分位作为 `vmax`。
+- 默认动态范围约 60dB，避免极小噪声或极大尖峰决定整张图。
+
+这类图像不要把“物理数据范围”和“可视化动态范围”混为一谈。
+
+### 这次踩过的坑
+
+#### 1. “更实时地同步 transform”反而更慢
+
+直觉上高频同步 gizmo 会更实时，但实际会让 control update 压过 stream publish。对重计算型渲染/仿真，实时交互的第一原则是 latest-only 和可丢弃中间状态，而不是逐条可靠执行。
+
+#### 2. 只做 latest-only stream 不够
+
+server -> frontend 的 stream frame 可以 coalesce，但 frontend/server -> solver 的 control update 如果不 coalesce，仍然会把 solver 卡住。control plane 也需要 latest-only 思维。
+
+#### 3. signature 变了不等于所有运行时对象都失效
+
+scene signature 包含 radar pose，pose 变会让 cache key 变。但这不代表 RadarConfig、platform scene、tracer topology 都变了。实时系统里 cache key 要按失效原因拆开，否则每次小改动都会变成全量重建。
+
+#### 4. 端到端延迟不能用单点 benchmark 代替
+
+solver-side throughput 脚本只能说明 solver 在隔离条件下的速度。Studio 真实延迟还包括 sceneRef/control message、solver session 调度、publish、websocket、store、RAF 绘制和 heatmap range。
+
+#### 5. heatmap 看起来“没刷新”可能是 range 错，不是帧没到
+
+这次截图里的红色十字说明数据很可能到了，但显示 range 被强反射/极值拉坏。诊断顺序应该是：
+
+1. 看 `#seq` 是否增长。
+2. 看 payload hash 是否变化。
+3. 再看 heatmap range/colormap。
+
+不要只凭图片外观判断 stream 没更新。
+
+### 后续真正 drag-live 的架构建议
+
+如果目标是拖拽过程中连续看到雷达响应，建议不要走完整 scene update，而是：
+
+1. 前端 gizmo drag pose 发到独立 latest-only control channel。
+2. 后端 live session 只保存最新 pose，不排队执行每个 pose。
+3. solver 每一帧开始时读取最新 pose，正在计算的帧允许完成并发布。
+4. scene/geometry/config 变化才走重 sceneRef update。
+5. stream frame data plane 与 pose control plane 做限速和合并，避免 websocket 写队列互相阻塞。
 
 ## 下一步建议
 

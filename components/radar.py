@@ -99,6 +99,7 @@ class RadarComponent(Component):
     _live_pause_event = None
     _live_lock = None
     _live_last_signature = None
+    _live_last_scene_payload_signature = None
     _live_started_at = 0.0
     _live_generation = 0
     _live_session_id = ""
@@ -251,11 +252,11 @@ class RadarComponent(Component):
     t0 = float_field(0.0, group=_SOLVE, description="Solve start time (s)")
     stream_max_fps = float_field(30.0, min=0.1, max=30.0, group=_SOLVE,
                                  description="Maximum realtime stream solves per second")
-    stream_channels = string_field("raw,rd,pc", group=_SOLVE,
+    stream_channels = string_field("rd", group=_SOLVE,
                                    description="Comma-separated live channels: raw, rd, pc")
     stream_history_length = int_field(1, min=1, group=_SOLVE,
                                       description="Stream history frames retained for reconnect")
-    stream_on_change_only = bool_field(False, group=_SOLVE,
+    stream_on_change_only = bool_field(True, group=_SOLVE,
                                        description="Only re-solve when radar settings or scene transforms change")
     stream_status = string_field("stopped", options=["stopped", "running", "paused", "error"],
                                  enum_toggle=True, readonly=True, group=_SOLVE,
@@ -368,6 +369,7 @@ class RadarComponent(Component):
             logger.warning("Radar stream start ignored: component is not attached to a scene")
             return "Radar must be attached to a scene"
         self._ensure_live_state()
+        self._apply_live_latency_defaults()
         with self._live_lock:
             if self._live_thread is not None and self._live_thread.is_alive():
                 if self._live_stop_event.is_set():
@@ -401,6 +403,7 @@ class RadarComponent(Component):
             self._open_signal_stream(self._stream_channel_descriptors(), status="active")
             signature = self._live_scene_signature()
             self._live_last_signature = signature
+            self._live_last_scene_payload_signature = self._live_scene_payload_signature()
             params = self._live_solver_params(signature)
             logger.info(
                 "Radar live start request: "
@@ -814,6 +817,14 @@ class RadarComponent(Component):
         if self._live_pause_event is None:
             self._live_pause_event = threading.Event()
 
+    def _apply_live_latency_defaults(self):
+        selected = self._selected_stream_channels(default=("raw", "rd", "pc"))
+        if bool(self.stream_on_change_only) or selected != ("raw", "rd", "pc"):
+            return
+        logger.info("Radar stream applying latency defaults: stream_on_change_only=True channels=rd")
+        self.stream_on_change_only = True
+        self.stream_channels = "rd"
+
     def _live_owner_active(self):
         scene = self.scene
         owner = getattr(self, "owner", None)
@@ -835,15 +846,18 @@ class RadarComponent(Component):
             interval = 1.0 / min(max(0.1, float(self.stream_max_fps)), 30.0)
             started = time.monotonic()
             signature = self._live_scene_signature()
+            scene_payload_signature = self._live_scene_payload_signature()
             if signature != self._live_last_signature:
+                include_scene = scene_payload_signature != self._live_last_scene_payload_signature
                 logger.info(f"Radar live loop updating solver: generation={generation}")
-                ok = self._send_live_update(generation, signature)
+                ok = self._send_live_update(generation, signature, include_scene=include_scene)
                 if not ok:
                     self.stream_status = "error"
                     self._update_stream_status("error")
                     time.sleep(max(0.25, interval))
                 else:
                     self._live_last_signature = signature
+                    self._live_last_scene_payload_signature = scene_payload_signature
             elapsed = time.monotonic() - started
             time.sleep(max(0.01, interval - elapsed))
         logger.info(f"Radar live loop exited: generation={generation}")
@@ -851,7 +865,7 @@ class RadarComponent(Component):
     def _live_generation_active(self, generation):
         return generation == self._live_generation
 
-    def _send_live_update(self, generation, signature):
+    def _send_live_update(self, generation, signature, *, include_scene=True):
         try:
             if not self._live_generation_active(generation):
                 return True
@@ -860,14 +874,17 @@ class RadarComponent(Component):
             params = self._live_solver_params(signature)
             logger.info(
                 "Radar live update request: "
-                f"session={params['session_id']} position={params['config']['sensor']['position']}"
+                f"session={params['session_id']} position={params['config']['sensor']['position']} "
+                f"include_scene={bool(include_scene)}"
             )
+            kwargs = {"timeout": 5}
+            if include_scene:
+                kwargs["scene"] = self.scene
             api.solvers.call(
                 "witwin.radar.simulate",
                 "live_update",
                 params=params,
-                scene=self.scene,
-                timeout=5,
+                **kwargs,
             )
             return True
         except Exception as exc:  # noqa: BLE001 - background control thread must survive one failed update
@@ -969,6 +986,41 @@ class RadarComponent(Component):
                 ))
         return json.dumps(items, sort_keys=True, separators=(",", ":"))
 
+    def _live_scene_payload_signature(self):
+        """Signature for data that requires resending the studio scene to the solver."""
+        scene = self.scene
+        items = [("radar_component", self._component_signature())]
+        if scene is not None:
+            for obj_id, obj in sorted(scene.objects.items()):
+                has_geometry = (
+                    obj.get_component("PlatformGeometry") is not None
+                    or obj.get_component("Mesh") is not None
+                )
+                radar_component = obj.get_component("Radar")
+                if obj is self.owner and not has_geometry:
+                    continue
+
+                row = [obj_id]
+                if has_geometry:
+                    transform = obj.get_component("Transform")
+                    row.extend([
+                        self._signature_value(getattr(transform, "position", None) if transform is not None else None),
+                        self._signature_value(getattr(transform, "rotation", None) if transform is not None else None),
+                        self._signature_value(getattr(transform, "scale", None) if transform is not None else None),
+                        bool(getattr(obj, "visible", True)),
+                    ])
+                if radar_component is not None and radar_component is not self:
+                    row.append((
+                        "radar_component",
+                        self._component_fields_signature(
+                            radar_component,
+                            ignored={"signal_stream", "signal_figure", "stream_status"},
+                        ),
+                    ))
+                if len(row) > 1:
+                    items.append(tuple(row))
+        return json.dumps(items, sort_keys=True, separators=(",", ":"))
+
     def _live_scene_summary(self, limit=8):
         scene = self.scene
         if scene is None:
@@ -994,12 +1046,19 @@ class RadarComponent(Component):
         return f"objects={len(objects)}{suffix} | " + " | ".join(rows)
 
     def _component_signature(self):
-        ignored = {"signal_stream", "signal_figure", "stream_status"}
+        return self._component_fields_signature(
+            self,
+            ignored={"signal_stream", "signal_figure", "stream_status"},
+        )
+
+    @staticmethod
+    def _component_fields_signature(component, *, ignored=None):
+        ignored = set(ignored or ())
         values = {}
-        for name in sorted(getattr(self, "_fields_meta", {})):
+        for name in sorted(getattr(component, "_fields_meta", {})):
             if name in ignored:
                 continue
-            values[name] = self._signature_value(getattr(self, name))
+            values[name] = RadarComponent._signature_value(getattr(component, name))
         return values
 
     @staticmethod
@@ -1190,6 +1249,7 @@ class RadarComponent(Component):
                 "session_id": str(live_session_id),
                 "stream_id": str(live_session_id),
                 "signature": str(live_signature),
+                "scene_payload_signature": str(self._live_scene_payload_signature()),
                 "channels": list(self._selected_stream_channels(default=("raw", "rd", "pc"))),
                 "max_fps": min(max(float(self.stream_max_fps), 0.1), 30.0),
                 "stream_on_change_only": bool(self.stream_on_change_only),

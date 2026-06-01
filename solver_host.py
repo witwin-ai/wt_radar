@@ -289,6 +289,7 @@ class LiveSession:
             t0=float(snapshot["t0"]),
             live_cache=self._cache,
             cache_key=signature,
+            platform_cache_key=str(live.get("scene_payload_signature") or "") or None,
         )
         with self._lock:
             if self._stop.is_set() or self._paused.is_set():
@@ -372,6 +373,7 @@ def solve(ctx, scene, config):
     live = dict(config.get("live") or {})
     live_session_id = str(live.get("session_id") or "")
     live_signature = str(live.get("signature") or "")
+    scene_payload_signature = str(live.get("scene_payload_signature") or "")
     live_cache = None
     if live_session_id and live_signature:
         live_cache = _LIVE_CACHES.setdefault(live_session_id, {})
@@ -392,6 +394,7 @@ def solve(ctx, scene, config):
         t0=t0,
         live_cache=live_cache,
         cache_key=live_signature or None,
+        platform_cache_key=scene_payload_signature or None,
     )
     ctx.log(f"Radar solver: solve complete signal_shape={tuple(result.signal.shape)}")
     ctx.progress(1.0, "Radar solve complete")
