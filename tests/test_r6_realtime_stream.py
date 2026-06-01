@@ -198,6 +198,83 @@ def test_realtime_stream_defaults_to_change_only_rd_preview(monkeypatch):
     assert stream.refs[0]["viewport"]["maxFps"] == 30.0
 
 
+def test_realtime_stream_descriptors_declare_generic_plot_specs():
+    radar, _settings = _radar_in_scene()
+
+    descriptors = {item["channelId"]: item for item in radar._stream_channel_descriptors()}
+
+    assert descriptors["raw"]["plot"] == {
+        "kind": "line",
+        "x": {"mode": "index", "label": "ADC sample"},
+        "y": {"label": "Amplitude"},
+        "complex": "real_imag",
+        "series": [
+            {"component": "real", "label": "Real", "color": "#ff9500"},
+            {"component": "imag", "label": "Imag", "color": "#00aaff"},
+        ],
+    }
+    assert descriptors["rd"]["plot"] == {
+        "kind": "heatmap",
+        "x": {"label": "Range bin"},
+        "y": {"label": "Doppler bin"},
+        "colormap": "imshow",
+        "range": {"mode": "full"},
+    }
+    assert descriptors["pc"]["plot"] == {
+        "kind": "points",
+        "stride": 6,
+        "axes": ["x", "y", "z"],
+        "colorBy": "intensity",
+    }
+
+
+def test_realtime_stream_preview_field_hides_label_and_stream_header():
+    radar, _settings = _radar_in_scene()
+
+    fields = {field["name"]: field for field in radar.to_dict()["fields"]}
+    signal_stream = fields["signal_stream"]
+
+    assert signal_stream.get("hide_label") is True
+    assert "title" not in signal_stream
+    assert signal_stream["widget"]["show_header"] is False
+
+
+def test_local_raw_stream_publishes_selected_adc_trace_for_line_plot():
+    radar, _settings = _radar_in_scene()
+
+    class FakeStream:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, channel_id, payload, metadata=None):
+            self.published.append((channel_id, np.asarray(payload), metadata or {}))
+
+    sig = np.zeros((2, 2, 1, 3), dtype=np.complex64)
+    sig[1, 0, 0] = np.asarray([1 + 2j, 3 + 4j, 5 + 6j], dtype=np.complex64)
+    radar.tx_index = 1
+    radar.rx_index = 0
+    radar._signal = type(
+        "FakeTensor",
+        (),
+        {
+            "shape": sig.shape,
+            "detach": lambda self: self,
+            "cpu": lambda self: self,
+            "numpy": lambda self: sig,
+        },
+    )()
+    stream = FakeStream()
+
+    radar._publish_raw_stream(stream)
+
+    assert len(stream.published) == 1
+    channel_id, payload, metadata = stream.published[0]
+    assert channel_id == "raw"
+    assert payload.dtype == np.float32
+    assert payload.tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert metadata == {"dtype": "complex64", "shape": [3], "tx": 1, "rx": 0, "chirp": 0}
+
+
 def test_realtime_stream_view_change_switches_signal_channel(monkeypatch):
     import wt_radar.components.radar as radar_mod
 

@@ -284,7 +284,7 @@ class RadarComponent(Component):
     post_processors = list_field(component_field(component_type="RadarPostProcessor"), default=[],
                                  group=_SOLVE,
                                  description="Extra post-processor views run after each solve")
-    signal_stream = stream_ref_field(default_channel="rd", group=_SOLVE, title="Live Signal")
+    signal_stream = stream_ref_field(default_channel="rd", group=_SOLVE, hide_label=True, show_header=False)
     signal_figure = figure(
         title="Radar Signal",
         group=_SOLVE,
@@ -827,11 +827,35 @@ class RadarComponent(Component):
     def _stream_channel_descriptors(self):
         return [
             {"channelId": "raw", "dtype": "complex64", "shape": ["adc"],
-             "semantic": "time_series", "label": "Raw IQ"},
+             "semantic": "time_series", "label": "Raw IQ",
+             "plot": {
+                 "kind": "line",
+                 "x": {"mode": "index", "label": "ADC sample"},
+                 "y": {"label": "Amplitude"},
+                 "complex": "real_imag",
+                 "series": [
+                     {"component": "real", "label": "Real", "color": "#ff9500"},
+                     {"component": "imag", "label": "Imag", "color": "#00aaff"},
+                 ],
+             }},
             {"channelId": "rd", "dtype": "float32", "shape": ["doppler", "range"],
-             "semantic": "heatmap", "label": "Range-Doppler"},
+             "semantic": "heatmap", "label": "Range-Doppler",
+             "plot": {
+                 "kind": "heatmap",
+                 "x": {"label": "Range bin"},
+                 "y": {"label": "Doppler bin"},
+                 "colormap": "imshow",
+                 "range": {"mode": "full"},
+             },
+             "presentation": {"colormap": "imshow", "displayRangeMode": "full"}},
             {"channelId": "pc", "dtype": "float32", "shape": ["points", 6],
-             "semantic": "pointcloud_xyz", "label": "Point cloud"},
+             "semantic": "pointcloud_xyz", "label": "Point cloud",
+             "plot": {
+                 "kind": "points",
+                 "stride": 6,
+                 "axes": ["x", "y", "z"],
+                 "colorBy": "intensity",
+             }},
         ]
 
     def _selected_stream_channels(self, default=("raw", "rd", "pc")):
@@ -1163,15 +1187,21 @@ class RadarComponent(Component):
         if self._signal is None:
             return
         sig = self._signal.detach().cpu().numpy()
-        iq = np.empty(sig.size * 2, dtype=np.float32)
-        flat = sig.reshape(-1)
-        iq[0::2] = flat.real.astype(np.float32, copy=False)
-        iq[1::2] = flat.imag.astype(np.float32, copy=False)
-        stream.publish("raw", iq, metadata={"dtype": "complex64", "shape": list(sig.shape)})
-        amp = np.abs(sig)
+        sample = np.ascontiguousarray(sig[self._tx(), self._rx(), 0].astype(np.complex64, copy=False))
+        iq = np.empty(sample.size * 2, dtype=np.float32)
+        iq[0::2] = sample.real.astype(np.float32, copy=False)
+        iq[1::2] = sample.imag.astype(np.float32, copy=False)
+        stream.publish("raw", iq, metadata={
+            "dtype": "complex64",
+            "shape": [int(sample.size)],
+            "tx": int(self._tx()),
+            "rx": int(self._rx()),
+            "chirp": 0,
+        })
+        amp = np.abs(sample)
         logger.info(
             "Radar stream raw frame: "
-            f"shape={list(sig.shape)} mean_amp={float(amp.mean()):.6e} max_amp={float(amp.max()):.6e}"
+            f"shape={[int(sample.size)]} mean_amp={float(amp.mean()):.6e} max_amp={float(amp.max()):.6e}"
         )
 
     def _publish_rd_stream(self, stream):
