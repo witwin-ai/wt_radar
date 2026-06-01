@@ -73,3 +73,34 @@ to hang before any RayD trace logs, check SlangTorch's lock path first. In this 
 the non-elevated sandbox could not acquire
 `dirichlet.slangb9c103f6b206b8e5.lock`; clearing `.slangtorch_cache` and running the GPU
 suite with permission to write/lock the external radar package fixed the apparent hang.
+
+## Measuring live stream throughput
+
+Use `tools/live_stream_throughput.py` from the studio repo root to measure the solver-side
+Start Stream path:
+
+```powershell
+$env:PYTHONPATH="E:\Code\witwin-studio\server;E:\Code\witwin-studio\plugins;E:\Code\witwin-platform\radar;E:\Code\witwin-platform\core"
+conda run -n witwin2 python plugins\wt_radar\tools\live_stream_throughput.py --profile smoke --frames 20 --warmup-frames 2 --max-fps 30 --channels raw,rd,pc --backend dirichlet --device cuda --resolution 16 --encode-bytes
+```
+
+The script drives `solver_host.LiveSession` directly and reports frame FPS, inter-frame
+latency, solve/post-processing timings, channel payload bytes, and timeout/in-flight solve
+state. Use `--profile demo` to test the heavier default demo radar configuration.
+
+To measure the frontend component's actual canvas refresh rate, enable the stream widget
+metrics collector in the browser devtools console before starting the stream:
+
+```javascript
+localStorage.setItem("witwinStreamWidgetMetrics", "1");
+window.__WITWIN_STREAM_WIDGET_METRICS__ = undefined;
+```
+
+Reload the app, start the radar stream, then inspect:
+
+```javascript
+window.__WITWIN_STREAM_WIDGET_METRICS__.summary()
+```
+
+That summary is based on completed `canvas` draws in the stream widgets, not on backend
+publish completion.

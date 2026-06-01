@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import os
 import threading
 import time
 from pathlib import Path
@@ -23,6 +24,8 @@ _LIVE_CACHES: Dict[str, Dict[str, Any]] = {}
 _MAX_LIVE_CACHES = 8
 _LIVE_SESSIONS: Dict[str, "LiveSession"] = {}
 _LIVE_SESSIONS_LOCK = threading.RLock()
+_LIVE_FINE_WAIT_WINDOW_S = 0.020 if os.name == "nt" else 0.003
+_LIVE_SPIN_ONLY_THRESHOLD_S = 0.050 if os.name == "nt" else 0.0
 
 
 def _sensor(config: Dict[str, Any]) -> SensorSpec:
@@ -77,6 +80,52 @@ def _clamp_fps(value: Any) -> float:
     except (TypeError, ValueError):
         fps = 10.0
     return min(max(fps, 0.1), 30.0)
+
+
+def _wait_until(
+    stop_event: threading.Event,
+    deadline: float,
+    *,
+    clock=time.monotonic,
+    sleep=None,
+    fine_window: float = _LIVE_FINE_WAIT_WINDOW_S,
+    spin_only_threshold: float = _LIVE_SPIN_ONLY_THRESHOLD_S,
+) -> bool:
+    """Wait until deadline while keeping the final few ms out of OS timer granularity."""
+    fine_window = max(0.0, float(fine_window))
+    while not stop_event.is_set():
+        remaining = float(deadline) - float(clock())
+        if remaining <= 0.0:
+            return False
+        if remaining > max(fine_window, spin_only_threshold):
+            if stop_event.wait(max(0.0, remaining - fine_window)):
+                return True
+        else:
+            if sleep is not None:
+                sleep(min(remaining, 0.001))
+            elif stop_event.wait(min(remaining, 0.001)):
+                return True
+    return True
+
+
+def _next_frame_deadline(
+    previous_deadline: float,
+    frame_started: float,
+    interval: float,
+    *,
+    now: float | None = None,
+) -> float:
+    """Advance the live stream cadence without baking in one-off oversleeps."""
+    interval = max(0.0, float(interval))
+    if previous_deadline <= 0.0:
+        deadline = float(frame_started) + interval
+    else:
+        deadline = float(previous_deadline) + interval
+    if now is not None and interval > 0.0:
+        behind = float(now) - deadline
+        if behind >= 0.0:
+            deadline += (int(behind // interval) + 1) * interval
+    return deadline
 
 
 class LiveSession:
@@ -179,8 +228,10 @@ class LiveSession:
                     break
             now = time.monotonic()
             if now < next_frame_at:
-                self._stop.wait(next_frame_at - now)
-                continue
+                if _wait_until(self._stop, next_frame_at):
+                    break
+                if self._stop.is_set():
+                    break
             if self._stop.is_set():
                 break
             self._dirty.clear()
@@ -199,7 +250,12 @@ class LiveSession:
                     snapshot["ctx"].stream_error(snapshot["stream_id"], str(exc), code="radar_live_error")
                 except Exception:  # noqa: BLE001
                     pass
-            next_frame_at = started + interval
+            next_frame_at = _next_frame_deadline(
+                next_frame_at,
+                started,
+                interval,
+                now=time.monotonic(),
+            )
 
     def _snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -235,7 +291,7 @@ class LiveSession:
             cache_key=signature,
         )
         with self._lock:
-            if snapshot["state_seq"] != self._state_seq or self._stop.is_set() or self._paused.is_set():
+            if self._stop.is_set() or self._paused.is_set():
                 return False
         self._publish_channels(snapshot, result)
         return True
@@ -251,6 +307,11 @@ class LiveSession:
         n_rx = int(sig.shape[1]) if sig.ndim >= 2 else 0
         tx = _clamp_index(live.get("tx"), n_tx)
         rx = _clamp_index(live.get("rx"), n_rx)
+        frame_meta = {
+            "signature": str(live.get("signature") or snapshot["state_seq"]),
+            "stateSeq": int(snapshot["state_seq"]),
+            "t0": float(snapshot["t0"]),
+        }
         if "raw" in channels and sig.ndim >= 4:
             raw = np.ascontiguousarray(sig[tx, rx, 0].astype(np.complex64, copy=False))
             ctx.stream_publish(stream_id, "raw", raw, metadata={
@@ -259,6 +320,7 @@ class LiveSession:
                 "tx": int(tx),
                 "rx": int(rx),
                 "chirp": 0,
+                **frame_meta,
             }, timestamp_us=timestamp_us)
         if "rd" in channels:
             rd = SigProc.range_doppler(
@@ -274,6 +336,7 @@ class LiveSession:
                 "shape": list(mag_db.shape),
                 "tx": int(tx),
                 "rx": int(rx),
+                **frame_meta,
             }, timestamp_us=timestamp_us)
         if "pc" in channels:
             pc = _as_numpy(SigProc.point_cloud(
@@ -292,6 +355,7 @@ class LiveSession:
             ctx.stream_publish(stream_id, "pc", pc, metadata={
                 "dtype": "float32",
                 "shape": list(pc.shape),
+                **frame_meta,
             }, timestamp_us=timestamp_us)
 
     @staticmethod

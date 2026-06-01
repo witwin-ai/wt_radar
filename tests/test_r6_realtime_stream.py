@@ -171,15 +171,15 @@ def test_realtime_stream_uses_solver_live_session_and_updates_on_transform(monke
     assert fake.solvers.query_calls == []
 
 
-def test_realtime_stream_default_frame_rate_is_ten_and_viewport_can_reach_thirty(monkeypatch):
+def test_realtime_stream_defaults_to_thirty_fps_continuous_live(monkeypatch):
     import wt_radar.components.radar as radar_mod
 
     fake = _FakeApi()
     monkeypatch.setattr(radar_mod, "api", fake)
     radar, _settings = _radar_in_scene()
 
-    assert radar.stream_max_fps == 10.0
-    radar.stream_max_fps = 30.0
+    assert radar.stream_max_fps == 30.0
+    assert radar.stream_on_change_only is False
     assert radar.start_stream() == "Stream started"
     try:
         _wait_for(lambda: len(_calls(fake, "live_start")) == 1, "live_start call")
@@ -189,6 +189,7 @@ def test_realtime_stream_default_frame_rate_is_ten_and_viewport_can_reach_thirty
 
     params = _calls(fake, "live_start")[0][2]
     assert params["max_fps"] == 30.0
+    assert params["config"]["live"]["stream_on_change_only"] is False
     assert radar.signal_stream is None
     stream = fake.streams.streams["radar.radar_settings.signal"]
     assert stream.refs[0]["viewport"]["maxFps"] == 30.0
@@ -437,6 +438,97 @@ def test_solver_live_stop_does_not_trigger_extra_idle_solve(monkeypatch):
     assert calls == ["sig-idle"]
 
 
+def test_live_wait_until_keeps_a_fine_grained_deadline_window():
+    import pytest
+    import wt_radar.solver_host as solver_host
+
+    now = [0.0]
+
+    class FakeStop:
+        waits = []
+
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            now[0] += timeout
+            return False
+
+    stop = FakeStop()
+
+    def fake_sleep(_timeout):
+        now[0] += 0.001
+
+    stopped = solver_host._wait_until(
+        stop,
+        0.010,
+        clock=lambda: now[0],
+        sleep=fake_sleep,
+        fine_window=0.003,
+        spin_only_threshold=0.003,
+    )
+
+    assert stopped is False
+    assert stop.waits == pytest.approx([0.007])
+    assert now[0] >= 0.010
+
+
+def test_live_wait_until_yields_during_default_short_wait():
+    import wt_radar.solver_host as solver_host
+
+    now = [0.0]
+
+    class FakeStop:
+        waits = []
+
+        def is_set(self):
+            return False
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            now[0] += timeout
+            return False
+
+    stop = FakeStop()
+
+    stopped = solver_host._wait_until(
+        stop,
+        0.003,
+        clock=lambda: now[0],
+        fine_window=0.020,
+        spin_only_threshold=0.050,
+    )
+
+    assert stopped is False
+    assert stop.waits
+    assert all(timeout > 0.0 for timeout in stop.waits)
+    assert now[0] >= 0.003
+
+
+def test_next_frame_deadline_keeps_fixed_cadence_after_oversleep():
+    import pytest
+    import wt_radar.solver_host as solver_host
+
+    interval = 1.0 / 30.0
+    first = solver_host._next_frame_deadline(0.0, 10.0, interval)
+    second = solver_host._next_frame_deadline(first, 10.046, interval, now=10.047)
+
+    assert first == pytest.approx(10.0 + interval)
+    assert second == pytest.approx(10.0 + interval * 2)
+    assert second < 10.046 + interval
+
+
+def test_next_frame_deadline_does_not_catch_up_after_slow_first_frame():
+    import pytest
+    import wt_radar.solver_host as solver_host
+
+    interval = 1.0 / 30.0
+    deadline = solver_host._next_frame_deadline(0.0, 10.0, interval, now=13.0)
+
+    assert deadline == pytest.approx(13.0 + interval)
+
+
 def test_solver_live_restart_suppresses_previous_session_publish(monkeypatch):
     import wt_radar.solver_host as solver_host
 
@@ -510,6 +602,66 @@ def test_solver_live_restart_suppresses_previous_session_publish(monkeypatch):
     assert len(ctx.published) == 1
     assert calls.count("old") == 1
     assert "new" in calls
+
+
+def test_solver_live_session_publishes_completed_frame_when_update_arrives_mid_solve(monkeypatch):
+    import wt_radar.solver_host as solver_host
+
+    class FakeCtx:
+        run_id = "live-run"
+
+        def __init__(self):
+            self.published = []
+
+        def stream_publish(self, stream_id, channel_id, payload=None, **kwargs):
+            self.published.append((stream_id, channel_id, kwargs.get("metadata") or {}))
+
+        def stream_error(self, stream_id, message, **kwargs):
+            pass
+
+    fake_signal = np.ones((1, 1, 2, 8), dtype=np.complex64)
+    fake_result = type("Result", (), {"radar": object(), "signal": fake_signal})()
+
+    class FakeRD:
+        mag_db = np.ones((4, 8), dtype=np.float32)
+
+    ctx = FakeCtx()
+    config = {
+        "sensor": {
+            "position": [0.0, 0.0, 0.0],
+            "target": [0.0, 0.0, -1.0],
+            "up": [0.0, 1.0, 0.0],
+            "fov": 70.0,
+            "backend": "dirichlet",
+            "pad_factor": 1,
+            "device": "cuda",
+        },
+        "tracer": {},
+        "live": {"signature": "old", "stream_on_change_only": False},
+    }
+    session = solver_host.LiveSession(
+        ctx,
+        "mid-solve",
+        scene={"scene": "old"},
+        config=config,
+        params={"stream_id": "radar.demo.signal", "channels": ["rd"]},
+    )
+    snapshot = session._snapshot()
+
+    def fake_run(*args, **kwargs):
+        updated = {
+            **config,
+            "live": {"signature": "new", "stream_on_change_only": False},
+        }
+        session.update(ctx, scene={"scene": "new"}, config=updated, params={"stream_id": "radar.demo.signal"})
+        return fake_result
+
+    monkeypatch.setattr(solver_host.SolveRunner, "run", fake_run)
+    monkeypatch.setattr(solver_host.SigProc, "range_doppler", lambda *args, **kwargs: FakeRD())
+
+    assert session._solve_and_publish(snapshot) is True
+    assert len(ctx.published) == 1
+    assert ctx.published[0][2]["signature"] == "old"
 
 
 def test_realtime_live_update_does_not_send_elapsed_t0_to_solver(monkeypatch):

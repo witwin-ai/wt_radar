@@ -249,13 +249,13 @@ class RadarComponent(Component):
     motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
                                    group=_SOLVE, description="Re-trace per chirp or per frame")
     t0 = float_field(0.0, group=_SOLVE, description="Solve start time (s)")
-    stream_max_fps = float_field(10.0, min=0.1, max=30.0, group=_SOLVE,
+    stream_max_fps = float_field(30.0, min=0.1, max=30.0, group=_SOLVE,
                                  description="Maximum realtime stream solves per second")
     stream_channels = string_field("raw,rd,pc", group=_SOLVE,
                                    description="Comma-separated live channels: raw, rd, pc")
     stream_history_length = int_field(1, min=1, group=_SOLVE,
                                       description="Stream history frames retained for reconnect")
-    stream_on_change_only = bool_field(True, group=_SOLVE,
+    stream_on_change_only = bool_field(False, group=_SOLVE,
                                        description="Only re-solve when radar settings or scene transforms change")
     stream_status = string_field("stopped", options=["stopped", "running", "paused", "error"],
                                  enum_toggle=True, readonly=True, group=_SOLVE,
@@ -264,7 +264,11 @@ class RadarComponent(Component):
                                  group=_SOLVE,
                                  description="Extra post-processor views run after each solve")
     signal_stream = stream_ref_field(default_channel="rd", group=_SOLVE, title="Live Signal")
-    signal_figure = figure(title="Radar Signal", group=_SOLVE)
+    signal_figure = figure(
+        title="Radar Signal",
+        group=_SOLVE,
+        hide_if={"field_name": "stream_status", "operator": "in", "value": ["running", "paused"]},
+    )
 
     # --- post processing: signal views + detector/CFAR (RadarResult) --------
     view = string_field("range_doppler", options=_VIEWS, enum_toggle=True, group=_POSTPROC,
