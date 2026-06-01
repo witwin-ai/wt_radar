@@ -103,6 +103,21 @@ class RadarComponent(Component):
     _live_started_at = 0.0
     _live_generation = 0
     _live_session_id = ""
+    _auto_refreshing_view = False
+    _POSTPROC_AUTO_REFRESH_FIELDS = frozenset({
+        "view",
+        "tx_index",
+        "rx_index",
+        "static_clutter_removal",
+        "show_cfar",
+        "detector",
+        "guard_doppler",
+        "guard_range",
+        "training_doppler",
+        "training_range",
+        "pfa",
+        "energy_top_k",
+    })
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna"))
@@ -313,6 +328,26 @@ class RadarComponent(Component):
         ctx.draw_sphere(radius=0.05)
         ctx.draw_cone(fov="fov", range=self._max_range(), segments=4,
                       direction=(0.0, 0.0, -1.0))
+
+    def on_value_change(self, field_name, _old_value, _new_value):
+        """Refresh solved post-processing previews when view controls change."""
+        if field_name not in self._POSTPROC_AUTO_REFRESH_FIELDS:
+            return
+        if getattr(self, "_auto_refreshing_view", False):
+            return
+        if not self._has_preview_result():
+            return
+        if str(self.stream_status) in {"running", "paused"}:
+            return
+        self._auto_refreshing_view = True
+        try:
+            self.update_view()
+            self._publish_signal_stream()
+        finally:
+            self._auto_refreshing_view = False
+
+    def _has_preview_result(self):
+        return bool(getattr(self, "_solver_result_handle", "")) or getattr(self, "_signal", None) is not None
 
     def _max_range(self) -> float:
         return Derived.compute(self)["max_range_m"]

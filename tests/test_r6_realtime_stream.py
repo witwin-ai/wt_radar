@@ -221,6 +221,21 @@ def test_realtime_stream_migrates_legacy_continuous_defaults(monkeypatch):
     assert params["config"]["live"]["stream_on_change_only"] is True
 
 
+def test_post_processing_field_change_refreshes_existing_preview():
+    radar, _settings = _radar_in_scene()
+    rendered = []
+    published = []
+    radar._solver_result_handle = "radar-handle"
+    radar._solver_run_id = "radar-run"
+    radar.update_view = lambda: rendered.append((str(radar.view), int(radar.tx_index))) or "rendered"
+    radar._publish_signal_stream = lambda channels=None: published.append(channels)
+
+    radar.view = "point_cloud"
+
+    assert rendered == [("point_cloud", 0)]
+    assert published == [None]
+
+
 def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch):
     import wt_radar.solver_host as solver_host
 
