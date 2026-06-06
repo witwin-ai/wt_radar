@@ -335,6 +335,8 @@ class LiveSession:
             ctx.stream_publish(stream_id, "rd", mag_db, metadata={
                 "dtype": "float32",
                 "shape": list(mag_db.shape),
+                "colormap": "imshow",
+                "displayRangeMode": "full",
                 "tx": int(tx),
                 "rx": int(rx),
                 **frame_meta,

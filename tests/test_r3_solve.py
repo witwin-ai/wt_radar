@@ -10,6 +10,7 @@ Live solve needs CUDA (the mitsuba ray tracer is CUDA-only), so the whole module
 gated on a CUDA device via the ``cuda_ready`` fixture.
 """
 import json
+import tomllib
 import numpy as np
 import pytest
 import torch
@@ -156,7 +157,7 @@ def test_built_radar_tx_pos_follows_transform(adapter):
 
 
 def test_manifest_declares_rfc012_solver():
-    manifest = json.loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "witwin.manifest.json").read_text())
+    manifest = tomllib.loads((__import__("pathlib").Path(__file__).resolve().parents[1] / "witwin.toml").read_text())
     solvers = manifest["contributes"]["solvers"]
     assert solvers[0]["id"] == "witwin.radar.simulate"
     assert solvers[0]["entry"] == "solver_host.py"

@@ -21,6 +21,7 @@ is hidden from the UI; tests / scripts can still override ``backend`` / ``device
 ``pad_factor`` on the component directly.
 """
 from dataclasses import asdict
+import asyncio
 import json
 import threading
 import time
@@ -375,14 +376,26 @@ class RadarComponent(Component):
         Notifications.info("Radar", msg)
         return msg
 
-    @button(display_name="Simulate", group=_SOLVE)
+    @button(display_name="Simulate", group=_SOLVE, operation="solver", cancellable=True,
+            progress_surface="component")
     def simulate(self):
+        async def _run():
+            return await self._simulate_async()
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_run())
+        return _run()
+
+    async def _simulate_async(self):
         """Rebuild + solve the live scene, keep the signal, and render the current view."""
         logger.info("=== Simulate clicked ===")
         spec = SensorSpec.from_component(self)
         logger.info(f"Sensor pose:  position={spec.position}  target={spec.target}  up={spec.up}")
         logger.info(f"Sensor:       backend={spec.backend} device={spec.device} fov={spec.fov}")
-        run = api.solvers.solve(
+        run = await asyncio.to_thread(
+            api.solvers.solve,
             "witwin.radar.simulate",
             scene=self.scene,
             config=self._solver_config(spec),
@@ -1223,6 +1236,8 @@ class RadarComponent(Component):
         stream.publish("rd", np.ascontiguousarray(mag_db, dtype=np.float32), metadata={
             "dtype": "float32",
             "shape": list(mag_db.shape),
+            "colormap": "imshow",
+            "displayRangeMode": "full",
         })
         logger.info(
             "Radar stream rd frame: "
