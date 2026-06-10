@@ -1251,17 +1251,19 @@ class RadarComponent(Component):
         scene = self.scene
         items = [("radar_component", self._component_signature())]
         if scene is not None:
+            related_ids = self._skinned_mesh_payload_object_ids(scene)
             for obj_id, obj in sorted(scene.objects.items()):
                 has_geometry = (
                     obj.get_component("PlatformGeometry") is not None
                     or obj.get_component("Mesh") is not None
                 )
+                is_related = obj_id in related_ids
                 radar_component = obj.get_component("Radar")
-                if obj is self.owner and not has_geometry:
+                if obj is self.owner and not has_geometry and not is_related:
                     continue
 
                 row = [obj_id]
-                if has_geometry:
+                if has_geometry or is_related:
                     transform = obj.get_component("Transform")
                     row.extend([
                         self._signature_value(getattr(transform, "position", None) if transform is not None else None),
@@ -1280,6 +1282,17 @@ class RadarComponent(Component):
                 if len(row) > 1:
                     items.append(tuple(row))
         return json.dumps(items, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _skinned_mesh_payload_object_ids(scene):
+        ids = set()
+        for obj in getattr(scene, "objects", {}).values():
+            skinned = obj.get_component("SkinnedMesh")
+            bone_ids = getattr(skinned, "bone_ids", None) if skinned is not None else None
+            if callable(bone_ids):
+                bone_ids = bone_ids()
+            ids.update(str(bone_id) for bone_id in (bone_ids or []) if bone_id)
+        return ids
 
     def _live_scene_summary(self, limit=8):
         scene = self.scene

@@ -12,6 +12,8 @@ from witwin_server import SceneObject
 from witwin_server.features.platform.bridge import MaterialMap, StructureMap, TransformMap
 from witwin_server.utils.mitsuba_utils import get_world_transform
 
+from .common import render_mesh_arrays
+
 
 class RadarStructureMap:
     """Map radar structures while keeping the common editor path component-light."""
@@ -28,11 +30,9 @@ class RadarStructureMap:
     @staticmethod
     def to_platform(obj: SceneObject) -> Optional[Any]:
         """Rebuild a ``core.Structure`` from ordinary Studio mesh/material fields."""
-        base = (
-            StructureMap.to_platform(obj)
-            if obj.get_component("PlatformGeometry") is not None
-            else RadarStructureMap._mesh_to_platform(obj)
-        )
+        base = RadarStructureMap._mesh_to_platform(obj)
+        if base is None and obj.get_component("PlatformGeometry") is not None:
+            base = StructureMap.to_platform(obj)
         if base is None:
             return None  # cameras / lights / empties (e.g. the Radar Settings object)
 
@@ -88,12 +88,11 @@ class RadarStructureMap:
 
         if not obj.visible:
             return None
-        mesh = obj.get_component("Mesh")
-        if mesh is None or mesh.is_empty:
+        mesh_arrays = render_mesh_arrays(obj)
+        if mesh_arrays is None:
             return None
 
-        vertices = np.asarray(mesh.get_vertices_numpy(), dtype=np.float32).reshape(-1, 3)
-        faces = np.asarray(mesh.get_faces_numpy(), dtype=np.int64).reshape(-1, 3)
+        vertices, faces = mesh_arrays
         ones = np.ones((vertices.shape[0], 1), dtype=np.float32)
         world = (get_world_transform(obj) @ np.concatenate([vertices, ones], axis=1).T).T[:, :3]
         geometry = wc.Mesh(world, faces, position=(0.0, 0.0, 0.0), rotation=None,

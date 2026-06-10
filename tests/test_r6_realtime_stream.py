@@ -3,7 +3,8 @@ import threading
 
 import numpy as np
 import witwin.radar as wr
-from witwin_server import Scene
+from witwin_server import Scene, SceneObject
+from witwin_server.core.components import SkinnedMeshComponent
 
 from wt_radar.adapter.config_map import ConfigMap
 
@@ -184,6 +185,36 @@ def test_realtime_stream_uses_solver_live_session_and_updates_on_transform(monke
     assert fake.streams.errors == []
     assert fake.solvers.solve_calls == []
     assert fake.solvers.query_calls == []
+
+
+def test_realtime_payload_signature_tracks_skinned_mesh_bones():
+    radar, _settings = _radar_in_scene()
+    body = SceneObject(name="skinned target", mesh_type="Empty")
+    radar.scene.add_object(body)
+    bone = SceneObject(name="skinned target bone", mesh_type="Empty")
+    radar.scene.add_object(bone)
+    radar.scene.set_parent(bone.id, body.id, keep_local_transform=False)
+
+    skinned = SkinnedMeshComponent()
+    body.add_component(skinned)
+    skinned.set_mesh_data(
+        np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32),
+        np.array([[0, 1, 2]], dtype=np.uint32),
+        notify=False,
+    )
+    skinned.set_skinning_data(
+        [bone.id],
+        np.zeros((3, 4), dtype=np.int64),
+        np.array([[1.0, 0.0, 0.0, 0.0]] * 3, dtype=np.float32),
+        np.eye(4, dtype=np.float32).reshape(1, 4, 4),
+        root_bone_id=bone.id,
+    )
+
+    before = radar._live_scene_payload_signature()
+    bone.get_component("Transform").position = [1.0, 0.0, 0.0]
+    after = radar._live_scene_payload_signature()
+
+    assert before != after
 
 
 def test_realtime_stream_defaults_to_change_only_rd_preview(monkeypatch):

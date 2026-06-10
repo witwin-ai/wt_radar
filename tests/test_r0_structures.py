@@ -7,6 +7,7 @@ Studio-editable config, geometry, and scalar material fields.
 import witwin.radar as wr
 import numpy as np
 from witwin_server import Scene, SceneObject
+from witwin_server.core.components import PlatformGeometryComponent, SkinnedMeshComponent
 from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
 
 from _helpers import assert_radar_config_equal, assert_structures_equal, approx
@@ -125,6 +126,61 @@ def test_plain_mesh_exports_as_radar_structure(adapter):
     for got_axis, expected_axis in zip(target.geometry.bounds_world, expected_bounds):
         assert approx(got_axis[0], expected_axis[0])
         assert approx(got_axis[1], expected_axis[1])
+
+
+def test_skinned_mesh_exports_posed_surface(adapter):
+    _, config = _build_pair()
+    studio = adapter.to_studio((wr.Scene(device="cpu"), config))
+    _add_posed_skinned_target(studio)
+
+    rebuilt_scene, _ = adapter.to_platform(studio)
+
+    assert len(rebuilt_scene.structures) == 1
+    bounds = rebuilt_scene.structures[0].geometry.bounds_world
+    assert approx(bounds[0][0], 1.0)
+    assert approx(bounds[0][1], 1.0)
+
+
+def test_scene_ref_skinned_mesh_prefers_runtime_skin_over_smpl_geometry(adapter):
+    _, config = _build_pair()
+    studio = adapter.to_studio((wr.Scene(device="cpu"), config))
+    body = _add_posed_skinned_target(studio)
+    geom = body.add_component(PlatformGeometryComponent())
+    geom.kind = "smpl"
+    geom.model_root = "E:/missing/smpl/body_models"
+
+    restored = load_scene_ref(make_scene_ref(studio))
+    rebuilt_scene, _ = adapter.to_platform(restored)
+
+    assert len(rebuilt_scene.structures) == 1
+    bounds = rebuilt_scene.structures[0].geometry.bounds_world
+    assert approx(bounds[0][0], 1.0)
+    assert approx(bounds[0][1], 1.0)
+
+
+def _add_posed_skinned_target(studio):
+    body = SceneObject(name="skinned target", mesh_type="Empty")
+    studio.add_object(body)
+    bone = SceneObject(name="skinned target bone", mesh_type="Empty")
+    studio.add_object(bone)
+    studio.set_parent(bone.id, body.id, keep_local_transform=False)
+    bone.get_component("Transform").position = [1.0, 0.0, 0.0]
+
+    skinned = SkinnedMeshComponent()
+    body.add_component(skinned)
+    skinned.set_mesh_data(
+        np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32),
+        np.array([[0, 1, 2]], dtype=np.uint32),
+        notify=False,
+    )
+    skinned.set_skinning_data(
+        [bone.id],
+        np.zeros((3, 4), dtype=np.int64),
+        np.array([[1.0, 0.0, 0.0, 0.0]] * 3, dtype=np.float32),
+        np.eye(4, dtype=np.float32).reshape(1, 4, 4),
+        root_bone_id=bone.id,
+    )
+    return body
 
 
 def test_scene_ref_preserves_in_memory_custom_mesh_for_solver(adapter):

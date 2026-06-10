@@ -6,7 +6,9 @@ half-wavelength units. The unit pickers below keep the stored value in the platf
 native unit (the option with multiplier 1.0 is the base), so the round trip is exact
 no matter which unit the editor displays.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 C0 = 299792458.0  # speed of light (m/s), matching witwin.radar.Radar
 
@@ -57,6 +59,23 @@ def vec_list(value: Any) -> List[List[float]]:
     return [vec(entry) for entry in (value or [])]
 
 
+def render_mesh_arrays(obj: Any) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Return the mesh surface that solver export should see."""
+    mesh = obj.get_component("Mesh")
+    if mesh is None or mesh.is_empty:
+        return None
+
+    compute_skinned = getattr(mesh, "compute_skinned_vertices_numpy", None)
+    vertices = compute_skinned() if callable(compute_skinned) else mesh.get_vertices_numpy()
+    faces = mesh.get_faces_numpy()
+
+    vertices = np.asarray(vertices, dtype=np.float32).reshape(-1, 3)
+    faces = np.asarray(faces, dtype=np.int64).reshape(-1, 3)
+    if vertices.size == 0 or faces.size == 0:
+        return None
+    return vertices, faces
+
+
 def opt_dict_equal(a: Optional[dict], b: Optional[dict]) -> bool:
     """Compare two optional sub-config dicts (None == None)."""
     return a == b
@@ -82,4 +101,3 @@ class Derived:
             "doppler_resolution_mps": lam / (2 * num_doppler * chirp_period * num_tx),
             "max_doppler_mps": lam / (4 * chirp_period * num_tx),
         }
-

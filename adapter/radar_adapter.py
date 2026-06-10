@@ -19,6 +19,7 @@ from typing import Any, Optional, Tuple
 from witwin_server import Scene, SceneObject
 
 from .config_map import MARKER_COMPONENT, ConfigMap
+from .common import render_mesh_arrays
 from .motion_map import MotionMap
 from .structure_map import RadarStructureMap
 
@@ -80,7 +81,7 @@ class RadarAdapter:
                 continue
             if (
                 obj.get_component("PlatformGeometry") is None
-                and obj.get_component("Mesh") is None
+                and render_mesh_arrays(obj) is None
             ):
                 continue
             structure = RadarStructureMap.to_platform(obj)
