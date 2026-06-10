@@ -210,6 +210,7 @@ def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
 
     fake = FakeSolvers()
     notifications = {"success": [], "error": []}
+    published_channels = []
 
     class FakeNotifications:
         @staticmethod
@@ -222,6 +223,7 @@ def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
 
     monkeypatch.setattr(radar_mod, "api", type("FakeApi", (), {"solvers": fake})())
     monkeypatch.setattr(radar_mod, "Notifications", FakeNotifications)
+    monkeypatch.setattr(radar, "_publish_signal_stream", lambda channels=None: published_channels.append(channels))
 
     msg = radar.simulate()
 
@@ -235,8 +237,49 @@ def test_radar_component_uses_solver_api_for_simulate(adapter, monkeypatch):
     assert fake.solve_kwargs["config"]["tracer"]["resolution"] == radar.resolution
     assert fake.queries[0][2] == "range_doppler"
     assert fake.queries[0][3]["static_clutter_removal"] is False
+    assert published_channels == [("rd",)]
     assert notifications["success"] == [("Radar", "Radar solve complete")]
     assert notifications["error"] == []
+
+
+def test_remote_stream_publish_accepts_numpy_query_payload(adapter, monkeypatch):
+    import wt_radar.components.radar as radar_mod
+
+    studio = adapter.to_studio((_scene("cpu"), wr.RadarConfig.from_dict(_CONFIG)))
+    radar = studio_settings(studio).get_component("Radar")
+    radar._solver_result_handle = "radar-handle"
+    radar._solver_run_id = "radar-run"
+
+    class FakeSolvers:
+        def query(self, solver_id, result_handle, op, params, **kwargs):
+            assert op == "range_doppler"
+            return {
+                "data": {
+                    "tx": 0,
+                    "rx": 0,
+                    "mag_db": np.ones((2, 3), dtype=np.float32),
+                    "cfar_rows": [],
+                    "cfar_cols": [],
+                }
+            }
+
+    class FakeStream:
+        def __init__(self):
+            self.published = []
+
+        def publish(self, channel_id, payload, metadata=None):
+            self.published.append((channel_id, np.asarray(payload), metadata or {}))
+
+    monkeypatch.setattr(radar_mod, "api", type("FakeApi", (), {"solvers": FakeSolvers()})())
+    stream = FakeStream()
+
+    radar._publish_rd_stream(stream)
+
+    assert len(stream.published) == 1
+    channel_id, payload, metadata = stream.published[0]
+    assert channel_id == "rd"
+    assert payload.shape == (2, 3)
+    assert metadata["shape"] == [2, 3]
 
 
 def test_show_frame_clears_solver_handle():
@@ -256,6 +299,46 @@ def test_show_frame_clears_solver_handle():
     assert radar._solver_result_handle == ""
     assert radar._solver_run_id == ""
     assert observed == [("", torch.Size([1, 1, 1, 1]))]
+
+
+def test_timeline_frames_register_radar_result_dataset(monkeypatch):
+    import wt_radar.components.radar as radar_mod
+    from wt_radar.components.radar import RadarComponent
+
+    class FakeDataSources:
+        def __init__(self):
+            self.timeline_datasets = []
+
+        def register_timeline_dataset(self, descriptor):
+            self.timeline_datasets.append(descriptor)
+            return descriptor
+
+    fake_data_sources = FakeDataSources()
+    monkeypatch.setattr(radar_mod, "api", type("FakeApi", (), {"data_sources": fake_data_sources})())
+
+    radar = RadarComponent()
+    radar._signal_source_id = "radar.demo.result"
+    radar.frame_rate = 10.0
+    radar.frame_index = 1
+    radar._frames = torch.zeros((2, 3, 4, 5, 6), dtype=torch.complex64)
+
+    radar._register_signal_timeline_dataset()
+
+    assert fake_data_sources.timeline_datasets
+    descriptor = fake_data_sources.timeline_datasets[-1]
+    assert descriptor["datasetId"] == "radar.demo.result"
+    assert descriptor["kind"] == "radar.result"
+    assert descriptor["defaultChannel"] == "rd"
+    assert descriptor["timebase"] == {"unit": "seconds", "times": [0.0, 0.1], "fps": 10.0}
+    assert {channel["channelId"] for channel in descriptor["channels"]} == {"raw", "rd", "pc"}
+    assert len(descriptor["frames"]) == 6
+    rd_frame = next(item["frame"] for item in descriptor["frames"] if item["time"] == 0.1 and item["channelId"] == "rd")
+    assert rd_frame["sourceId"] == "radar.demo.result"
+    assert rd_frame["semantic"] == "radar.range_doppler"
+    assert rd_frame["status"] == "pending"
+    assert radar.signal_source["mode"] == "timeline"
+    assert radar.signal_source["sourceId"] == "radar.demo.result"
+    assert radar.signal_source["defaultTime"] == 0.1
 
 
 @pytest.mark.gpu

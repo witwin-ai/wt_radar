@@ -37,6 +37,7 @@ from witwin_server.core.components import (
     button,
     component,
     component_field,
+    data_source_ref_field,
     define_group,
     figure,
     float_field,
@@ -95,6 +96,7 @@ class RadarComponent(Component):
     _solver_result_handle = ""
     _solver_run_id = ""
     _signal_stream_id = ""
+    _signal_source_id = ""
     _live_thread = None
     _live_stop_event = None
     _live_pause_event = None
@@ -285,7 +287,21 @@ class RadarComponent(Component):
     post_processors = list_field(component_field(component_type="RadarPostProcessor"), default=[],
                                  group=_SOLVE,
                                  description="Extra post-processor views run after each solve")
-    signal_stream = stream_ref_field(default_channel="rd", group=_SOLVE, hide_label=True, show_header=False)
+    signal_stream = stream_ref_field(
+        default_channel="rd",
+        group=_SOLVE,
+        hide_label=True,
+        show_header=False,
+        hidden=True,
+    )
+    signal_source = data_source_ref_field(
+        default_channel="rd",
+        mode="stream",
+        kind="radar.result",
+        group=_SOLVE,
+        hide_label=True,
+        show_header=False,
+    )
     signal_figure = figure(
         title="Radar Signal",
         group=_SOLVE,
@@ -414,7 +430,7 @@ class RadarComponent(Component):
         self._radar = None
         self._signal = None
         self.update_view()
-        self._publish_signal_stream()
+        self._publish_signal_stream(channels=(self._stream_ref_channel(),))
         self._run_post_processors()
         Notifications.success("Radar", "Radar solve complete")
         logger.info("=== Simulate done ===")
@@ -589,6 +605,7 @@ class RadarComponent(Component):
         self._solver_result_handle = ""
         self._solver_run_id = ""
         self._clear_query_cache()
+        self._register_signal_timeline_dataset()
         self._publish_signal_stream()
         self.show_frame()
         Notifications.success("Radar", f"Timeline: {frames.shape[0]} frames {tuple(frames.shape)}")
@@ -792,6 +809,13 @@ class RadarComponent(Component):
         self._signal_stream_id = f"radar.{owner_id}.signal"
         return self._signal_stream_id
 
+    def _source_id(self):
+        if self._signal_source_id:
+            return self._signal_source_id
+        owner_id = getattr(getattr(self, "_owner", None), "id", None) or hex(id(self))[2:]
+        self._signal_source_id = f"radar.{owner_id}.result"
+        return self._signal_source_id
+
     def _open_signal_stream(self, channels, *, status="active"):
         stream = api.streams.open(
             self._stream_id(),
@@ -818,7 +842,147 @@ class RadarComponent(Component):
             "color": "#30c0ff",
         }
         self.signal_stream = ref
+        self._register_signal_stream_source(channels, ref_channel, status=status, viewport=ref["viewport"])
         return stream
+
+    def _data_source_ref(self, mode, default_channel, **extra):
+        ref = {
+            "sourceId": self._source_id(),
+            "mode": mode,
+            "kind": "radar.result",
+            "defaultChannel": default_channel,
+            "channelId": default_channel,
+            **extra,
+        }
+        if mode == "stream":
+            ref["volatile"] = True
+        return ref
+
+    def _register_signal_stream_source(self, channels, default_channel, *, status="active", viewport=None):
+        data_sources = getattr(api, "data_sources", None)
+        if data_sources is None:
+            return
+        descriptor = {
+            "sourceId": self._source_id(),
+            "mode": "stream",
+            "kind": "radar.result",
+            "streamId": self._stream_id(),
+            "label": "Radar Result",
+            "owner": self._stream_owner(),
+            "retention": {"mode": "ring", "historyLength": int(self.stream_history_length)},
+            "metadata": {
+                "status": status,
+                "radarStreamId": self._stream_id(),
+                "view": str(self.view),
+            },
+            "channels": channels,
+            "defaultChannel": default_channel,
+            "volatile": True,
+        }
+        try:
+            data_sources.register(descriptor)
+            self.signal_source = self._data_source_ref(
+                "stream",
+                default_channel,
+                streamId=self._stream_id(),
+                viewport=viewport or {},
+            )
+        except Exception as exc:  # noqa: BLE001 - data source registration must not break legacy stream preview
+            logger.debug(f"Radar data source registration skipped: {exc}")
+
+    def _register_signal_timeline_dataset(self):
+        if self._frames is None:
+            return
+        data_sources = getattr(api, "data_sources", None)
+        if data_sources is None:
+            return
+        try:
+            frame_count = int(self._frames.shape[0])
+        except Exception:
+            return
+        if frame_count <= 0:
+            return
+        times = [index / max(float(self.frame_rate), 1e-6) for index in range(frame_count)]
+        dataset_id = self._source_id()
+        frames = []
+        for index, time_s in enumerate(times):
+            frames.extend(self._timeline_frame_refs(index, time_s, dataset_id))
+        descriptor = {
+            "datasetId": dataset_id,
+            "kind": "radar.result",
+            "producerId": self._source_id(),
+            "dependencyKey": self._live_scene_signature(),
+            "label": "Radar Timeline Result",
+            "defaultChannel": self._stream_ref_channel(),
+            "timebase": {"unit": "seconds", "times": times, "fps": float(self.frame_rate)},
+            "channels": self._stream_channel_descriptors(),
+            "frames": frames,
+            "interpolation": "nearest",
+            "retention": "runtime",
+            "metadata": {
+                "timelineSource": str(self.timeline_source),
+                "frameCount": frame_count,
+            },
+        }
+        try:
+            data_sources.register_timeline_dataset(descriptor)
+            default_channel = self._stream_ref_channel()
+            self.signal_source = self._data_source_ref(
+                "timeline",
+                default_channel,
+                datasetId=dataset_id,
+                defaultTime=float(getattr(self, "frame_index", 0)) / max(float(self.frame_rate), 1e-6),
+                volatile=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - timeline data sources are additive during migration
+            logger.debug(f"Radar timeline data source registration skipped: {exc}")
+
+    def _timeline_frame_refs(self, index, time_s, dataset_id):
+        signal_shape = list(getattr(self._frames[index], "shape", []))
+        return [
+            {
+                "time": float(time_s),
+                "channelId": "raw",
+                "frame": {
+                    "sourceId": dataset_id,
+                    "channelId": "raw",
+                    "time": float(time_s),
+                    "dtype": "complex64",
+                    "shape": signal_shape,
+                    "semantic": "radar.raw",
+                    "metadata": {"frameIndex": int(index)},
+                    "status": "ready",
+                },
+            },
+            {
+                "time": float(time_s),
+                "channelId": "rd",
+                "frame": {
+                    "sourceId": dataset_id,
+                    "channelId": "rd",
+                    "time": float(time_s),
+                    "dtype": "float32",
+                    "shape": [int(self.num_doppler_bins), int(self.num_range_bins)],
+                    "semantic": "radar.range_doppler",
+                    "metadata": {"frameIndex": int(index), "tx": self._tx(), "rx": self._rx()},
+                    "status": "pending",
+                },
+            },
+            {
+                "time": float(time_s),
+                "channelId": "pc",
+                "frame": {
+                    "sourceId": dataset_id,
+                    "channelId": "pc",
+                    "time": float(time_s),
+                    "dtype": "float32",
+                    "shape": [0, 6],
+                    "semantic": "pointcloud_xyz",
+                    "metadata": {"frameIndex": int(index), "detector": str(self.detector)},
+                    "status": "pending",
+                },
+            },
+        ]
 
     def _publish_signal_stream(self, channels=None):
         try:
@@ -1220,7 +1384,8 @@ class RadarComponent(Component):
     def _publish_rd_stream(self, stream):
         if self._solver_result_handle:
             payload = self._query_result("range_doppler", self._rd_query_params(show_cfar=False))
-            mag_db = np.asarray(payload.get("mag_db") or [], dtype=np.float32)
+            mag_db_value = payload.get("mag_db")
+            mag_db = np.asarray([] if mag_db_value is None else mag_db_value, dtype=np.float32)
         else:
             if self._signal is None or self._radar is None:
                 return
@@ -1255,7 +1420,8 @@ class RadarComponent(Component):
                 "pfa": num(self.pfa),
                 "energy_top_k": int(self.energy_top_k),
             })
-            pc = np.asarray([] if payload.get("points") is None else payload.get("points"), dtype=np.float32)
+            points = payload.get("points")
+            pc = np.asarray([] if points is None else points, dtype=np.float32)
         else:
             if self._signal is None or self._radar is None:
                 return

@@ -85,10 +85,25 @@ class _FakeStreams:
         self.errors.append((stream_id, message, kwargs))
 
 
+class _FakeDataSources:
+    def __init__(self):
+        self.registered = []
+        self.timeline_datasets = []
+
+    def register(self, descriptor):
+        self.registered.append(descriptor)
+        return descriptor
+
+    def register_timeline_dataset(self, descriptor):
+        self.timeline_datasets.append(descriptor)
+        return descriptor
+
+
 class _FakeApi:
     def __init__(self):
         self.solvers = _FakeSolvers()
         self.streams = _FakeStreams()
+        self.data_sources = _FakeDataSources()
 
 
 def _radar_in_scene():
@@ -233,10 +248,38 @@ def test_realtime_stream_preview_field_hides_label_and_stream_header():
 
     fields = {field["name"]: field for field in radar.to_dict()["fields"]}
     signal_stream = fields["signal_stream"]
+    signal_source = fields["signal_source"]
 
     assert signal_stream.get("hide_label") is True
+    assert signal_stream.get("hidden") is True
     assert "title" not in signal_stream
     assert signal_stream["widget"]["show_header"] is False
+    assert signal_source["field_type"] == "data_source_ref"
+    assert signal_source["widget"]["widget_type"] == "data-source"
+    assert signal_source.get("transient") is True
+    assert signal_source.get("hide_label") is True
+
+
+def test_realtime_stream_registers_radar_result_data_source(monkeypatch):
+    import wt_radar.components.radar as radar_mod
+
+    fake = _FakeApi()
+    monkeypatch.setattr(radar_mod, "api", fake)
+    radar, _settings = _radar_in_scene()
+
+    stream = radar._open_signal_stream(radar._stream_channel_descriptors())
+
+    assert stream.stream_id == "radar.radar_settings.signal"
+    assert fake.data_sources.registered
+    descriptor = fake.data_sources.registered[-1]
+    assert descriptor["sourceId"] == "radar.radar_settings.result"
+    assert descriptor["mode"] == "stream"
+    assert descriptor["kind"] == "radar.result"
+    assert descriptor["streamId"] == "radar.radar_settings.signal"
+    assert descriptor["defaultChannel"] == "rd"
+    assert {channel["channelId"] for channel in descriptor["channels"]} == {"raw", "rd", "pc"}
+    assert radar.signal_source["sourceId"] == "radar.radar_settings.result"
+    assert radar.signal_source["streamId"] == "radar.radar_settings.signal"
 
 
 def test_local_raw_stream_publishes_selected_adc_trace_for_line_plot():
