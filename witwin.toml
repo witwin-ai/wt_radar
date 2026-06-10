@@ -1,8 +1,8 @@
 id = "witwin.radar"
-name = "Radar (FMCW)"
+name = "Radar"
 version = "0.1.0"
 author = ""
-description = "Runs witwin.radar FMCW simulations from ordinary Studio meshes, while preserving the full Radar config, optional motion round-trip, timeline, and in-component range-doppler / point-cloud / MUSIC / CFAR signal visualization."
+description = "FMCW radar simulation from Studio meshes with signal visualization."
 license = "GPL-3.0-or-later"
 repository = "https://github.com/witwin-ai/wt_radar"
 dependencies = ["scipy", "numpy"]
