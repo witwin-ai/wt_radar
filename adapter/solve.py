@@ -519,11 +519,17 @@ class SolveRunner:
 
     @staticmethod
     def build_radar(config: Any, sensor: SensorSpec) -> Any:
-        """Construct a ``Radar`` from a RadarConfig + the sensor pose/backend."""
+        """Construct a ``Radar`` from a RadarConfig + the sensor pose.
+
+        ``sensor.backend`` is no longer forwarded: witwin-radar 0.3.0 dropped the
+        selector (platform commit c9bfac3 "remove backend selector from public
+        api"). The component field is still carried in SensorSpec -- it stays in
+        the cache keys -- but it no longer reaches the platform constructor.
+        """
         import witwin.radar as wr
 
         return wr.Radar(
-            config, backend=sensor.backend, pad_factor=sensor.pad_factor, device=sensor.device,
+            config, pad_factor=sensor.pad_factor, device=sensor.device,
             position=sensor.position, target=sensor.target, up=sensor.up, fov=sensor.fov)
 
 

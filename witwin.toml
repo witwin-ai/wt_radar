@@ -22,7 +22,10 @@ cancelGraceSec = 5
 maxParallel = 1
 
 [contributes.solvers.runtime]
-python = "${backend:python}"
+# The solve needs the witwin platform stack (witwin.radar + CUDA torch + drjit),
+# which the Studio backend interpreter does not carry. Run the solver child in
+# the dedicated runtime env instead of inheriting ${backend:python}.
+conda = "witwin_runtime"
 
 [contributes.solvers.capabilities]
 cancel = true
