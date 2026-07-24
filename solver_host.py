@@ -27,6 +27,10 @@ _LIVE_SESSIONS_LOCK = threading.RLock()
 _LIVE_FINE_WAIT_WINDOW_S = 0.020 if os.name == "nt" else 0.003
 _LIVE_SPIN_ONLY_THRESHOLD_S = 0.050 if os.name == "nt" else 0.0
 
+# Channels ``bake_sequence`` can produce. Range-doppler only for now; the point
+# cloud channel follows the same shape once ``pc`` is wanted on the timeline.
+_BAKE_CHANNELS = ("rd",)
+
 
 def _sensor(config: Dict[str, Any]) -> SensorSpec:
     return SensorSpec(**dict(config.get("sensor") or {}))
@@ -576,6 +580,138 @@ def live_status(ctx, params):
     if session is None:
         return {"sessionId": session_id, "status": "stopped"}
     return session.status()
+
+
+def _find_radar_component(scene: Any) -> Any:
+    objects = getattr(scene, "objects", None)
+    if not objects:
+        return None
+    for obj in objects.values():
+        radar = obj.get_component("Radar") if hasattr(obj, "get_component") else None
+        if radar is not None:
+            return radar
+    return None
+
+
+def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
+    """Resolve the bake's sensor/tracer/view settings for one frame.
+
+    An explicit ``config`` wins so a caller can bake a pose the scene does not
+    hold. With none -- which is what the generic Timeline "bake" entry sends --
+    everything is read off the scene's own Radar component, so the producer is
+    self-sufficient and the platform never has to know radar's config shape.
+    """
+    radar = None
+    if not (config.get("sensor") and config.get("tracer")):
+        radar = _find_radar_component(scene)
+        if radar is None:
+            raise ValueError(
+                "radar bake needs a Radar component in the scene, "
+                "or an explicit sensor/tracer in the bake config"
+            )
+
+    def pick(key: str, attr: str, cast, default):
+        if key in config and config[key] is not None:
+            return cast(config[key])
+        if radar is not None and hasattr(radar, attr):
+            return cast(getattr(radar, attr))
+        return default
+
+    return {
+        "sensor": _sensor(config) if config.get("sensor") else SensorSpec.from_component(radar),
+        "tracer": _tracer(config) if config.get("tracer") else TracerSpec.from_component(radar),
+        "motion_sampling": pick("motion_sampling", "motion_sampling", str, "per_chirp"),
+        "tx": pick("tx_index", "tx_index", int, 0),
+        "rx": pick("rx_index", "rx_index", int, 0),
+        "static_clutter_removal": pick(
+            "static_clutter_removal", "static_clutter_removal", bool, False
+        ),
+    }
+
+
+@method("bake_sequence")
+def bake_sequence(ctx, params):
+    """Pre-compute one range-doppler map per timeline frame.
+
+    Driven by the platform bake pipeline (``features/timeline/bake.py``), which
+    samples the scene at each frame time and hands the whole list over in one
+    warm call. Each frame is emitted through ``ctx.frame`` so the host can
+    content-address it into a seekable dataset; playback is then a disk read
+    with no solving.
+    """
+    params = dict(params or {})
+    config = dict(params.get("config") or {})
+    frames = list(params.get("frames") or [])
+    requested = tuple(params.get("channels") or _BAKE_CHANNELS)
+    channels = tuple(name for name in requested if name in _BAKE_CHANNELS)
+    if not channels:
+        raise ValueError(
+            f"radar bake supports channels {list(_BAKE_CHANNELS)}, requested {list(requested)}"
+        )
+    total = len(frames)
+    if total == 0:
+        return {"frames": 0, "channels": list(channels)}
+
+    ctx.log(f"Radar bake: {total} frame(s) channels={list(channels)}")
+
+    # One cache for the whole bake. The radar object and the tracer are keyed on
+    # the sensor/tracer config, which is constant across a bake, so both are
+    # reused; the tracer is rebound to each frame's own scene. The *result*
+    # cache is keyed on cache_key, so a per-frame key keeps a moving scene from
+    # ever replaying an earlier frame, and platform_cache_key stays None because
+    # the sampled geometry differs every frame -- that is the point of baking.
+    live_cache: Dict[str, Any] = {}
+    emitted = 0
+    for index, spec in enumerate(frames):
+        ctx.throw_if_cancelled()
+        spec = dict(spec or {})
+        frame_time = float(spec.get("time") or 0.0)
+        scene = load_scene_ref(spec.get("sceneRef"))
+        # Resolved per frame so a radar that is itself animated bakes correctly.
+        settings = _bake_settings(config, scene)
+        if index == 0:
+            ctx.log(
+                f"Radar bake settings: device={settings['sensor'].device} "
+                f"motion_sampling={settings['motion_sampling']} "
+                f"tx={settings['tx']} rx={settings['rx']}"
+            )
+        result = SolveRunner.run(
+            scene,
+            sensor=settings["sensor"],
+            tracer=settings["tracer"],
+            motion_sampling=settings["motion_sampling"],
+            t0=frame_time,
+            live_cache=live_cache,
+            cache_key=f"bake:{index}",
+            platform_cache_key=None,
+        )
+        sig_shape = result.signal.shape
+        tx = _clamp_index(settings["tx"], int(sig_shape[0]))
+        rx = _clamp_index(settings["rx"], int(sig_shape[1]))
+        rd = SigProc.range_doppler(
+            result.radar,
+            result.signal,
+            tx=tx,
+            rx=rx,
+            static_clutter_removal=settings["static_clutter_removal"],
+        )
+        mag_db = np.ascontiguousarray(_as_numpy(rd.mag_db, dtype=np.float32))
+        # Metadata mirrors the live ``rd`` stream frame so the same frontend
+        # loader renders a baked frame and a live frame identically.
+        ctx.frame(frame_time, "rd", mag_db, metadata={
+            "semantic": "radar.range_doppler",
+            "label": "Range-Doppler",
+            "units": "dB",
+            "colormap": "imshow",
+            "displayRangeMode": "full",
+            "tx": int(tx),
+            "rx": int(rx),
+        })
+        emitted += 1
+        ctx.progress((index + 1) / total, f"baked frame {index + 1}/{total}")
+
+    ctx.log(f"Radar bake complete: {emitted} frame(s)")
+    return {"frames": emitted, "channels": list(channels)}
 
 
 if __name__ == "__main__":
