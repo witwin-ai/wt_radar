@@ -22,8 +22,10 @@ environment separately, then add this plugin path explicitly in Studio.
 - Point sites use `RadarScatterer.site_offset` in the target object's local frame.
   Surface mode deterministically samples stable barycentric sites from visible mesh
   geometry and evaluates skinned deformation per frame for velocity-corrected bakes.
-- Scalar RCS, multipath depth, and shared endpoint polarization are authored in the
-  Radar component.
+- `target_rcs_m2` is the scalar RCS applied to each explicit site. In surface
+  mode, `surface_site_count` is therefore part of the physical discretization, not
+  only a quality knob; changing it changes the aggregate response. Multipath depth
+  and shared endpoint polarization are also authored in the Radar component.
 - Motion uses `DynamicScene` and `LinearTrajectory`.
 - Signal processing uses the typed `witwin.radar.processing` records for range profile,
   range-Doppler, CFAR, point cloud, and MUSIC.
