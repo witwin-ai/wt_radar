@@ -50,6 +50,9 @@ def test_bake_uses_one_velocity_corrected_solve_for_all_selected_channels(monkey
     scenes = {"a": object(), "b": object()}
     monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: scenes[ref])
     monkeypatch.setattr(solver_host, "_bake_settings", lambda config, scene: _settings())
+    monkeypatch.setattr(
+        solver_host, "_find_radar_origin", lambda scene: (SimpleNamespace(id="radar-7"), object())
+    )
 
     positions = np.asarray(
         [
@@ -111,6 +114,14 @@ def test_bake_uses_one_velocity_corrected_solve_for_all_selected_channels(monkey
         "frames": 2,
         "channels": ["raw", "rd", "pc"],
         "siteCount": 2,
+        "outputBindings": [
+            {
+                "objectId": "radar-7",
+                "component": "Radar",
+                "field": "signal_source",
+                "channel": "rd",
+            }
+        ],
     }
     assert captured_sequence == {"scenes": (scenes["a"], scenes["b"]), "times": (0.0, 0.1)}
     assert len(solve_calls) == 2
@@ -132,6 +143,7 @@ def test_bake_defaults_to_range_doppler_and_can_disable_velocity(monkeypatch):
     monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: scene)
     settings = _settings()
     settings["velocity_corrected"] = False
+    monkeypatch.setattr(solver_host, "_find_radar_origin", lambda value: None)
     monkeypatch.setattr(solver_host, "_bake_settings", lambda config, value: settings)
     monkeypatch.setattr(
         solver_host,

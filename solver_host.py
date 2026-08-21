@@ -581,15 +581,20 @@ def live_status(ctx, params):
     return session.status()
 
 
-def _find_radar_component(scene: Any) -> Any:
+def _find_radar_origin(scene: Any) -> tuple[Any, Any] | None:
     objects = getattr(scene, "objects", None)
     if not objects:
         return None
     for obj in objects.values():
         radar = obj.get_component("Radar") if hasattr(obj, "get_component") else None
         if radar is not None:
-            return radar
+            return obj, radar
     return None
+
+
+def _find_radar_component(scene: Any) -> Any:
+    origin = _find_radar_origin(scene)
+    return origin[1] if origin is not None else None
 
 
 def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
@@ -675,6 +680,7 @@ def bake_sequence(ctx, params):
     )
 
     # Reuse only the Radar object; every sampled frame carries a distinct scene.
+    radar_origin = _find_radar_origin(scenes[0])
     live_cache: Dict[str, Any] = {}
     emitted = 0
     for index, (frame_time, scene) in enumerate(sampled):
@@ -782,11 +788,23 @@ def bake_sequence(ctx, params):
         ctx.progress((index + 1) / total, f"baked frame {index + 1}/{total}")
 
     ctx.log(f"Radar bake complete: {emitted} frame(s)")
-    return {
+    response = {
         "frames": emitted,
         "channels": list(channels),
         "siteCount": int(kinematics.site_count),
     }
+    if radar_origin is not None:
+        radar_object, _radar = radar_origin
+        preferred_channel = "rd" if "rd" in channels else channels[0]
+        response["outputBindings"] = [
+            {
+                "objectId": str(radar_object.id),
+                "component": "Radar",
+                "field": "signal_source",
+                "channel": preferred_channel,
+            }
+        ]
+    return response
 
 
 if __name__ == "__main__":
