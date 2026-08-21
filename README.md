@@ -19,9 +19,9 @@ environment separately, then add this plugin path explicitly in Studio.
 
 - The platform payload is `(witwin.core.Scene | DynamicScene, RadarConfig)`.
 - Each exported structure has explicit Core structure/material/assignment/surface IDs.
-- Radar sites are authored with `RadarScatterer.site_offset` in the target object's
-  local frame. Place each site on or just outside a visible surface. The plugin never
-  derives sites from mesh geometry, matching Radar 0.3's explicit-site contract.
+- Point sites use `RadarScatterer.site_offset` in the target object's local frame.
+  Surface mode deterministically samples stable barycentric sites from visible mesh
+  geometry and evaluates skinned deformation per frame for velocity-corrected bakes.
 - Scalar RCS, multipath depth, and shared endpoint polarization are authored in the
   Radar component.
 - Motion uses `DynamicScene` and `LinearTrajectory`.

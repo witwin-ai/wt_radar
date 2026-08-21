@@ -1480,6 +1480,8 @@ class RadarComponent(Component):
             "propagation": asdict(PropagationSpec.from_component(self)),
             "t0": num(self.t0) if t0_override is None else num(t0_override),
         }
+        if self.owner is not None:
+            config["radar_object_id"] = str(self.owner.id)
         if live_session_id and live_signature:
             config["live"] = {
                 "session_id": str(live_session_id),

@@ -4,6 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 import wt_radar.solver_host as solver_host
@@ -46,12 +47,38 @@ def _settings():
     }
 
 
+def test_radar_origin_requires_exact_target_when_scene_is_ambiguous():
+    class RadarObject:
+        def __init__(self, object_id):
+            self.id = object_id
+            self.radar = object()
+
+        def get_component(self, name):
+            return self.radar if name == "Radar" else None
+
+    first = RadarObject("radar-a")
+    second = RadarObject("radar-b")
+    objects = {first.id: first, second.id: second}
+    scene = SimpleNamespace(
+        objects=objects,
+        get_object=lambda object_id: objects.get(object_id),
+    )
+
+    with pytest.raises(ValueError, match="multiple Radar"):
+        solver_host._find_radar_origin(scene)
+
+    origin = solver_host._find_radar_origin(scene, "radar-b")
+    assert origin == (second, second.radar)
+    with pytest.raises(ValueError, match="does not target"):
+        solver_host._find_radar_origin(scene, "missing")
+
+
 def test_bake_uses_one_velocity_corrected_solve_for_all_selected_channels(monkeypatch):
     scenes = {"a": object(), "b": object()}
     monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: scenes[ref])
     monkeypatch.setattr(solver_host, "_bake_settings", lambda config, scene: _settings())
     monkeypatch.setattr(
-        solver_host, "_find_radar_origin", lambda scene: (SimpleNamespace(id="radar-7"), object())
+        solver_host, "_find_radar_origin", lambda scene, object_id=None: (SimpleNamespace(id="radar-7"), object())
     )
 
     positions = np.asarray(
@@ -143,7 +170,7 @@ def test_bake_defaults_to_range_doppler_and_can_disable_velocity(monkeypatch):
     monkeypatch.setattr(solver_host, "load_scene_ref", lambda ref: scene)
     settings = _settings()
     settings["velocity_corrected"] = False
-    monkeypatch.setattr(solver_host, "_find_radar_origin", lambda value: None)
+    monkeypatch.setattr(solver_host, "_find_radar_origin", lambda value, object_id=None: None)
     monkeypatch.setattr(solver_host, "_bake_settings", lambda config, value: settings)
     monkeypatch.setattr(
         solver_host,

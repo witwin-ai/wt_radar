@@ -99,4 +99,4 @@ def test_manifest_declares_dedicated_runtime():
     manifest = tomllib.loads((Path(__file__).parents[1] / "witwin.toml").read_text(encoding="utf-8"))
     solver = manifest["contributes"]["solvers"][0]
     assert solver["runtime"]["conda"] == "witwin_runtime"
-    assert manifest["version"] == "0.2.0"
+    assert manifest["version"] == "0.3.0"

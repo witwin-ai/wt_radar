@@ -1,6 +1,6 @@
 id = "witwin.radar"
 name = "Radar"
-version = "0.2.0"
+version = "0.3.0"
 author = ""
 description = "FMCW radar simulation from Studio meshes with signal visualization."
 license = "GPL-3.0-or-later"

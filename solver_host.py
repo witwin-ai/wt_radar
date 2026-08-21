@@ -581,21 +581,29 @@ def live_status(ctx, params):
     return session.status()
 
 
-def _find_radar_origin(scene: Any) -> tuple[Any, Any] | None:
+def _find_radar_origin(scene: Any, object_id: str | None = None) -> tuple[Any, Any] | None:
     objects = getattr(scene, "objects", None)
     if not objects:
         return None
+    if object_id:
+        obj = scene.get_object(str(object_id)) if hasattr(scene, "get_object") else objects.get(str(object_id))
+        radar = obj.get_component("Radar") if obj is not None and hasattr(obj, "get_component") else None
+        if radar is None:
+            raise ValueError(f"radar_object_id does not target a Radar component: {object_id}")
+        return obj, radar
+    candidates = []
     for obj in objects.values():
         radar = obj.get_component("Radar") if hasattr(obj, "get_component") else None
         if radar is not None:
-            return obj, radar
-    return None
+            candidates.append((obj, radar))
+    if len(candidates) > 1:
+        raise ValueError("radar bake found multiple Radar components; set config.radar_object_id")
+    return candidates[0] if candidates else None
 
 
-def _find_radar_component(scene: Any) -> Any:
-    origin = _find_radar_origin(scene)
+def _find_radar_component(scene: Any, object_id: str | None = None) -> Any:
+    origin = _find_radar_origin(scene, object_id)
     return origin[1] if origin is not None else None
-
 
 def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
     """Resolve the bake's sensor/propagation/view settings for one frame.
@@ -607,7 +615,9 @@ def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
     """
     radar = None
     if not (config.get("sensor") and config.get("propagation")):
-        radar = _find_radar_component(scene)
+        radar = _find_radar_component(
+            scene, config.get("radar_object_id") or config.get("radarObjectId")
+        )
         if radar is None:
             raise ValueError(
                 "radar bake needs a Radar component in the scene, "
@@ -680,7 +690,8 @@ def bake_sequence(ctx, params):
     )
 
     # Reuse only the Radar object; every sampled frame carries a distinct scene.
-    radar_origin = _find_radar_origin(scenes[0])
+    radar_object_id = config.get("radar_object_id") or config.get("radarObjectId")
+    radar_origin = _find_radar_origin(scenes[0], radar_object_id)
     live_cache: Dict[str, Any] = {}
     emitted = 0
     for index, (frame_time, scene) in enumerate(sampled):
