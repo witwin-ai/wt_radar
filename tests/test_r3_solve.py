@@ -73,6 +73,28 @@ def test_latest_radar_solve_and_processing(adapter, cuda_ready):
     assert mask.shape == view.mag_db.shape
 
 
+
+@pytest.mark.gpu
+def test_radial_site_velocity_reaches_two_way_delay_rate(adapter, cuda_ready):
+    import torch
+
+    studio = _studio(adapter)
+    component = _settings(studio).get_component("Radar")
+    result = SolveRunner.run(
+        studio,
+        sensor=SensorSpec.from_component(component),
+        propagation=PropagationSpec.from_component(component),
+        t0=0.0,
+        site_positions=torch.tensor([[0.0, 0.0, -2.5]], device="cuda"),
+        site_velocities=torch.tensor([[0.0, 0.0, 1.0]], device="cuda"),
+        site_stable_ids=[3_000_000],
+    )
+
+    delay_rate = result.radar.last_radar_paths.delay_rate
+
+    assert delay_rate is not None
+    assert tuple(delay_rate.shape) == (2,)
+    assert bool(torch.all(delay_rate.abs() > 6.0e-9))
 def test_manifest_declares_dedicated_runtime():
     manifest = tomllib.loads((Path(__file__).parents[1] / "witwin.toml").read_text(encoding="utf-8"))
     solver = manifest["contributes"]["solvers"][0]

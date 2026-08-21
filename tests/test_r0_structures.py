@@ -66,3 +66,22 @@ def test_library_demo_exports_with_latest_core(adapter, wtr):
     assert len(exported.scene.structures) == 1
     assert len(exported.site_positions_m) == 1
     assert exported.config.num_tx == 3
+
+def test_surface_scatterer_exports_multiple_deterministic_sites(adapter):
+    from wt_radar.components.scatterer import RadarScattererComponent
+
+    studio = Scene()
+    studio.add_object(_settings(adapter))
+    target = SceneObject(name="surface-target", mesh_type="Cube")
+    scatterer = target.add_component(RadarScattererComponent())
+    scatterer.mode = "surface"
+    scatterer.surface_site_count = 5
+    scatterer.surface_seed = 11
+    studio.add_object(target)
+
+    first = adapter.build_export(studio)
+    second = adapter.build_export(studio)
+
+    assert len(first.site_positions_m) == 5
+    assert first.site_positions_m == second.site_positions_m
+    assert first.site_structure_ids == (1, 1, 1, 1, 1)

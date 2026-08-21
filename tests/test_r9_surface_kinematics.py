@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -128,3 +129,53 @@ def test_surface_scatterer_defaults_are_backward_compatible():
     assert scatterer.mode == "point"
     assert scatterer.surface_site_count == 128
     assert scatterer.surface_seed == 0
+
+class _SceneObject:
+    def __init__(self, frame, scatterer):
+        self.name = frame.name
+        self.vertices = frame.vertices
+        self.faces = frame.faces
+        self.matrix = frame.matrix
+        self.scatterer = scatterer
+
+    def get_component(self, name):
+        if name == "RadarScatterer":
+            return self.scatterer
+        return None
+
+
+def test_scene_sequence_combines_point_and_surface_targets(frame_adapter):
+    point_scatterer = SimpleNamespace(
+        enabled=True,
+        mode="point",
+        site_offset=(0.0, 0.0, 0.0),
+    )
+    surface_scatterer = SimpleNamespace(
+        enabled=True,
+        mode="surface",
+        surface_site_count=4,
+        surface_seed=7,
+    )
+    scenes = []
+    for index, time_s in enumerate((0.0, 0.5, 1.0)):
+        scenes.append(
+            SimpleNamespace(
+                objects={
+                    "point": _SceneObject(_frame(x=time_s), point_scatterer),
+                    "surface": _SceneObject(_frame(z=float(index)), surface_scatterer),
+                }
+            )
+        )
+
+    sequence = surface_sites.scene_scatterer_kinematics(
+        scenes,
+        (0.0, 0.5, 1.0),
+    )
+
+    assert sequence.positions_m.shape == (3, 5, 3)
+    np.testing.assert_allclose(sequence.velocities_m_per_s[:, 0, 0], 1.0, atol=1e-6)
+    assert np.all(sequence.velocities_m_per_s[:, 1:, 2] > 0.0)
+    np.testing.assert_array_equal(
+        sequence.stable_ids,
+        np.arange(3_000_000, 3_000_005),
+    )

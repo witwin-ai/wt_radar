@@ -10,6 +10,8 @@ from witwin_server.utils.mitsuba_utils import get_world_transform
 
 from .config_map import MARKER_COMPONENT, ConfigMap
 from .motion_map import MotionMap
+from .common import render_mesh_arrays
+from .surface_sites import SurfaceSiteLayout, world_surface_positions
 from .structure_map import RadarStructureMap
 
 
@@ -110,11 +112,25 @@ class RadarAdapter:
             structures.append(structure)
             scatterer = obj.get_component("RadarScatterer")
             if scatterer is not None and bool(scatterer.enabled):
-                matrix = np.asarray(get_world_transform(obj), dtype=np.float64)
-                local_site = np.asarray((*scatterer.site_offset, 1.0), dtype=np.float64)
-                world_site = matrix @ local_site
-                positions.append(tuple(float(value) for value in world_site[:3]))
-                structure_ids.append(identity)
+                mode = str(scatterer.mode)
+                if mode == "surface":
+                    mesh_arrays = render_mesh_arrays(obj)
+                    if mesh_arrays is None:
+                        raise ValueError(f"surface RadarScatterer object {obj.name!r} has no triangle mesh")
+                    layout = SurfaceSiteLayout.sample(
+                        *mesh_arrays,
+                        count=int(scatterer.surface_site_count),
+                        seed=int(scatterer.surface_seed),
+                    )
+                    world_sites = world_surface_positions(obj, layout)
+                    positions.extend(tuple(float(value) for value in row) for row in world_sites)
+                    structure_ids.extend([identity] * layout.count)
+                else:
+                    matrix = np.asarray(get_world_transform(obj), dtype=np.float64)
+                    local_site = np.asarray((*scatterer.site_offset, 1.0), dtype=np.float64)
+                    world_site = matrix @ local_site
+                    positions.append(tuple(float(value) for value in world_site[:3]))
+                    structure_ids.append(identity)
             motion_component = obj.get_component("RadarMotion")
             if motion_component is not None:
                 trajectory = MotionMap.build(motion_component)

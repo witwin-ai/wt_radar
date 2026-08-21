@@ -198,3 +198,155 @@ def surface_kinematics_sequence(
         velocities_m_per_s=differentiate_site_positions(positions, times),
         stable_ids=layout.stable_ids,
     )
+
+def _enabled_scatterers(scene: Any) -> tuple[tuple[str, Any, Any], ...]:
+    objects = getattr(scene, "objects", None)
+    if not objects:
+        return ()
+    found = []
+    for object_id, obj in sorted(objects.items(), key=lambda item: str(item[0])):
+        scatterer = obj.get_component("RadarScatterer") if hasattr(obj, "get_component") else None
+        if scatterer is not None and bool(scatterer.enabled):
+            found.append((str(object_id), obj, scatterer))
+    return tuple(found)
+
+
+def _apply_declared_motion(obj: Any, positions: np.ndarray, time_s: float) -> np.ndarray:
+    component = obj.get_component("RadarMotion") if hasattr(obj, "get_component") else None
+    if component is None:
+        return positions
+    from scipy.spatial.transform import Rotation
+
+    from .motion_map import MotionMap
+
+    trajectory = MotionMap.build(component)
+    if trajectory is None:
+        return positions
+    motion = trajectory.at(float(time_s))
+    moved = np.asarray(positions, dtype=np.float64)
+    if motion.rotation is not None:
+        value = np.asarray(motion.rotation.detach().cpu(), dtype=np.float64)
+        rotation = (
+            Rotation.from_quat((value[1], value[2], value[3], value[0]))
+            if value.shape == (4,)
+            else Rotation.from_euler("zyx", value)
+        )
+        moved = rotation.apply(moved)
+    if motion.translation is not None:
+        moved = moved + np.asarray(motion.translation.detach().cpu(), dtype=np.float64)
+    return np.ascontiguousarray(moved, dtype=np.float32)
+
+
+def _point_site_position(obj: Any, scatterer: Any, time_s: float) -> np.ndarray:
+    local = np.asarray([*scatterer.site_offset, 1.0], dtype=np.float64)
+    world = (np.asarray(get_world_transform(obj), dtype=np.float64) @ local)[:3]
+    return _apply_declared_motion(obj, world.reshape(1, 3), time_s)
+
+
+def scene_scatterer_kinematics(
+    scenes: Sequence[Any],
+    times_s: Sequence[float],
+    *,
+    stable_id_base: int = 3_000_000,
+) -> SurfaceKinematicsSequence:
+    """Build one stable explicit-site sequence from all enabled scene scatterers."""
+    frames = tuple(scenes)
+    times = tuple(float(value) for value in times_s)
+    if not frames:
+        raise ValueError("radar scatterer kinematics requires at least one scene frame")
+    if len(frames) != len(times):
+        raise ValueError(f"received {len(frames)} scene frames for {len(times)} times")
+
+    declared = _enabled_scatterers(frames[0])
+    if not declared:
+        raise ValueError("radar bake requires at least one enabled RadarScatterer")
+    identity = tuple(item[0] for item in declared)
+    for index, scene in enumerate(frames[1:], start=1):
+        current = tuple(item[0] for item in _enabled_scatterers(scene))
+        if current != identity:
+            raise ValueError(
+                f"enabled RadarScatterer identity changed at frame {index}; "
+                "a baked sequence requires the same ordered targets in every frame"
+            )
+
+    tracks = []
+    next_stable_id = int(stable_id_base)
+    for object_id, _, first_scatterer in declared:
+        object_frames = []
+        components = []
+        for scene in frames:
+            objects = getattr(scene, "objects", {})
+            match = next(
+                (obj for key, obj in objects.items() if str(key) == object_id),
+                None,
+            )
+            if match is None:
+                raise ValueError(f"RadarScatterer object {object_id!r} is missing from a sampled frame")
+            component = match.get_component("RadarScatterer")
+            object_frames.append(match)
+            components.append(component)
+
+        mode = str(first_scatterer.mode)
+        if any(str(component.mode) != mode for component in components):
+            raise ValueError(f"RadarScatterer {object_id!r} changed mode during the baked sequence")
+        if mode == "surface":
+            count = int(first_scatterer.surface_site_count)
+            seed = int(first_scatterer.surface_seed)
+            if any(
+                int(component.surface_site_count) != count or int(component.surface_seed) != seed
+                for component in components
+            ):
+                raise ValueError(
+                    f"surface RadarScatterer {object_id!r} changed site count or seed during the baked sequence"
+                )
+            track = surface_kinematics_sequence(
+                object_frames,
+                times,
+                count=count,
+                seed=seed,
+                stable_id_base=next_stable_id,
+            )
+            positions = np.stack(
+                [
+                    _apply_declared_motion(obj, track.positions_m[index], times[index])
+                    for index, obj in enumerate(object_frames)
+                ],
+                axis=0,
+            )
+            track = SurfaceKinematicsSequence(
+                positions_m=np.ascontiguousarray(positions, dtype=np.float32),
+                velocities_m_per_s=differentiate_site_positions(positions, times),
+                stable_ids=track.stable_ids,
+            )
+        elif mode == "point":
+            positions = np.concatenate(
+                [
+                    _point_site_position(obj, component, times[index])[None, ...]
+                    for index, (obj, component) in enumerate(zip(object_frames, components, strict=True))
+                ],
+                axis=0,
+            )
+            track = SurfaceKinematicsSequence(
+                positions_m=np.ascontiguousarray(positions, dtype=np.float32),
+                velocities_m_per_s=differentiate_site_positions(positions, times),
+                stable_ids=np.asarray([next_stable_id], dtype=np.int64),
+            )
+        else:
+            raise ValueError(f"RadarScatterer {object_id!r} has unsupported mode {mode!r}")
+        tracks.append(track)
+        next_stable_id += track.site_count
+
+    return SurfaceKinematicsSequence(
+        positions_m=np.ascontiguousarray(
+            np.concatenate([track.positions_m for track in tracks], axis=1),
+            dtype=np.float32,
+        ),
+        velocities_m_per_s=np.ascontiguousarray(
+            np.concatenate([track.velocities_m_per_s for track in tracks], axis=1),
+            dtype=np.float32,
+        ),
+        stable_ids=np.ascontiguousarray(
+            np.concatenate([track.stable_ids for track in tracks]),
+            dtype=np.int64,
+        ),
+    )

@@ -20,6 +20,7 @@ from witwin_server.features.solvers.scene_ref import load_scene_ref  # noqa: E40
 from witwin_server.features.solvers.sdk import method, query, serve  # noqa: E402
 from wt_radar.adapter.solve import PropagationSpec, SensorSpec, SigProc, SolveRunner  # noqa: E402
 
+from wt_radar.adapter.surface_sites import scene_scatterer_kinematics  # noqa: E402
 _LIVE_CACHES: Dict[str, Dict[str, Any]] = {}
 _MAX_LIVE_CACHES = 8
 _LIVE_SESSIONS: Dict[str, "LiveSession"] = {}
@@ -27,9 +28,9 @@ _LIVE_SESSIONS_LOCK = threading.RLock()
 _LIVE_FINE_WAIT_WINDOW_S = 0.020 if os.name == "nt" else 0.003
 _LIVE_SPIN_ONLY_THRESHOLD_S = 0.050 if os.name == "nt" else 0.0
 
-# Channels ``bake_sequence`` can produce. Range-doppler only for now; the point
-# cloud channel follows the same shape once ``pc`` is wanted on the timeline.
-_BAKE_CHANNELS = ("rd",)
+# Range-Doppler stays the default; raw and point-cloud are selectable bake channels.
+_BAKE_CHANNELS = ("raw", "rd", "pc")
+_DEFAULT_BAKE_CHANNELS = ("rd",)
 
 
 def _sensor(config: Dict[str, Any]) -> SensorSpec:
@@ -625,24 +626,27 @@ def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
         "static_clutter_removal": pick(
             "static_clutter_removal", "static_clutter_removal", bool, False
         ),
+        "velocity_corrected": pick("velocity_corrected", "velocity_corrected", bool, True),
+        "detector": pick("detector", "detector", str, "cfar"),
+        "guard": (pick("guard_doppler", "guard_doppler", int, 2), pick("guard_range", "guard_range", int, 4)),
+        "training": (pick("training_doppler", "training_doppler", int, 4), pick("training_range", "training_range", int, 8)),
+        "pfa": pick("pfa", "pfa", float, 1e-3),
+        "energy_top_k": pick("energy_top_k", "energy_top_k", int, 128),
     }
 
 
 @method("bake_sequence")
 def bake_sequence(ctx, params):
-    """Pre-compute one range-doppler map per timeline frame.
-
-    Driven by the platform bake pipeline (``features/timeline/bake.py``), which
-    samples the scene at each frame time and hands the whole list over in one
-    warm call. Each frame is emitted through ``ctx.frame`` so the host can
-    content-address it into a seekable dataset; playback is then a disk read
-    with no solving.
-    """
+    """Bake selected Radar channels for the complete sampled scene sequence."""
     params = dict(params or {})
     config = dict(params.get("config") or {})
     frames = list(params.get("frames") or [])
-    requested = tuple(params.get("channels") or _BAKE_CHANNELS)
-    channels = tuple(name for name in requested if name in _BAKE_CHANNELS)
+    requested_value = params.get("channels")
+    if isinstance(requested_value, str):
+        requested = tuple(part.strip().lower() for part in requested_value.split(",") if part.strip())
+    else:
+        requested = tuple(requested_value or _DEFAULT_BAKE_CHANNELS)
+    channels = tuple(dict.fromkeys(name for name in requested if name in _BAKE_CHANNELS))
     if not channels:
         raise ValueError(
             f"radar bake supports channels {list(_BAKE_CHANNELS)}, requested {list(requested)}"
@@ -652,21 +656,36 @@ def bake_sequence(ctx, params):
         return {"frames": 0, "channels": list(channels)}
 
     ctx.log(f"Radar bake: {total} frame(s) channels={list(channels)}")
+    sampled = []
+    for spec in frames:
+        ctx.throw_if_cancelled()
+        frame_spec = dict(spec or {})
+        sampled.append(
+            (
+                float(frame_spec.get("time") or 0.0),
+                load_scene_ref(frame_spec.get("sceneRef")),
+            )
+        )
+    times = tuple(item[0] for item in sampled)
+    scenes = tuple(item[1] for item in sampled)
+    kinematics = scene_scatterer_kinematics(scenes, times)
+    ctx.log(
+        f"Radar bake sites: {kinematics.site_count} stable site(s), "
+        f"{kinematics.frame_count} frame(s)"
+    )
 
     # Reuse only the Radar object; every sampled frame carries a distinct scene.
     live_cache: Dict[str, Any] = {}
     emitted = 0
-    for index, spec in enumerate(frames):
+    for index, (frame_time, scene) in enumerate(sampled):
         ctx.throw_if_cancelled()
-        spec = dict(spec or {})
-        frame_time = float(spec.get("time") or 0.0)
-        scene = load_scene_ref(spec.get("sceneRef"))
         # Resolved per frame so a radar that is itself animated bakes correctly.
         settings = _bake_settings(config, scene)
         if index == 0:
             ctx.log(
                 f"Radar bake settings: device={settings['sensor'].device} "
-                f"tx={settings['tx']} rx={settings['rx']}"
+                f"tx={settings['tx']} rx={settings['rx']} "
+                f"velocity_corrected={settings['velocity_corrected']}"
             )
         result = SolveRunner.run(
             scene,
@@ -676,34 +695,98 @@ def bake_sequence(ctx, params):
             live_cache=live_cache,
             cache_key=f"bake:{index}",
             platform_cache_key=None,
+            site_positions=kinematics.positions_m[index],
+            site_velocities=(
+                kinematics.velocities_m_per_s[index]
+                if settings["velocity_corrected"]
+                else None
+            ),
+            site_stable_ids=kinematics.stable_ids,
         )
         sig_shape = result.signal.shape
         tx = _clamp_index(settings["tx"], int(sig_shape[0]))
         rx = _clamp_index(settings["rx"], int(sig_shape[1]))
-        rd = SigProc.range_doppler(
-            result.radar,
-            result.signal,
-            tx=tx,
-            rx=rx,
-            static_clutter_removal=settings["static_clutter_removal"],
-        )
-        mag_db = np.ascontiguousarray(_as_numpy(rd.mag_db, dtype=np.float32))
-        # Metadata mirrors the live ``rd`` stream frame so the same frontend
-        # loader renders a baked frame and a live frame identically.
-        ctx.frame(frame_time, "rd", mag_db, metadata={
-            "semantic": "radar.range_doppler",
-            "label": "Range-Doppler",
-            "units": "dB",
-            "colormap": "imshow",
-            "displayRangeMode": "full",
-            "tx": int(tx),
-            "rx": int(rx),
-        })
+
+        if "raw" in channels:
+            raw = np.ascontiguousarray(
+                _as_numpy(result.signal[tx, rx, 0], dtype=np.complex64)
+            )
+            ctx.frame(
+                frame_time,
+                "raw",
+                raw,
+                metadata={
+                    "semantic": "radar.raw",
+                    "label": "Raw Radar Signal",
+                    "units": "complex amplitude",
+                    "tx": int(tx),
+                    "rx": int(rx),
+                    "chirp": 0,
+                },
+            )
+
+        if "rd" in channels:
+            rd = SigProc.range_doppler(
+                result.radar,
+                result.signal,
+                tx=tx,
+                rx=rx,
+                static_clutter_removal=settings["static_clutter_removal"],
+            )
+            mag_db = np.ascontiguousarray(_as_numpy(rd.mag_db, dtype=np.float32))
+            ctx.frame(
+                frame_time,
+                "rd",
+                mag_db,
+                metadata={
+                    "semantic": "radar.range_doppler",
+                    "label": "Range-Doppler",
+                    "units": "dB",
+                    "colormap": "imshow",
+                    "displayRangeMode": "full",
+                    "tx": int(tx),
+                    "rx": int(rx),
+                },
+            )
+
+        if "pc" in channels:
+            point_cloud = np.ascontiguousarray(
+                _as_numpy(
+                    SigProc.point_cloud(
+                        result.radar,
+                        result.signal,
+                        detector=settings["detector"],
+                        static_clutter_removal=settings["static_clutter_removal"],
+                        guard=settings["guard"],
+                        training=settings["training"],
+                        pfa=settings["pfa"],
+                        energy_top_k=settings["energy_top_k"],
+                    ),
+                    dtype=np.float32,
+                ).reshape(-1, 6),
+                dtype=np.float32,
+            )
+            ctx.frame(
+                frame_time,
+                "pc",
+                point_cloud,
+                metadata={
+                    "semantic": "pointcloud_xyz",
+                    "label": "Radar Point Cloud",
+                    "units": "m,m,m,m/s,energy,m",
+                    "columns": ["x", "y", "z", "velocity_mps", "energy", "range_m"],
+                },
+            )
+
         emitted += 1
         ctx.progress((index + 1) / total, f"baked frame {index + 1}/{total}")
 
     ctx.log(f"Radar bake complete: {emitted} frame(s)")
-    return {"frames": emitted, "channels": list(channels)}
+    return {
+        "frames": emitted,
+        "channels": list(channels),
+        "siteCount": int(kinematics.site_count),
+    }
 
 
 if __name__ == "__main__":

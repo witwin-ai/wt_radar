@@ -100,8 +100,11 @@ class SolveRunner:
         cache_key: Optional[str] = None,
         platform_cache_key: Optional[str] = None,
         site_positions: Any = None,
+        site_velocities: Any = None,
+        site_stable_ids: Any = None,
     ) -> SolveResult:
         import torch
+        from witwin.radar.propagation import Kinematics, two_way_duals
         from witwin.radar.scattering import ScalarRcsResponse
         from witwin.radar.simulation import ScatterSitePolicy
 
@@ -134,21 +137,40 @@ class SolveRunner:
         else:
             positions = positions.to(device=radar.device, dtype=torch.float32)
         positions = positions.contiguous()
-        sites = ScatterSitePolicy.explicit(positions)
+        stable_ids = None if site_stable_ids is None else tuple(int(value) for value in site_stable_ids)
         response = ScalarRcsResponse.from_rcs(
             propagation.target_rcs_m2,
             reference_frequency_hz=radar.config.fc,
             device=radar.device,
         )
-        simulation = radar.simulate(
-            exported.scene,
-            times=(float(t0),),
-            response=response,
-            sites=sites,
-            components=propagation.components,
-            max_depth=propagation.max_depth,
-            polarization=propagation.polarization,
-        )
+
+        def simulate(resolved_positions):
+            sites = ScatterSitePolicy.explicit(resolved_positions, stable_ids=stable_ids)
+            return radar.simulate(
+                exported.scene,
+                times=(float(t0),),
+                response=response,
+                sites=sites,
+                components=propagation.components,
+                max_depth=propagation.max_depth,
+                polarization=propagation.polarization,
+                ad_mode="jvp" if site_velocities is not None else "none",
+            )
+
+        if site_velocities is None:
+            simulation = simulate(positions)
+        else:
+            velocities = site_velocities
+            if not isinstance(velocities, torch.Tensor):
+                velocities = torch.tensor(velocities, dtype=torch.float32, device=radar.device)
+            else:
+                velocities = velocities.to(device=radar.device, dtype=torch.float32)
+            kinematics = Kinematics(
+                positions_m=positions,
+                velocities_m_per_s=velocities.contiguous(),
+            )
+            with two_way_duals(sites=kinematics) as duals:
+                simulation = simulate(duals.sites)
         axes = SolveRunner.processing_axes(radar)
         result = SolveResult(radar=radar, signal=simulation.cube[0], simulation=simulation, axes=axes)
 
