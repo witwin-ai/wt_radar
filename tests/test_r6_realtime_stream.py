@@ -152,7 +152,7 @@ def test_realtime_stream_uses_solver_live_session_and_updates_on_transform(monke
         assert start[2]["channels"] == ["raw", "rd", "pc"]
         assert start[2]["max_fps"] == 20.0
         assert start[2]["config"]["live"]["stream_id"] == "radar.radar_settings.signal"
-        assert start[2]["config"]["live"]["motion_sampling"] == "per_frame"
+        assert start[2]["config"]["propagation"]["target_rcs_m2"] == 1.0
         assert start[3]["scene"] is radar.scene
         assert fake.streams.streams["radar.radar_settings.signal"].refs[0]["viewport"]["maxFps"] == 20.0
 
@@ -447,11 +447,11 @@ def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch
     fake_signal = np.ones((1, 1, 2, 8), dtype=np.complex64)
     fake_result = type("Result", (), {"radar": object(), "signal": fake_signal})()
 
-    def fake_run(scene, *, sensor, tracer, motion_sampling, t0, live_cache=None,
+    def fake_run(scene, *, sensor, propagation, t0, live_cache=None,
                  cache_key=None, platform_cache_key=None):
         calls.append({
             "scene": scene,
-            "motion_sampling": motion_sampling,
+            "propagation": propagation,
             "t0": t0,
             "cache": live_cache,
             "cache_key": cache_key,
@@ -484,16 +484,13 @@ def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch
                 "target": [0.0, 0.0, -1.0],
                 "up": [0.0, 1.0, 0.0],
                 "fov": 70.0,
-                "backend": "dirichlet",
-                "pad_factor": 1,
                 "device": "cuda",
             },
-            "tracer": {},
+            "propagation": {},
             "t0": 2.5,
             "live": {
                 "signature": "sig-1",
                 "stream_on_change_only": True,
-                "motion_sampling": "per_frame",
             },
         },
     })
@@ -501,7 +498,7 @@ def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch
         assert result["status"] == "started"
         _wait_for(lambda: len(ctx.published) >= 3, "initial live frame publish")
         assert len(calls) == 1
-        assert calls[0]["motion_sampling"] == "per_frame"
+        assert calls[0]["propagation"].target_rcs_m2 == 1.0
         assert calls[0]["t0"] == 2.5
         assert calls[0]["cache_key"] == "sig-1"
         assert {item[1] for item in ctx.published} == {"raw", "rd", "pc"}
@@ -518,16 +515,13 @@ def test_solver_live_session_publishes_channels_from_one_radar_frame(monkeypatch
                     "target": [1.0, 0.0, -1.0],
                     "up": [0.0, 1.0, 0.0],
                     "fov": 70.0,
-                    "backend": "dirichlet",
-                    "pad_factor": 1,
                     "device": "cuda",
                 },
-                "tracer": {},
+                "propagation": {},
                 "t0": 3.0,
                 "live": {
                     "signature": "sig-2",
                     "stream_on_change_only": True,
-                    "motion_sampling": "per_frame",
                 },
             },
         })
@@ -584,11 +578,9 @@ def test_solver_live_stop_suppresses_inflight_publish(monkeypatch):
                 "target": [0.0, 0.0, -1.0],
                 "up": [0.0, 1.0, 0.0],
                 "fov": 70.0,
-                "backend": "dirichlet",
-                "pad_factor": 1,
                 "device": "cuda",
             },
-            "tracer": {},
+            "propagation": {},
             "live": {"signature": "sig-stop", "stream_on_change_only": True},
         },
     })
@@ -653,11 +645,9 @@ def test_solver_live_stop_does_not_trigger_extra_idle_solve(monkeypatch):
                 "target": [0.0, 0.0, -1.0],
                 "up": [0.0, 1.0, 0.0],
                 "fov": 70.0,
-                "backend": "dirichlet",
-                "pad_factor": 1,
                 "device": "cuda",
             },
-            "tracer": {},
+            "propagation": {},
             "live": {"signature": "sig-idle", "stream_on_change_only": True},
         },
     })
@@ -805,11 +795,9 @@ def test_solver_live_restart_suppresses_previous_session_publish(monkeypatch):
             "target": [0.0, 0.0, -1.0],
             "up": [0.0, 1.0, 0.0],
             "fov": 70.0,
-            "backend": "dirichlet",
-            "pad_factor": 1,
             "device": "cuda",
         },
-        "tracer": {},
+        "propagation": {},
     }
     solver_host.live_start(ctx, {
         "session_id": "restart-session",
@@ -863,11 +851,9 @@ def test_solver_live_session_publishes_completed_frame_when_update_arrives_mid_s
             "target": [0.0, 0.0, -1.0],
             "up": [0.0, 1.0, 0.0],
             "fov": 70.0,
-            "backend": "dirichlet",
-            "pad_factor": 1,
-            "device": "cuda",
-        },
-        "tracer": {},
+                "device": "cuda",
+            },
+            "propagation": {},
         "live": {"signature": "old", "stream_on_change_only": False},
     }
     session = solver_host.LiveSession(

@@ -1,61 +1,67 @@
-"""Multi-frame timeline generation (master §5.2) -> ``witwin.radar.Timeline``.
-
-Builds a ``Timeline`` from the unified Radar component's timeline-source descriptor (a
-point cloud sequence file, or an SMPL motion file rendered against the scene) and
-generates the MIMO frame stack ``(num_radar_frames, TX, RX, chirps, ADC)``. Keyframe
-tensors are large runtime/result state — the editor stores only the source path, never
-baked keyframes.
-
-The point-cloud-sequence source needs no ray tracing (the points drive ``radar.mimo``
-directly). The motion source renders SMPL keyframes through a ``Tracer`` and therefore
-needs CUDA + SMPL model files and a structure named ``human``.
-"""
+"""Multi-frame generation through repeated Radar 0.3 scene-driven solves."""
 from typing import Any, Optional, Tuple
 
 import numpy as np
 
-from .common import num
-from .solve import SensorSpec, SolveRunner, TracerSpec
+from .solve import PropagationSpec, SensorSpec, SolveRunner
 
 
 class TimelineRunner:
-    """Build a ``Timeline`` + ``Radar`` from a RadarTimeline component and generate frames."""
+    """Generate a frame cube from explicit point sites or Core scene motion."""
 
     @staticmethod
-    def generate(comp: Any, *, sensor: SensorSpec, tracer: TracerSpec,
-                 studio_scene: Any) -> Tuple[Any, Any]:
-        """Return ``(radar, frames)`` where frames is ``(num_radar_frames, TX, RX, chirps, ADC)``."""
+    def generate(
+        comp: Any,
+        *,
+        sensor: SensorSpec,
+        propagation: PropagationSpec,
+        studio_scene: Any,
+    ) -> Tuple[Any, Any]:
         import torch
-        import witwin.radar as wr
 
-        from .radar_adapter import RadarAdapter
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        scene, config = RadarAdapter().to_platform(studio_scene, device=device)
-        radar = SolveRunner.build_radar(config, SolveRunner._sensor_for_scene_device(sensor, device))
-
-        timeline = wr.Timeline(frame_rate=num(comp.frame_rate), device=device)
-        if str(comp.timeline_source) == "pointcloud_sequence":
-            positions, intensities = TimelineRunner._load_pointclouds(str(comp.pointcloud_path), device)
-            timeline.add_pointcloud_sequence(positions, intensities)
+        frame_rate = max(float(comp.frame_rate), 1e-6)
+        source = str(comp.timeline_source)
+        point_frames = None
+        if source == "pointcloud_sequence":
+            point_frames, _ = TimelineRunner._load_pointclouds(str(comp.pointcloud_path), "cuda")
+            frame_count = int(point_frames.shape[0])
+        elif source == "scene_motion":
+            frame_count = int(comp.motion_frame_count)
         else:
-            tracer_obj = wr.Tracer(scene, radar, resolution=tracer.resolution,
-                                   epsilon_r=tracer.epsilon_r, sampling="triangle")
-            motion = dict(np.load(str(comp.motion_path)))
-            timeline.from_motion(scene, tracer_obj, motion)
+            raise ValueError("timeline_source must be 'pointcloud_sequence' or 'scene_motion'")
 
-        frames = timeline.generate(radar, progress=False, velocity_corrected=bool(comp.velocity_corrected))
-        return radar, frames
+        cache = {}
+        signals = []
+        last = None
+        for index in range(frame_count):
+            time_s = index / frame_rate
+            sites = None if point_frames is None else point_frames[index]
+            last = SolveRunner.run(
+                studio_scene,
+                sensor=sensor,
+                propagation=propagation,
+                t0=time_s,
+                live_cache=cache,
+                cache_key=f"timeline:{index}",
+                platform_cache_key="timeline:scene",
+                site_positions=sites,
+            )
+            signals.append(last.signal)
+        if last is None:
+            raise ValueError("timeline requires at least one frame")
+        return last.radar, torch.stack(signals, dim=0)
 
     @staticmethod
     def _load_pointclouds(path: str, device: str) -> Tuple[Any, Optional[Any]]:
-        # Load a (F, N, 3) point-cloud sequence (+ optional (F, N) intensities) from .npy/.npz.
         import torch
 
         data = np.load(path)
         if isinstance(data, np.lib.npyio.NpzFile):
             positions = torch.as_tensor(data["positions"], dtype=torch.float32, device=device)
-            intensities = (torch.as_tensor(data["intensities"], dtype=torch.float32, device=device)
-                           if "intensities" in data.files else None)
+            intensities = (
+                torch.as_tensor(data["intensities"], dtype=torch.float32, device=device)
+                if "intensities" in data.files
+                else None
+            )
             return positions, intensities
         return torch.as_tensor(data, dtype=torch.float32, device=device), None

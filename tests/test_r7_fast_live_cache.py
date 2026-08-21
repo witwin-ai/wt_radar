@@ -1,196 +1,90 @@
-import types
+"""Live cache behavior after removal of legacy trace/path caches."""
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import torch
-import witwin.radar as wr
 
-from wt_radar.adapter.solve import SensorSpec, SolveRunner, TracerSpec
+from _helpers import make_config
+from wt_radar.adapter.solve import PropagationSpec, SensorSpec, SolveRunner
 
 
-def _sensor(*, position=None, target=None, up=None, fov=60.0):
+def _sensor(position=None):
     return SensorSpec(
-        position=position or [0.0, 0.0, 0.0],
-        target=target or [0.0, 0.0, -1.0],
-        up=up or [0.0, 1.0, 0.0],
-        fov=fov,
-        backend="dirichlet",
-        pad_factor=4,
-        device="cuda",
+        position or [0.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 1.0, 0.0],
+        60.0,
     )
 
 
-def test_live_cache_reuses_trace_and_path_cache(monkeypatch):
-    import witwin.radar.trace as trace_mod
+def test_live_cache_reuses_export_and_radar(monkeypatch):
     import wt_radar.adapter.radar_adapter as adapter_mod
 
-    counters = {
-        "to_platform": 0,
-        "build_radar": 0,
-        "tracer_init": 0,
-        "trace": 0,
-        "path_cache": 0,
-        "mimo_from_paths": 0,
-    }
+    counters = {"export": 0, "radar": 0, "pose": 0, "simulate": 0}
+
+    class FakeExport:
+        config = make_config()
+        scene = object()
+
+        @staticmethod
+        def positions_at(time_s, *, device):
+            return torch.tensor([[0.0, 0.0, -2.0]], device=device)
 
     class FakeAdapter:
-        def to_platform(self, studio_scene, *, device="cpu"):
-            counters["to_platform"] += 1
-            return wr.Scene(device="cpu"), object()
+        def build_export(self, scene):
+            counters["export"] += 1
+            return FakeExport()
 
     class FakeRadar:
-        position = torch.tensor([0.0, 0.0, 0.0])
-        target = torch.tensor([0.0, 0.0, -1.0])
-        tx_pos = torch.zeros((1, 3))
+        device = "cpu"
+        config = FakeExport.config
 
-        def path_cache_from_trace(self, trace, *, velocities=None):
-            counters["path_cache"] += 1
-            return types.SimpleNamespace(trace=trace)
+        def set_pose(self, **kwargs):
+            counters["pose"] += 1
 
-        def mimo_from_paths(self, cache):
-            counters["mimo_from_paths"] += 1
-            return torch.full((1, 1, 1, 1), float(counters["mimo_from_paths"]))
-
-    class FakeTracer:
-        def __init__(self, *args, **kwargs):
-            counters["tracer_init"] += 1
-
-        def trace(self, time=None):
-            counters["trace"] += 1
-            return types.SimpleNamespace(points=torch.zeros((1, 3)), intensities=torch.ones(1))
+        def simulate(self, scene, **kwargs):
+            counters["simulate"] += 1
+            return SimpleNamespace(cube=torch.full((1, 1, 1, 2, 4), counters["simulate"]))
 
     monkeypatch.setattr(adapter_mod, "RadarAdapter", FakeAdapter)
-    monkeypatch.setattr(SolveRunner, "build_radar", staticmethod(lambda config, sensor: counters.__setitem__("build_radar", counters["build_radar"] + 1) or FakeRadar()))
-    monkeypatch.setattr(trace_mod, "Tracer", FakeTracer)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        SolveRunner,
+        "build_radar",
+        staticmethod(lambda config, sensor: counters.__setitem__("radar", counters["radar"] + 1) or FakeRadar()),
+    )
+    monkeypatch.setattr(SolveRunner, "processing_axes", staticmethod(lambda radar: "axes"))
 
     cache = {}
-    tracer = TracerSpec(resolution=16)
+    first = SolveRunner.run(
+        "scene",
+        sensor=_sensor(),
+        propagation=PropagationSpec(),
+        t0=0.0,
+        live_cache=cache,
+        cache_key="frame-a",
+        platform_cache_key="scene-a",
+    )
+    second = SolveRunner.run(
+        "scene",
+        sensor=_sensor([1.0, 0.0, 0.0]),
+        propagation=PropagationSpec(),
+        t0=0.1,
+        live_cache=cache,
+        cache_key="frame-b",
+        platform_cache_key="scene-a",
+    )
 
-    first = SolveRunner.run("studio", sensor=_sensor(), tracer=tracer, motion_sampling="per_frame",
-                            t0=0.0, live_cache=cache, cache_key="same")
-    second = SolveRunner.run("studio", sensor=_sensor(), tracer=tracer, motion_sampling="per_frame",
-                             t0=1.0, live_cache=cache, cache_key="same")
-
-    assert first.signal.item() == 1.0
-    assert second.signal.item() == 2.0
-    assert counters["to_platform"] == 1
-    assert counters["build_radar"] == 1
-    assert counters["tracer_init"] == 1
-    assert counters["trace"] == 1
-    assert counters["path_cache"] == 1
-    assert counters["mimo_from_paths"] == 2
-
-
-def test_live_cache_invalidates_when_signature_changes(monkeypatch):
-    import witwin.radar.trace as trace_mod
-    import wt_radar.adapter.radar_adapter as adapter_mod
-
-    counters = {"to_platform": 0, "tracer_init": 0, "trace": 0}
-
-    class FakeAdapter:
-        def to_platform(self, studio_scene, *, device="cpu"):
-            counters["to_platform"] += 1
-            return wr.Scene(device="cpu"), object()
-
-    class FakeRadar:
-        position = torch.tensor([0.0, 0.0, 0.0])
-        target = torch.tensor([0.0, 0.0, -1.0])
-        tx_pos = torch.zeros((1, 3))
-
-        def path_cache_from_trace(self, trace, *, velocities=None):
-            return object()
-
-        def mimo_from_paths(self, cache):
-            return torch.zeros((1, 1, 1, 1))
-
-    class FakeTracer:
-        def __init__(self, *args, **kwargs):
-            counters["tracer_init"] += 1
-
-        def trace(self, time=None):
-            counters["trace"] += 1
-            return types.SimpleNamespace(points=torch.zeros((1, 3)), intensities=torch.ones(1))
-
-    monkeypatch.setattr(adapter_mod, "RadarAdapter", FakeAdapter)
-    monkeypatch.setattr(SolveRunner, "build_radar", staticmethod(lambda config, sensor: FakeRadar()))
-    monkeypatch.setattr(trace_mod, "Tracer", FakeTracer)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-
-    cache = {}
-    tracer = TracerSpec(resolution=16)
-    SolveRunner.run("studio", sensor=_sensor(), tracer=tracer, motion_sampling="per_frame",
-                    t0=0.0, live_cache=cache, cache_key="a")
-    SolveRunner.run("studio", sensor=_sensor(), tracer=tracer, motion_sampling="per_frame",
-                    t0=0.0, live_cache=cache, cache_key="b")
-
-    assert counters["to_platform"] == 2
-    assert counters["tracer_init"] == 1
-    assert counters["trace"] == 2
+    assert first.signal.flatten()[0].item() == 1
+    assert second.signal.flatten()[0].item() == 2
+    assert counters == {"export": 1, "radar": 1, "pose": 1, "simulate": 2}
+    assert "trace" not in cache and "path_cache" not in cache
 
 
-def test_live_cache_reuses_radar_when_only_sensor_pose_changes(monkeypatch):
-    import witwin.radar.trace as trace_mod
-    import wt_radar.adapter.radar_adapter as adapter_mod
-
-    counters = {"to_platform": 0, "build_radar": 0, "set_pose": 0, "tracer_init": 0, "trace": 0}
-
-    class FakeAdapter:
-        def to_platform(self, studio_scene, *, device="cpu"):
-            counters["to_platform"] += 1
-            return wr.Scene(device="cpu"), {"config": "stable"}
-
-    class FakeRadar:
-        position = torch.tensor([0.0, 0.0, 0.0])
-        target = torch.tensor([0.0, 0.0, -1.0])
-        tx_pos = torch.zeros((1, 3))
-
-        def set_pose(self, *, position=None, target=None, up=None, fov=None):
-            counters["set_pose"] += 1
-            self.position = torch.tensor(position)
-            self.target = torch.tensor(target)
-            return self
-
-        def path_cache_from_trace(self, trace, *, velocities=None):
-            return object()
-
-        def mimo_from_paths(self, cache):
-            return torch.zeros((1, 1, 1, 1))
-
-    class FakeTracer:
-        def __init__(self, *args, **kwargs):
-            counters["tracer_init"] += 1
-
-        def trace(self, time=None):
-            counters["trace"] += 1
-            return types.SimpleNamespace(points=torch.zeros((1, 3)), intensities=torch.ones(1))
-
-    monkeypatch.setattr(adapter_mod, "RadarAdapter", FakeAdapter)
-    monkeypatch.setattr(SolveRunner, "build_radar", staticmethod(lambda config, sensor: counters.__setitem__("build_radar", counters["build_radar"] + 1) or FakeRadar()))
-    monkeypatch.setattr(trace_mod, "Tracer", FakeTracer)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-
-    cache = {}
-    tracer = TracerSpec(resolution=16)
-
-    SolveRunner.run("studio", sensor=_sensor(), tracer=tracer, motion_sampling="per_frame",
-                    t0=0.0, live_cache=cache, cache_key="pose-a",
-                    platform_cache_key="scene-stable")
-    SolveRunner.run("studio", sensor=_sensor(position=[1.0, 2.0, 3.0], target=[1.0, 2.0, 2.0]),
-                    tracer=tracer, motion_sampling="per_frame", t0=0.0,
-                    live_cache=cache, cache_key="pose-b",
-                    platform_cache_key="scene-stable")
-
-    assert counters["to_platform"] == 1
-    assert counters["build_radar"] == 1
-    assert counters["set_pose"] == 1
-    assert counters["tracer_init"] == 1
-    assert counters["trace"] == 2
-
-
-def test_solver_host_reuses_live_session_cache(monkeypatch):
+def test_solver_host_reuses_session_cache(monkeypatch):
     import solver_host
 
-    class FakeCtx:
+    class Context:
         def log(self, message):
             pass
 
@@ -199,23 +93,26 @@ def test_solver_host_reuses_live_session_cache(monkeypatch):
 
     calls = []
 
-    def fake_run(studio_scene, **kwargs):
+    def fake_run(scene, **kwargs):
         calls.append(kwargs)
-        return types.SimpleNamespace(radar=object(), signal=torch.zeros((1, 1, 1, 1)))
+        return SimpleNamespace(signal=torch.zeros((1, 1, 2, 4)))
 
-    solver_host._LIVE_CACHES.clear()
     monkeypatch.setattr(solver_host.SolveRunner, "run", staticmethod(fake_run))
+    solver_host._LIVE_CACHES.clear()
     config = {
         "sensor": asdict(_sensor()),
-        "tracer": asdict(TracerSpec(resolution=16)),
-        "motion_sampling": "per_frame",
+        "propagation": asdict(PropagationSpec()),
         "t0": 0.0,
-        "live": {"session_id": "radar.test.signal", "signature": "same"},
+        "live": {
+            "session_id": "radar.test",
+            "signature": "settings-a",
+            "scene_payload_signature": "scene-a",
+        },
     }
 
-    solver_host.solve(FakeCtx(), "scene", config)
-    solver_host.solve(FakeCtx(), "scene", config)
+    solver_host.solve(Context(), "scene", config)
+    solver_host.solve(Context(), "scene", config)
 
-    assert calls[0]["cache_key"] == "same"
-    assert calls[1]["cache_key"] == "same"
     assert calls[0]["live_cache"] is calls[1]["live_cache"]
+    assert calls[0]["cache_key"] == "settings-a"
+    assert calls[0]["platform_cache_key"] == "scene-a"

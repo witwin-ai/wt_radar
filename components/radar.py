@@ -1,25 +1,4 @@
-"""Unified Radar component — the single scene-level component for a radar simulation.
-
-Replaces the nine separate Radar Settings components (RadarConfig + RadarSensor +
-RadarTracer + the four sub-configs + RadarResult + RadarTimeline) with one component
-exposing every setting through foldout groups. The marker the adapter keys off is now
-``Radar`` (master plan §6.4); optional per-structure ``RadarMotion`` and the
-polymorphic ``RadarPostProcessor`` hierarchy stay separate because they live on
-other scene objects.
-
-The grouping consolidates the old split: ``Configuration`` holds the FMCW core
-(frequency / power + ADC + chirp / frame + FFT bins); ``Antenna`` holds the array
-geometry plus the antenna-pattern sub-config; ``Tracer`` is the ray-tracer + sensor
-optic (fov); the three ``Noise / Polarization / Receiver`` foldouts are the optional
-``RadarConfig`` sub-configs; ``Solve`` runs the solve and ``Post Processing`` drives
-the in-component MIMO views + detector/CFAR; ``Timeline`` generates multi-frame sequences.
-
-The sensor **pose** (position + look direction + up) is read from the owner SceneObject's
-``Transform`` at solve time — moving / rotating the Radar Settings object in the viewport
-moves the simulated radar. The solver backend defaults to ``dirichlet`` on ``cuda`` and
-is hidden from the UI; tests / scripts can still override ``backend`` / ``device`` /
-``pad_factor`` on the component directly.
-"""
+"""Unified Studio component for the WiTwin Radar 0.3 scene-driven pipeline."""
 from dataclasses import asdict
 import asyncio
 import json
@@ -58,7 +37,7 @@ from ..adapter.common import (
     Derived,
     num,
 )
-from ..adapter.solve import SensorSpec, SigProc, TracerSpec
+from ..adapter.solve import PropagationSpec, SensorSpec, SigProc
 
 logger = get_logger("Radar")
 
@@ -68,21 +47,19 @@ _VIEWS = ["raw_signal", "range_doppler", "point_cloud", "music"]
 # Foldout group ids (also used in string `show_if`/`hide_if` lookups by field name).
 _CONFIG = "Configuration"   # FMCW core: frequency/power + ADC + chirp/frame + FFT bins
 _ANTENNA = "Antenna"        # geometry + antenna pattern
-_TRACER = "Tracer"
+_PROPAGATION = "Propagation"
 _NOISE = "Noise"
-_POLARIZATION = "Polarization"
 _RECEIVER = "Receiver"
 _SOLVE = "Solve"
 _POSTPROC = "PostProcessing"   # signal views + detector/CFAR run on the solved signal
 _TIMELINE = "Timeline"
 
 # show_if / hide_if dict conditions reused across multiple fields.
-_PIXEL = {"field_name": "sampling", "operator": "eq", "value": "pixel"}
 _SEPARABLE = {"field_name": "pattern_kind", "operator": "eq", "value": "separable"}
 _MAP = {"field_name": "pattern_kind", "operator": "eq", "value": "map"}
 _AGC = "enable_agc"
 _POINTCLOUD = {"field_name": "timeline_source", "operator": "eq", "value": "pointcloud_sequence"}
-_MOTION_SOURCE = {"field_name": "timeline_source", "operator": "eq", "value": "motion"}
+_MOTION_SOURCE = {"field_name": "timeline_source", "operator": "eq", "value": "scene_motion"}
 
 
 @component(name="Radar", display_name="Radar", category=_CAT)
@@ -129,10 +106,9 @@ class RadarComponent(Component):
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna"))
-    define_group(foldout_group(_TRACER, display_name="Ray Tracer"))
-    define_group(foldout_group(_NOISE, display_name="Noise Model", collapsed=True))
-    define_group(foldout_group(_POLARIZATION, display_name="Polarization", collapsed=True))
-    define_group(foldout_group(_RECEIVER, display_name="Receiver Chain", collapsed=True))
+    define_group(foldout_group(_PROPAGATION, display_name="Propagation"))
+    define_group(foldout_group(_NOISE, display_name="Noise / Phase", collapsed=True))
+    define_group(foldout_group(_RECEIVER, display_name="Frontend", collapsed=True))
     define_group(foldout_group(_SOLVE, display_name="Solve"))
     define_group(foldout_group(_POSTPROC, display_name="Post Processing"))
     define_group(foldout_group(_TIMELINE, display_name="Timeline", collapsed=True))
@@ -163,7 +139,6 @@ class RadarComponent(Component):
     num_doppler_bins = int_field(128, min=1, group=_CONFIG, description="Doppler FFT bins")
     num_range_bins = int_field(256, min=1, group=_CONFIG, description="Range bins")
     num_angle_bins = int_field(64, min=1, group=_CONFIG, description="Angle FFT bins")
-
     # --- antenna geometry (RadarConfig; half-wavelength units) --------------
     num_tx = int_field(3, min=1, group=_ANTENNA, description="Number of TX antennas (== len(tx_loc))")
     num_rx = int_field(4, min=1, group=_ANTENNA, description="Number of RX antennas (== len(rx_loc))")
@@ -174,26 +149,27 @@ class RadarComponent(Component):
                         default=[[-6.0, 0.0, 0.0], [-5.0, 0.0, 0.0], [-4.0, 0.0, 0.0], [-3.0, 0.0, 0.0]],
                         group=_ANTENNA, description="RX positions (half-wavelength units)")
 
-    # --- ray tracer (RadarTracer + sensor optic; pose comes from the owner Transform) ---
-    fov = float_field(60.0, min=1.0, max=179.0, group=_TRACER,
-                      description="Ray-tracing field of view (deg)")
-    resolution = int_field(128, min=1, group=_TRACER, description="Ray-tracing film width = height")
-    epsilon_r = float_field(5.0, min=1.0, group=_TRACER,
-                            description="Default Fresnel permittivity (per-structure eps_r overrides)")
-    sampling = string_field("triangle", options=["pixel", "triangle"], enum_toggle=True,
-                            group=_TRACER,
-                            description="Triangle (mesh facets) or pixel (camera rays) sampling")
-    multipath = bool_field(False, show_if=_PIXEL, group=_TRACER,
-                           description="Trace reflections (pixel sampling only)")
-    max_reflections = int_field(0, min=0, show_if="multipath", group=_TRACER,
-                                description="Reflection bounce count")
-    ray_batch_size = int_field(65536, min=1, group=_TRACER, description="Rays per batch (multipath)")
-
-    # Hidden solver backend defaults (dirichlet on CUDA). Authoring rarely needs to
-    # change these; tests / scripts can still override the fields directly.
-    backend = string_field("dirichlet", options=["dirichlet", "slang", "pytorch"], hidden=True)
-    pad_factor = int_field(16, min=1, hidden=True)
-    device = string_field("cuda", options=["cuda", "cpu"], hidden=True)
+    # --- scene-driven propagation + scattering ------------------------------
+    fov = float_field(60.0, min=1.0, max=179.0, group=_PROPAGATION, description="Radar field of view (deg)")
+    target_rcs_m2 = float_field(
+        1.0,
+        min=1e-12,
+        group=_PROPAGATION,
+        description="Scalar radar cross section applied to every explicit Studio target site (m²)",
+    )
+    multipath = bool_field(False, group=_PROPAGATION, description="Include specular reflections")
+    max_reflections = int_field(
+        1,
+        min=1,
+        show_if="multipath",
+        group=_PROPAGATION,
+        description="Maximum reflection depth",
+    )
+    polarization = vector3_field(
+        [0.0, 1.0, 0.0],
+        group=_PROPAGATION,
+        description="Shared world-frame endpoint polarization (non-zero)",
+    )
 
     # --- antenna pattern sub-config (RadarAntennaPattern) -------------------
     use_default = bool_field(True, group=_ANTENNA,
@@ -213,42 +189,23 @@ class RadarComponent(Component):
                                   description="2D gain map as JSON rows x cols "
                                               "(rows=y_angles, cols=x_angles, >=0)")
 
-    # --- noise model sub-config (RadarNoiseModel) ---------------------------
-    enable_thermal = bool_field(False, group=_NOISE,
-                                description="Additive complex Gaussian thermal noise")
-    thermal_std = float_field(0.0, min=0.0, show_if="enable_thermal", group=_NOISE,
-                              description="Thermal noise std (>=0)")
-    enable_quantization = bool_field(False, group=_NOISE,
-                                     description="ADC-style amplitude quantization")
-    quant_bits = int_field(12, min=1, show_if="enable_quantization", group=_NOISE,
-                           description="Quantizer bits (>0)")
-    quant_full_scale = float_field(1.0, min=0.0, show_if="enable_quantization", group=_NOISE,
-                                   description="Quantizer full scale (>0)")
-    enable_phase = bool_field(False, group=_NOISE, description="Random-walk phase noise")
-    phase_std = float_field(0.0, min=0.0, show_if="enable_phase", group=_NOISE,
-                            description="Phase noise std per step (>=0)")
+    # --- typed frontend noise ----------------------------------------------
+    enable_thermal = bool_field(False, group=_NOISE, description="Enable physical receiver noise")
+    noise_figure_db = float_field(0.0, min=0.0, show_if="enable_thermal", group=_NOISE,
+                                  description="Receiver noise figure (dB)")
+    antenna_temperature_k = float_field(290.0, min=0.0, show_if="enable_thermal", group=_NOISE,
+                                        description="Antenna noise temperature (K)")
+    noise_bandwidth_hz = float_field(4.4e6, min=0.0, show_if="enable_thermal", group=_NOISE,
+                                     description="Equivalent receiver bandwidth (Hz)")
+    enable_phase = bool_field(False, group=_NOISE, description="Enable phase-noise spectrum")
+    phase_noise_dbc_per_hz = float_field(-90.0, show_if="enable_phase", group=_NOISE,
+                                         description="Single-sideband phase noise (dBc/Hz)")
+    phase_offset_hz = float_field(1e5, min=0.0, show_if="enable_phase", group=_NOISE,
+                                  description="Phase-noise offset frequency (Hz)")
+    phase_sample_rate_hz = float_field(4.4e6, min=0.0, show_if="enable_phase", group=_NOISE,
+                                       description="Phase-noise sample rate (Hz)")
     use_seed = bool_field(False, group=_NOISE, description="Deterministic noise via a fixed seed")
     seed = int_field(0, min=0, show_if="use_seed", group=_NOISE, description="Noise RNG seed (>=0)")
-
-    # --- polarization sub-config (RadarPolarization) ------------------------
-    pol_enabled = bool_field(False, group=_POLARIZATION,
-                             description="Enable explicit polarization (else unpolarized)")
-    pol_tx_uniform = bool_field(True, show_if="pol_enabled", group=_POLARIZATION,
-                                description="One shared TX vector (else per-antenna)")
-    pol_tx = vector3_field([1.0, 0.0, 0.0], show_if="pol_tx_uniform", group=_POLARIZATION,
-                           description="Shared TX polarization vector (non-zero)")
-    pol_tx_bank = list_field(vector3_field([1.0, 0.0, 0.0]), default=[],
-                             hide_if="pol_tx_uniform", group=_POLARIZATION,
-                             description="Per-TX-antenna polarization vectors (len == num_tx)")
-    pol_rx_uniform = bool_field(True, show_if="pol_enabled", group=_POLARIZATION,
-                                description="One shared RX vector (else per-antenna)")
-    pol_rx = vector3_field([1.0, 0.0, 0.0], show_if="pol_rx_uniform", group=_POLARIZATION,
-                           description="Shared RX polarization vector (non-zero)")
-    pol_rx_bank = list_field(vector3_field([1.0, 0.0, 0.0]), default=[],
-                             hide_if="pol_rx_uniform", group=_POLARIZATION,
-                             description="Per-RX-antenna polarization vectors (len == num_rx)")
-    pol_reflection_flip = bool_field(True, show_if="pol_enabled", group=_POLARIZATION,
-                                     description="Flip polarization on reflection")
 
     # --- receiver chain sub-config (RadarReceiverChain) ---------------------
     enable_lna = bool_field(False, group=_RECEIVER, description="Low-noise amplifier gain")
@@ -261,8 +218,7 @@ class RadarComponent(Component):
                                   description="AGC min gain (dB, <= max)")
     agc_mode = string_field("per_rx", options=["global", "per_rx"], enum_toggle=True, show_if=_AGC,
                             group=_RECEIVER, description="AGC scope")
-    enable_adc = bool_field(False, group=_RECEIVER,
-                            description="ADC quantization (mutually exclusive with quantization noise)")
+    enable_adc = bool_field(False, group=_RECEIVER, description="Enable ADC quantization")
     adc_bits = int_field(12, min=1, show_if="enable_adc", group=_RECEIVER, description="ADC bits (>0)")
     adc_full_scale = float_field(1.0, min=0.0, show_if="enable_adc", group=_RECEIVER,
                                  description="ADC full scale (>0)")
@@ -270,8 +226,6 @@ class RadarComponent(Component):
                                           description="Reference impedance (ohm, >0)")
 
     # --- solve (RadarResult) ------------------------------------------------
-    motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
-                                   group=_SOLVE, description="Re-trace per chirp or per frame")
     t0 = float_field(0.0, group=_SOLVE, description="Solve start time (s)")
     stream_max_fps = float_field(30.0, min=0.1, max=30.0, group=_SOLVE,
                                  description="Maximum realtime stream solves per second")
@@ -330,13 +284,13 @@ class RadarComponent(Component):
 
     # --- timeline (RadarTimeline) -------------------------------------------
     frame_rate = float_field(30.0, min=1.0, group=_TIMELINE, description="Source keyframe rate (Hz)")
-    timeline_source = string_field("pointcloud_sequence", options=["pointcloud_sequence", "motion"],
+    timeline_source = string_field("pointcloud_sequence", options=["pointcloud_sequence", "scene_motion"],
                                    enum_toggle=True, group=_TIMELINE,
                                    description="How keyframes are built")
     pointcloud_path = string_field("", show_if=_POINTCLOUD, group=_TIMELINE,
                                    description=".npy/.npz with (F,N,3) positions [+ (F,N) intensities]")
-    motion_path = string_field("", show_if=_MOTION_SOURCE, group=_TIMELINE,
-                               description=".npz pose (F,72)/shape/root_translation; needs an SMPL 'human'")
+    motion_frame_count = int_field(30, min=1, show_if=_MOTION_SOURCE, group=_TIMELINE,
+                                   description="Number of Core DynamicScene frames")
     velocity_corrected = bool_field(True, group=_TIMELINE,
                                     description="Scale displacement to physical velocity per frame")
     frame_index = int_field(0, min=0, group=_TIMELINE,
@@ -409,7 +363,7 @@ class RadarComponent(Component):
         logger.info("=== Simulate clicked ===")
         spec = SensorSpec.from_component(self)
         logger.info(f"Sensor pose:  position={spec.position}  target={spec.target}  up={spec.up}")
-        logger.info(f"Sensor:       backend={spec.backend} device={spec.device} fov={spec.fov}")
+        logger.info(f"Sensor:       device={spec.device} fov={spec.fov}")
         run = await asyncio.to_thread(
             api.solvers.solve,
             "witwin.radar.simulate",
@@ -598,7 +552,7 @@ class RadarComponent(Component):
         radar, frames = TimelineRunner.generate(
             self,
             sensor=SensorSpec.from_component(self),
-            tracer=TracerSpec.from_component(self),
+            propagation=PropagationSpec.from_component(self),
             studio_scene=self.scene)
         self._timeline_radar = radar
         self._frames = frames
@@ -1163,7 +1117,7 @@ class RadarComponent(Component):
             solve_signature = signature if signature is not None else self._live_scene_signature()
             logger.info(
                 "Radar live solve request: "
-                f"backend={spec.backend} device={spec.device} position={spec.position} t0={t0:.6f}"
+                f"device={spec.device} position={spec.position} t0={t0:.6f}"
             )
             logger.info(f"Radar live scene state: {self._live_scene_summary()}")
             run = api.solvers.solve(
@@ -1523,8 +1477,7 @@ class RadarComponent(Component):
                        live_signature=None) -> dict:
         config = {
             "sensor": asdict(spec),
-            "tracer": asdict(TracerSpec.from_component(self)),
-            "motion_sampling": str(self.motion_sampling),
+            "propagation": asdict(PropagationSpec.from_component(self)),
             "t0": num(self.t0) if t0_override is None else num(t0_override),
         }
         if live_session_id and live_signature:
@@ -1536,7 +1489,6 @@ class RadarComponent(Component):
                 "channels": list(self._selected_stream_channels(default=("raw", "rd", "pc"))),
                 "max_fps": min(max(float(self.stream_max_fps), 0.1), 30.0),
                 "stream_on_change_only": bool(self.stream_on_change_only),
-                "motion_sampling": "per_frame",
                 "tx": int(self.tx_index),
                 "rx": int(self.rx_index),
                 "static_clutter_removal": bool(self.static_clutter_removal),

@@ -1,93 +1,67 @@
-"""R4 live: multi-frame timeline (point-cloud sequence + motion source).
+"""Multi-frame generation uses repeated Radar 0.3 scene solves."""
+from types import SimpleNamespace
 
-A point-cloud sequence file drives ``Timeline.generate`` to produce a frame stack that
-matches a direct platform call; the frame slider pushes a frame into the RadarResult view;
-the motion source raises cleanly when the scene has no SMPL ``human``. Needs CUDA.
-"""
-import numpy as np
-import pytest
 import torch
-import witwin.radar as wr
 
-from witwin_server import Scene
-
-from wt_radar.adapter.config_map import ConfigMap
-
-_CONFIG = {
-    "num_tx": 3, "num_rx": 4,
-    "fc": 77e9, "slope": 60.012, "power": 15.0,
-    "adc_samples": 256, "adc_start_time": 6.0, "sample_rate": 4400.0,
-    "idle_time": 7.0, "ramp_end_time": 58.0, "chirp_per_frame": 128,
-    "frame_per_second": 10.0,
-    "num_doppler_bins": 128, "num_range_bins": 256, "num_angle_bins": 64,
-    "tx_loc": [[0, 0, 0], [4, 0, 0], [2, 1, 0]],
-    "rx_loc": [[-6, 0, 0], [-5, 0, 0], [-4, 0, 0], [-3, 0, 0]],
-}
+from wt_radar.adapter.solve import PropagationSpec, SensorSpec
+from wt_radar.adapter.timeline_run import TimelineRunner
 
 
-def _settings_in_scene():
-    settings = ConfigMap.settings_to_studio(wr.RadarConfig.from_dict(_CONFIG))
-    studio = Scene()
-    studio.begin_batch()
-    studio.add_object(settings)
-    studio.end_batch()
-    return settings
+def _component(source: str, count: int = 3):
+    return SimpleNamespace(
+        frame_rate=10.0,
+        timeline_source=source,
+        pointcloud_path="unused.npz",
+        motion_frame_count=count,
+    )
 
 
-def _pointcloud_seq(num_frames=5):
-    # One point translating in +x over the sequence.
-    return np.stack([np.array([[0.1 * i, 0.0, -3.0]], dtype=np.float32) for i in range(num_frames)], axis=0)
+def _sensor():
+    return SensorSpec([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0], 60.0)
 
 
-@pytest.mark.gpu
-def test_pointcloud_timeline_matches_direct(wtr, cuda_ready, tmp_path):
-    positions = _pointcloud_seq()
-    path = tmp_path / "seq.npz"
-    np.savez(path, positions=positions)
+def test_scene_motion_runs_one_solve_per_frame(monkeypatch):
+    calls = []
 
-    settings = _settings_in_scene()
-    radar = settings.get_component("Radar")
-    radar.frame_rate = 10.0
-    radar.timeline_source = "pointcloud_sequence"
-    radar.pointcloud_path = str(path)
-    radar.velocity_corrected = False
-    radar.generate_timeline()
-    frames = radar._frames
-    assert frames is not None and frames.shape[1:] == (3, 4, 128, 256) and frames.shape[0] >= 1
+    def fake_run(scene, **kwargs):
+        calls.append(kwargs)
+        index = len(calls)
+        return SimpleNamespace(radar="radar", signal=torch.full((1, 1, 2, 4), float(index)))
 
-    direct_tl = wr.Timeline(frame_rate=10.0, device="cuda")
-    direct_tl.add_pointcloud_sequence(torch.as_tensor(positions, device="cuda"))
-    direct_radar = wr.Radar(wr.RadarConfig.from_dict(_CONFIG), backend="dirichlet", device="cuda")
-    direct = direct_tl.generate(direct_radar, progress=False, velocity_corrected=False)
-    assert frames.shape == direct.shape
-    assert torch.allclose(frames, direct, atol=1e-4, rtol=1e-3)
+    monkeypatch.setattr("wt_radar.adapter.timeline_run.SolveRunner.run", fake_run)
+    radar, frames = TimelineRunner.generate(
+        _component("scene_motion", 3),
+        sensor=_sensor(),
+        propagation=PropagationSpec(),
+        studio_scene="scene",
+    )
+
+    assert radar == "radar"
+    assert tuple(frames.shape) == (3, 1, 1, 2, 4)
+    assert [call["t0"] for call in calls] == [0.0, 0.1, 0.2]
+    assert all(call["platform_cache_key"] == "timeline:scene" for call in calls)
 
 
-@pytest.mark.gpu
-def test_frame_slider_pushes_to_result(wtr, cuda_ready, tmp_path):
-    path = tmp_path / "seq.npz"
-    np.savez(path, positions=_pointcloud_seq())
-    settings = _settings_in_scene()
-    radar = settings.get_component("Radar")
-    radar.frame_rate = 10.0
-    radar.pointcloud_path = str(path)
-    radar.velocity_corrected = False
-    radar.generate_timeline()
+def test_pointcloud_sequence_passes_explicit_sites(monkeypatch):
+    points = torch.tensor([[[0.0, 0.0, -2.0]], [[0.1, 0.0, -2.0]]])
+    calls = []
+    monkeypatch.setattr(
+        TimelineRunner,
+        "_load_pointclouds",
+        staticmethod(lambda path, device: (points, None)),
+    )
 
-    radar.frame_index = 1
-    radar.show_frame()
-    assert radar._signal is not None
-    assert torch.equal(radar._signal, radar._frames[1])
+    def fake_run(scene, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(radar="radar", signal=torch.zeros((1, 1, 2, 4)))
 
-
-@pytest.mark.gpu
-def test_motion_source_requires_human(wtr, cuda_ready, tmp_path):
-    path = tmp_path / "motion.npz"
-    np.savez(path, pose=np.zeros((1, 72), dtype=np.float32), shape=np.zeros(10, dtype=np.float32),
-             root_translation=np.zeros((1, 3), dtype=np.float32))
-    settings = _settings_in_scene()
-    radar = settings.get_component("Radar")
-    radar.timeline_source = "motion"
-    radar.motion_path = str(path)
-    with pytest.raises(KeyError):
-        radar.generate_timeline()
+    monkeypatch.setattr("wt_radar.adapter.timeline_run.SolveRunner.run", fake_run)
+    _, frames = TimelineRunner.generate(
+        _component("pointcloud_sequence"),
+        sensor=_sensor(),
+        propagation=PropagationSpec(),
+        studio_scene="scene",
+    )
+    assert tuple(frames.shape) == (2, 1, 1, 2, 4)
+    assert torch.equal(calls[0]["site_positions"], points[0])
+    assert torch.equal(calls[1]["site_positions"], points[1])

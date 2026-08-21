@@ -1,8 +1,7 @@
-"""wt-radar — witwin.radar solver-scene round-trip + FMCW solve + in-component signal viz.
+"""wt-radar — WiTwin Radar 0.3 scene-driven simulation for Studio.
 
 Importing this package (eager: no ``activationEvents``):
-  1. registers the radar scene components (config / sensor / sub-configs / motion /
-     structure-meta / tracer / result) via their ``@component`` decorators,
+  1. registers the radar configuration, propagation, motion, and result components,
   2. registers the radar library prefabs, and
   3. registers :class:`RadarAdapter` under the ``"radar"`` domain on the core
      :class:`PlatformSceneHandler` so ``load_platform_scene`` /
@@ -18,8 +17,8 @@ core and frozen; this plugin only reads/writes it.
 Radar is unlike maxwell/channel in two ways the round trip must respect:
   * the sensor (``Radar``/``RadarConfig``) lives **outside** the scene, so the
     load/export contract carries a **(Scene, RadarConfig) pair** (master plan §6.4);
-  * dynamics are a **separate acyclic motion graph** (``scene._structure_motions``),
-    never the studio ``Transform`` parent tree.
+  * dynamics are represented by Core ``DynamicScene``/``LinearTrajectory`` objects,
+    never by the Studio ``Transform`` parent tree.
 """
 from witwin_server.features.platform.scene_handlers import PlatformSceneHandler
 

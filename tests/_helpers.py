@@ -1,166 +1,119 @@
-"""Shared round-trip assertion helpers for the wt-radar test suite."""
-from typing import Any, Optional
+"""Shared fixtures and comparisons for the Radar 0.3 plugin tests."""
+from dataclasses import asdict, is_dataclass
+from typing import Any
 
 import numpy as np
+import torch
 
-from witwin_server.features.platform.bridge import GeometryMap
-
-# Combined abs+rel tolerance: carrier/slope values are large (e.g. fc=77e9) and may pass
-# through float32 component storage, so a pure absolute tolerance is too strict for them.
-ATOL = 1e-6
+ATOL = 1e-5
 RTOL = 1e-6
+
+BASE_CONFIG = {
+    "num_tx": 1,
+    "num_rx": 2,
+    "fc": 77e9,
+    "slope": 60.012,
+    "power": 12.0,
+    "adc_samples": 16,
+    "adc_start_time": 6.0,
+    "sample_rate": 4400.0,
+    "idle_time": 7.0,
+    "ramp_end_time": 58.0,
+    "chirp_per_frame": 8,
+    "frame_per_second": 10.0,
+    "num_doppler_bins": 8,
+    "num_range_bins": 16,
+    "num_angle_bins": 8,
+    "tx_loc": [[0.0, 0.0, 0.0]],
+    "rx_loc": [[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]],
+}
 
 
 def approx(a: Any, b: Any) -> bool:
-    """Float closeness within combined absolute + relative tolerance."""
     a, b = float(a), float(b)
     return abs(a - b) <= ATOL + RTOL * max(abs(a), abs(b))
 
 
-# --- geometry / material (mirror the base round-trip via the frozen GeometryMap) ---
+def make_config(**updates: Any) -> Any:
+    import witwin.radar as wr
 
-def _params_equal(a: dict, b: dict) -> bool:
-    if a.keys() != b.keys():
-        return False
-    for key, va in a.items():
-        vb = b[key]
-        if isinstance(va, list):
-            if len(va) != len(vb) or not all(approx(x, y) for x, y in zip(va, vb)):
-                return False
-        elif isinstance(va, (int, float)):
-            if not approx(va, vb):
-                return False
-        elif va != vb:
-            return False
-    return True
+    return wr.RadarConfig.from_dict({**BASE_CONFIG, **updates})
 
 
-def assert_geometry_equal(g1: Any, g2: Any) -> None:
-    """Assert two platform geometries match (kind + params + position + rotation)."""
-    a, b = GeometryMap.to_studio(g1), GeometryMap.to_studio(g2)
-    if a.kind != b.kind:
-        assert_bounds_equal(g1, g2)
-        return
-    assert a.kind == b.kind, f"geometry kind {a.kind} != {b.kind}"
-    assert _params_equal(a.params, b.params), f"geometry params {a.params} != {b.params}"
-    assert all(approx(x, y) for x, y in zip(a.position, b.position)), "geometry position"
-    assert all(approx(x, y) for x, y in zip(a.rotation_quat, b.rotation_quat)), "geometry rotation"
+def make_scene(*, dynamic: bool = False) -> Any:
+    import witwin.core as wc
+
+    structures = (
+        wc.Structure(
+            wc.Box(position=(0.0, 0.0, -4.0), size=(2.0, 2.0, 0.1)),
+            wc.PhysicalMaterial(eps_r=5.0, name="concrete", material_id=1),
+            name="wall",
+            structure_id=1,
+            material_id=1,
+            assignment_id=1,
+            surface_id=1,
+        ),
+        wc.Structure(
+            wc.Box(position=(0.6, 0.0, -2.5), size=(0.6, 0.4, 0.4)),
+            wc.PhysicalMaterial(eps_r=8.0, sigma_e=0.02, name="metal", material_id=2),
+            name="car",
+            structure_id=2,
+            material_id=2,
+            assignment_id=2,
+            surface_id=2,
+        ),
+    )
+    scene = wc.Scene(structures=structures)
+    if not dynamic:
+        return scene
+    trajectory = wc.LinearTrajectory(
+        origin=torch.tensor((0.2, 0.0, 0.0), dtype=torch.float32),
+        velocity=torch.tensor((0.1, 0.0, 0.0), dtype=torch.float32),
+        reference_time_s=0.5,
+    )
+    return wc.DynamicScene(scene, structure_trajectories={2: trajectory})
 
 
-def assert_bounds_equal(g1: Any, g2: Any) -> None:
-    """Assert two geometries occupy the same world-space axis-aligned bounds."""
-    for axis, (bounds_a, bounds_b) in enumerate(zip(_bounds_world(g1), _bounds_world(g2))):
-        assert approx(bounds_a[0], bounds_b[0]), f"bounds axis {axis} min"
-        assert approx(bounds_a[1], bounds_b[1]), f"bounds axis {axis} max"
+def normalized(value: Any) -> Any:
+    if is_dataclass(value):
+        return normalized(asdict(value))
+    if isinstance(value, dict):
+        return {key: normalized(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return tuple(normalized(item) for item in value)
+    if hasattr(value, "detach"):
+        return normalized(value.detach().cpu().tolist())
+    if isinstance(value, (float, np.floating)):
+        return round(float(value), 7)
+    return value
 
 
-def _bounds_world(geometry: Any) -> tuple:
-    if hasattr(geometry, "bounds_world"):
-        return geometry.bounds_world
+def assert_config_equal(left: Any, right: Any) -> None:
+    _assert_value_equal(left, right)
+
+
+def _assert_value_equal(left: Any, right: Any) -> None:
+    if is_dataclass(left) or is_dataclass(right):
+        assert is_dataclass(left) and is_dataclass(right)
+        _assert_value_equal(asdict(left), asdict(right))
+    elif isinstance(left, dict) or isinstance(right, dict):
+        assert isinstance(left, dict) and isinstance(right, dict)
+        assert left.keys() == right.keys()
+        for key in left:
+            _assert_value_equal(left[key], right[key])
+    elif isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        assert len(left) == len(right)
+        for left_item, right_item in zip(left, right, strict=True):
+            _assert_value_equal(left_item, right_item)
+    elif isinstance(left, float) or isinstance(right, float):
+        assert approx(left, right)
+    else:
+        assert left == right
+
+
+def bounds(geometry: Any) -> np.ndarray:
     vertices, _ = geometry.to_mesh()
     if hasattr(vertices, "detach"):
         vertices = vertices.detach().cpu().numpy()
-    world = np.asarray(vertices, dtype=np.float64).reshape(-1, 3)
-    return tuple((float(world[:, axis].min()), float(world[:, axis].max())) for axis in range(3))
-
-
-def assert_material_scalar_equal(m1: Any, m2: Any) -> None:
-    """Assert the scalar part of two materials matches (eps_r/mu_r/sigma_e/name)."""
-    assert approx(complex(m1.eps_r).real, complex(m2.eps_r).real), "eps_r real"
-    assert approx(complex(m1.eps_r).imag, complex(m2.eps_r).imag), "eps_r imag"
-    assert approx(m1.mu_r, m2.mu_r), "mu_r"
-    assert approx(m1.sigma_e, m2.sigma_e), "sigma_e"
-    assert (m1.name or None) == (m2.name or None), "material name"
-
-
-def assert_structures_equal(list1: Any, list2: Any) -> None:
-    """Assert two radar structure lists match in ordinary Studio-editable fields."""
-    s1 = {s.name: s for s in list1}
-    s2 = {s.name: s for s in list2}
-    assert s1.keys() == s2.keys(), f"structure names {s1.keys()} != {s2.keys()}"
-    for name, a in s1.items():
-        b = s2[name]
-        assert_geometry_equal(a.geometry, b.geometry)
-        assert_material_scalar_equal(a.material, b.material)
-        assert int(a.priority) == int(b.priority), f"{name} priority"
-        assert bool(a.enabled) == bool(b.enabled), f"{name} enabled"
-        assert tuple(a.tags) == tuple(b.tags), f"{name} tags"
-
-
-# --- RadarConfig (the (Scene, RadarConfig) pair's config half) ---
-
-_RADAR_SCALAR_FIELDS = (
-    "fc", "slope", "power", "adc_samples", "adc_start_time", "sample_rate",
-    "idle_time", "ramp_end_time", "chirp_per_frame", "frame_per_second",
-    "num_doppler_bins", "num_range_bins", "num_angle_bins", "num_tx", "num_rx",
-)
-
-
-def _locs_equal(a: Any, b: Any) -> bool:
-    a, b = tuple(a), tuple(b)
-    if len(a) != len(b):
-        return False
-    return all(all(approx(x, y) for x, y in zip(pa, pb)) for pa, pb in zip(a, b))
-
-
-def assert_radar_config_equal(c1: Any, c2: Any) -> None:
-    """Assert two RadarConfig dataclasses match across every field + the 4 sub-configs."""
-    for field in _RADAR_SCALAR_FIELDS:
-        assert approx(getattr(c1, field), getattr(c2, field)), f"RadarConfig.{field}"
-    assert _locs_equal(c1.tx_loc, c2.tx_loc), "RadarConfig.tx_loc"
-    assert _locs_equal(c1.rx_loc, c2.rx_loc), "RadarConfig.rx_loc"
-    assert _subconfig_equal(c1.antenna_pattern, c2.antenna_pattern), "antenna_pattern"
-    assert _subconfig_equal(c1.noise_model, c2.noise_model), "noise_model"
-    assert _subconfig_equal(c1.polarization, c2.polarization), "polarization"
-    assert _subconfig_equal(c1.receiver_chain, c2.receiver_chain), "receiver_chain"
-
-
-def _subconfig_equal(a: Optional[dict], b: Optional[dict]) -> bool:
-    # Sub-configs are validated dicts (or None); compare numerically (nested lists/floats).
-    if a is None or b is None:
-        return a is None and b is None
-    if a.keys() != b.keys():
-        return False
-    return all(_value_equal(a[k], b[k]) for k in a)
-
-
-def _value_equal(a: Any, b: Any) -> bool:
-    if isinstance(a, dict):
-        return isinstance(b, dict) and _subconfig_equal(a, b)
-    if isinstance(a, (list, tuple)):
-        return len(a) == len(b) and all(_value_equal(x, y) for x, y in zip(a, b))
-    if isinstance(a, bool) or isinstance(b, bool):
-        return bool(a) == bool(b)
-    if isinstance(a, (int, float)):
-        return approx(a, b)
-    return a == b
-
-
-# --- motion graph (TransformMotion) ----------------------------------------
-
-def _opt_vec_equal(a: Any, b: Any) -> bool:
-    if a is None or b is None:
-        return a is None and b is None
-    return all(approx(x, y) for x, y in zip(a.tolist(), b.tolist()))
-
-
-def assert_motion_equal(m1: Any, m2: Any) -> None:
-    """Assert two ``TransformMotion`` objects match field-for-field."""
-    assert all(approx(x, y) for x, y in zip(m1.offset.tolist(), m2.offset.tolist())), "offset"
-    assert all(approx(x, y) for x, y in zip(m1.velocity.tolist(), m2.velocity.tolist())), "velocity"
-    assert _opt_vec_equal(m1.axis, m2.axis), "axis"
-    assert _opt_vec_equal(m1.origin, m2.origin), "origin"
-    assert approx(m1.angular_velocity.item(), m2.angular_velocity.item()), "angular_velocity"
-    assert approx(m1.angle.item(), m2.angle.item()), "angle"
-    assert approx(m1.t_ref.item(), m2.t_ref.item()), "t_ref"
-    assert str(m1.space) == str(m2.space), "space"
-    assert (m1.parent or None) == (m2.parent or None), "parent"
-
-
-def assert_motions_equal(scene1: Any, scene2: Any) -> None:
-    """Assert two radar scenes have identical ``_structure_motions`` graphs."""
-    m1 = scene1._structure_motions
-    m2 = scene2._structure_motions
-    assert m1.keys() == m2.keys(), f"motion keys {set(m1)} != {set(m2)}"
-    for name in m1:
-        assert_motion_equal(m1[name], m2[name])
+    vertices = np.asarray(vertices).reshape(-1, 3)
+    return np.stack((vertices.min(axis=0), vertices.max(axis=0)), axis=1)

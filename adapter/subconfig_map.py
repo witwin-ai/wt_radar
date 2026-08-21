@@ -1,29 +1,15 @@
-"""Sub-config interchange: the 4 ``RadarConfig`` sub-config dicts <-> the unified Radar component.
-
-Each ``*_to_studio`` reads a validated platform sub-config dict (or ``None``) into the
-relevant fields on the unified Radar component; each ``*_build`` reads the same fields
-back into the dict shape that ``RadarConfig.from_dict`` validates (or ``None`` when nothing
-is enabled). Keeping the dict shapes identical to ``validation.py`` means the platform
-validator stays the single source of truth for the round trip.
-
-The polarization fields are namespaced ``pol_*`` on the Radar component (the old
-RadarPolarization component used short names that collided once everything moved into
-one component).
-"""
+"""Radar antenna-pattern and typed frontend interchange."""
 import json
 from typing import Any, Dict, Optional
 
-from .common import num, vec, vec_list
+from .common import num
 
 
 class SubConfigMap:
-    """The four ``RadarConfig`` sub-configs <-> their fields on the unified Radar component."""
-
-    # --- antenna pattern -----------------------------------------------------
+    """Map the two optional RadarConfig blocks represented by the Studio component."""
 
     @staticmethod
     def antenna_to_studio(radar: Any, pattern: Optional[dict]) -> None:
-        # antenna_pattern dict (or None = default dipole) -> antenna-pattern fields.
         if pattern is None:
             radar.use_default = True
             return
@@ -39,140 +25,82 @@ class SubConfigMap:
 
     @staticmethod
     def antenna_build(radar: Any) -> Optional[dict]:
-        # antenna-pattern fields -> antenna_pattern dict, or None (use default dipole).
         if bool(radar.use_default):
             return None
         kind = str(radar.pattern_kind)
         out: Dict[str, Any] = {
             "kind": kind,
-            "x_angles_deg": [num(a) for a in radar.x_angles_deg],
-            "y_angles_deg": [num(a) for a in radar.y_angles_deg],
+            "x_angles_deg": [num(value) for value in radar.x_angles_deg],
+            "y_angles_deg": [num(value) for value in radar.y_angles_deg],
         }
         if kind == "separable":
-            out["x_values"] = [num(v) for v in radar.x_values]
-            out["y_values"] = [num(v) for v in radar.y_values]
+            out["x_values"] = [num(value) for value in radar.x_values]
+            out["y_values"] = [num(value) for value in radar.y_values]
         else:
             out["values"] = json.loads(str(radar.values_2d_json))
         return out
 
-    # --- noise model ---------------------------------------------------------
-
     @staticmethod
-    def noise_to_studio(radar: Any, noise: Optional[dict]) -> None:
-        # noise_model dict (or None) -> noise fields on the Radar component.
-        if noise is None:
+    def frontend_to_studio(radar: Any, frontend: Any) -> None:
+        if frontend is None:
             return
-        if "thermal" in noise:
+        radar.reference_impedance_ohm = float(frontend.port.reference_impedance_ohm)
+        if frontend.noise is not None:
             radar.enable_thermal = True
-            radar.thermal_std = float(noise["thermal"]["std"])
-        if "quantization" in noise:
-            radar.enable_quantization = True
-            radar.quant_bits = int(noise["quantization"]["bits"])
-            radar.quant_full_scale = float(noise["quantization"]["full_scale"])
-        if "phase" in noise:
-            radar.enable_phase = True
-            radar.phase_std = float(noise["phase"]["std"])
-        if "seed" in noise:
-            radar.use_seed = True
-            radar.seed = int(noise["seed"])
-
-    @staticmethod
-    def noise_build(radar: Any) -> Optional[dict]:
-        # noise fields -> noise_model dict, or None when nothing is enabled.
-        out: Dict[str, Any] = {}
-        if bool(radar.enable_thermal):
-            out["thermal"] = {"std": num(radar.thermal_std)}
-        if bool(radar.enable_quantization):
-            out["quantization"] = {"bits": int(radar.quant_bits),
-                                   "full_scale": num(radar.quant_full_scale)}
-        if bool(radar.enable_phase):
-            out["phase"] = {"std": num(radar.phase_std)}
-        if not out:
-            return None
-        if bool(radar.use_seed):
-            out["seed"] = int(radar.seed)
-        return out
-
-    # --- polarization --------------------------------------------------------
-
-    @staticmethod
-    def pol_to_studio(radar: Any, pol: Optional[dict]) -> None:
-        # polarization dict (or None) -> pol_* fields (collapse equal banks to uniform).
-        if pol is None:
-            return
-        radar.pol_enabled = True
-        radar.pol_reflection_flip = bool(pol.get("reflection_flip", True))
-        SubConfigMap._bank_to_studio(radar, "tx", pol["tx"])
-        SubConfigMap._bank_to_studio(radar, "rx", pol["rx"])
-
-    @staticmethod
-    def pol_build(radar: Any) -> Optional[dict]:
-        # pol_* fields -> polarization dict, or None when disabled.
-        if not bool(radar.pol_enabled):
-            return None
-        return {
-            "tx": SubConfigMap._bank_build(radar, "tx"),
-            "rx": SubConfigMap._bank_build(radar, "rx"),
-            "reflection_flip": bool(radar.pol_reflection_flip),
-        }
-
-    @staticmethod
-    def _bank_to_studio(radar: Any, side: str, vectors: Any) -> None:
-        # A validated per-antenna bank collapses to a single shared vector when all equal.
-        banks = vec_list(vectors)
-        uniform = bool(banks) and all(v == banks[0] for v in banks)
-        setattr(radar, f"pol_{side}_uniform", uniform)
-        if uniform:
-            setattr(radar, f"pol_{side}", list(banks[0]))
-        else:
-            setattr(radar, f"pol_{side}_bank", banks)
-
-    @staticmethod
-    def _bank_build(radar: Any, side: str) -> Any:
-        # Emit a single 3-vector (validator expands to num_tx/num_rx) or an explicit bank.
-        if bool(getattr(radar, f"pol_{side}_uniform")):
-            return vec(getattr(radar, f"pol_{side}"))
-        return vec_list(getattr(radar, f"pol_{side}_bank"))
-
-    # --- receiver chain ------------------------------------------------------
-
-    @staticmethod
-    def chain_to_studio(radar: Any, chain: Optional[dict]) -> None:
-        # receiver_chain dict (or None) -> receiver-chain fields on the Radar component.
-        if chain is None:
-            return
-        radar.reference_impedance_ohm = float(chain.get("reference_impedance_ohm", 50.0))
-        if "lna" in chain:
+            radar.noise_figure_db = float(frontend.noise.noise_figure_db)
+            radar.antenna_temperature_k = float(frontend.noise.antenna_temperature_k)
+            radar.noise_bandwidth_hz = float(frontend.noise.bandwidth_hz)
+            if frontend.noise.phase_noise_dbc_per_hz is not None:
+                radar.enable_phase = True
+                radar.phase_noise_dbc_per_hz = float(frontend.noise.phase_noise_dbc_per_hz)
+                radar.phase_offset_hz = float(frontend.noise.phase_offset_hz)
+                radar.phase_sample_rate_hz = float(frontend.noise.phase_sample_rate_hz)
+        if frontend.lna is not None:
             radar.enable_lna = True
-            radar.lna_gain_db = float(chain["lna"]["gain_db"])
-        if "agc" in chain:
+            radar.lna_gain_db = float(frontend.lna.gain_db)
+        if frontend.agc is not None:
             radar.enable_agc = True
-            agc = chain["agc"]
-            radar.agc_target_rms = float(agc["target_rms"])
-            radar.agc_max_gain_db = float(agc["max_gain_db"])
-            radar.agc_min_gain_db = float(agc["min_gain_db"])
-            radar.agc_mode = str(agc["mode"])
-        if "adc" in chain:
+            radar.agc_target_rms = float(frontend.agc.target_rms)
+            radar.agc_mode = str(frontend.agc.mode)
+            radar.agc_min_gain_db = float(frontend.agc.min_gain_db)
+            radar.agc_max_gain_db = float(frontend.agc.max_gain_db)
+        if frontend.adc is not None:
             radar.enable_adc = True
-            radar.adc_bits = int(chain["adc"]["bits"])
-            radar.adc_full_scale = float(chain["adc"]["full_scale"])
+            radar.adc_bits = int(frontend.adc.bits)
+            radar.adc_full_scale = float(frontend.adc.full_scale)
+        if int(frontend.seed.seed_base) != 0:
+            radar.use_seed = True
+            radar.seed = int(frontend.seed.seed_base)
 
     @staticmethod
-    def chain_build(radar: Any) -> Optional[dict]:
-        # receiver-chain fields -> receiver_chain dict, or None when no block is enabled.
-        out: Dict[str, Any] = {}
-        if bool(radar.enable_lna):
-            out["lna"] = {"gain_db": num(radar.lna_gain_db)}
-        if bool(radar.enable_agc):
-            out["agc"] = {
-                "target_rms": num(radar.agc_target_rms),
-                "max_gain_db": num(radar.agc_max_gain_db),
-                "min_gain_db": num(radar.agc_min_gain_db),
-                "mode": str(radar.agc_mode),
-            }
-        if bool(radar.enable_adc):
-            out["adc"] = {"bits": int(radar.adc_bits), "full_scale": num(radar.adc_full_scale)}
-        if not out:
+    def frontend_build(radar: Any) -> Any:
+        from witwin.radar.frontend import AdcSpec, AgcSpec, FrontendSpec, LnaSpec, NoiseSpec, PortSpec, SeedSpec
+
+        noise = None
+        if bool(radar.enable_thermal) or bool(radar.enable_phase):
+            phase_level = num(radar.phase_noise_dbc_per_hz) if bool(radar.enable_phase) else None
+            noise = NoiseSpec(
+                noise_figure_db=num(radar.noise_figure_db),
+                antenna_temperature_k=num(radar.antenna_temperature_k),
+                bandwidth_hz=num(radar.noise_bandwidth_hz),
+                phase_noise_dbc_per_hz=phase_level,
+                phase_offset_hz=num(radar.phase_offset_hz),
+                phase_sample_rate_hz=num(radar.phase_sample_rate_hz),
+            )
+        lna = LnaSpec(gain_db=num(radar.lna_gain_db)) if bool(radar.enable_lna) else None
+        agc = (
+            AgcSpec(
+                target_rms=num(radar.agc_target_rms),
+                mode=str(radar.agc_mode),
+                min_gain_db=num(radar.agc_min_gain_db),
+                max_gain_db=num(radar.agc_max_gain_db),
+            )
+            if bool(radar.enable_agc)
+            else None
+        )
+        adc = AdcSpec(bits=int(radar.adc_bits), full_scale=num(radar.adc_full_scale)) if bool(radar.enable_adc) else None
+        seed = SeedSpec(int(radar.seed) if bool(radar.use_seed) else 0)
+        port = PortSpec(reference_impedance_ohm=num(radar.reference_impedance_ohm))
+        if noise is None and lna is None and agc is None and adc is None and seed.seed_base == 0 and port.reference_impedance_ohm == 50.0:
             return None
-        out["reference_impedance_ohm"] = num(radar.reference_impedance_ohm)
-        return out
+        return FrontendSpec(port=port, noise=noise, lna=lna, agc=agc, adc=adc, seed=seed)

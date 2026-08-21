@@ -268,23 +268,25 @@ stream_channels = rd
 
 #### 5. cache miss 也要拆粒度，不要把所有 miss 当作全量重建
 
-旧逻辑里 signature 变了就会：
+旧逻辑里 signature 变了会重建旧版 tracer/path cache。Radar 0.3 已删除这些
+入口；现在每帧都通过 `Radar.simulate(scene, times, response, sites, ...)` 运行，
+但仍分别缓存不可变场景导出和 Radar 实例。
 
 ```text
-RadarAdapter.to_platform(...)
+RadarAdapter.build_export(...)
 wr.Radar(...)
-Tracer(...)
-trace(...)
-sigproc(...)
+Radar.simulate(...)
+typed processing(...)
 ```
 
 这对 sensor pose-only 变化太重。现在 live cache 拆成几层：
 
-- platform scene/config：同一 solver session 且 `scene_payload_signature` 没变时复用。
-- `wr.Radar`：RadarConfig、backend、device、pad_factor 不变时复用。
+- Core scene/config/explicit sites：同一 solver session 且
+  `scene_payload_signature` 没变时复用。
+- `wr.Radar`：RadarConfig 不变时复用；运行设备固定为 CUDA。
 - sensor pose：通过 `Radar.set_pose(position, target, up, fov)` 更新。
-- tracer：scene topology 和 tracer spec 不变时复用。
-- trace/path cache：cache key 完全相同时才复用。
+- propagation/scattering：RCS、components、depth、polarization 每次显式传入
+  `Radar.simulate`，不维护已删除的 tracer/path cache。
 
 因此松开 gizmo 后的常见路径变为：
 
@@ -292,12 +294,11 @@ sigproc(...)
 reuse platform scene/config
 reuse wr.Radar
 Radar.set_pose(...)
-reuse Tracer
-trace(...)
+Radar.simulate(...)
 RD publish
 ```
 
-这比重建 `wr.Radar` 和 `to_platform` 快很多，也避免 CUDA/Dirichlet 初始化反复出现在交互路径里。
+这比重建 `wr.Radar` 和 Core scene 快很多，也避免 CUDA 初始化反复出现在交互路径里。
 
 #### 6. heatmap 的显示 range 要用“显示范围”，不要直接用数据极值
 

@@ -18,7 +18,7 @@ if str(PLUGIN_PARENT) not in sys.path:
 import wt_radar  # noqa: E402,F401  (registers Radar components before Scene.from_dict)
 from witwin_server.features.solvers.scene_ref import load_scene_ref  # noqa: E402
 from witwin_server.features.solvers.sdk import method, query, serve  # noqa: E402
-from wt_radar.adapter.solve import SensorSpec, SigProc, SolveRunner, TracerSpec  # noqa: E402
+from wt_radar.adapter.solve import PropagationSpec, SensorSpec, SigProc, SolveRunner  # noqa: E402
 
 _LIVE_CACHES: Dict[str, Dict[str, Any]] = {}
 _MAX_LIVE_CACHES = 8
@@ -36,8 +36,8 @@ def _sensor(config: Dict[str, Any]) -> SensorSpec:
     return SensorSpec(**dict(config.get("sensor") or {}))
 
 
-def _tracer(config: Dict[str, Any]) -> TracerSpec:
-    return TracerSpec(**dict(config.get("tracer") or {}))
+def _propagation(config: Dict[str, Any]) -> PropagationSpec:
+    return PropagationSpec(**dict(config.get("propagation") or {}))
 
 
 def _clamp_index(value: Any, size: int) -> int:
@@ -288,8 +288,7 @@ class LiveSession:
         result = SolveRunner.run(
             snapshot["scene"],
             sensor=_sensor(config),
-            tracer=_tracer(config),
-            motion_sampling="per_frame",
+            propagation=_propagation(config),
             t0=float(snapshot["t0"]),
             live_cache=self._cache,
             cache_key=signature,
@@ -374,7 +373,7 @@ class LiveSession:
 def solve(ctx, scene, config):
     config = config or {}
     sensor = _sensor(config)
-    tracer = _tracer(config)
+    propagation = _propagation(config)
     t0 = float(config.get("t0") or 0.0)
     live = dict(config.get("live") or {})
     live_session_id = str(live.get("session_id") or "")
@@ -388,15 +387,14 @@ def solve(ctx, scene, config):
                 _LIVE_CACHES.pop(session_id, None)
     ctx.log(
         "Radar solver: solve received "
-        f"backend={sensor.backend} device={sensor.device} t0={t0:.6f} "
+        f"device={sensor.device} t0={t0:.6f} "
         f"live_cache={'on' if live_cache is not None else 'off'}"
     )
     ctx.progress(0.0, "building Radar scene")
     result = SolveRunner.run(
         scene,
         sensor=sensor,
-        tracer=tracer,
-        motion_sampling=str(config.get("motion_sampling") or "per_chirp"),
+        propagation=propagation,
         t0=t0,
         live_cache=live_cache,
         cache_key=live_signature or None,
@@ -594,7 +592,7 @@ def _find_radar_component(scene: Any) -> Any:
 
 
 def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
-    """Resolve the bake's sensor/tracer/view settings for one frame.
+    """Resolve the bake's sensor/propagation/view settings for one frame.
 
     An explicit ``config`` wins so a caller can bake a pose the scene does not
     hold. With none -- which is what the generic Timeline "bake" entry sends --
@@ -602,12 +600,12 @@ def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
     self-sufficient and the platform never has to know radar's config shape.
     """
     radar = None
-    if not (config.get("sensor") and config.get("tracer")):
+    if not (config.get("sensor") and config.get("propagation")):
         radar = _find_radar_component(scene)
         if radar is None:
             raise ValueError(
                 "radar bake needs a Radar component in the scene, "
-                "or an explicit sensor/tracer in the bake config"
+                "or explicit sensor/propagation settings in the bake config"
             )
 
     def pick(key: str, attr: str, cast, default):
@@ -619,8 +617,9 @@ def _bake_settings(config: Dict[str, Any], scene: Any) -> Dict[str, Any]:
 
     return {
         "sensor": _sensor(config) if config.get("sensor") else SensorSpec.from_component(radar),
-        "tracer": _tracer(config) if config.get("tracer") else TracerSpec.from_component(radar),
-        "motion_sampling": pick("motion_sampling", "motion_sampling", str, "per_chirp"),
+        "propagation": (
+            _propagation(config) if config.get("propagation") else PropagationSpec.from_component(radar)
+        ),
         "tx": pick("tx_index", "tx_index", int, 0),
         "rx": pick("rx_index", "rx_index", int, 0),
         "static_clutter_removal": pick(
@@ -654,12 +653,7 @@ def bake_sequence(ctx, params):
 
     ctx.log(f"Radar bake: {total} frame(s) channels={list(channels)}")
 
-    # One cache for the whole bake. The radar object and the tracer are keyed on
-    # the sensor/tracer config, which is constant across a bake, so both are
-    # reused; the tracer is rebound to each frame's own scene. The *result*
-    # cache is keyed on cache_key, so a per-frame key keeps a moving scene from
-    # ever replaying an earlier frame, and platform_cache_key stays None because
-    # the sampled geometry differs every frame -- that is the point of baking.
+    # Reuse only the Radar object; every sampled frame carries a distinct scene.
     live_cache: Dict[str, Any] = {}
     emitted = 0
     for index, spec in enumerate(frames):
@@ -672,14 +666,12 @@ def bake_sequence(ctx, params):
         if index == 0:
             ctx.log(
                 f"Radar bake settings: device={settings['sensor'].device} "
-                f"motion_sampling={settings['motion_sampling']} "
                 f"tx={settings['tx']} rx={settings['rx']}"
             )
         result = SolveRunner.run(
             scene,
             sensor=settings["sensor"],
-            tracer=settings["tracer"],
-            motion_sampling=settings["motion_sampling"],
+            propagation=settings["propagation"],
             t0=frame_time,
             live_cache=live_cache,
             cache_key=f"bake:{index}",

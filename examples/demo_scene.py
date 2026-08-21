@@ -1,4 +1,4 @@
-"""A radar ``(Scene, RadarConfig)`` factory for the ``load_platform_scene`` demo.
+"""A current Core ``(DynamicScene, RadarConfig)`` factory for the load demo.
 
 Load it from the editor with factory string ``wt_radar.examples.demo_scene:radar_demo``:
 the radar adapter builds a Radar Settings object (77 GHz FMCW defaults) plus a static
@@ -6,8 +6,7 @@ wall and a moving car target. Press **Simulate** on the Radar Settings object to
 backend and see the range-doppler / point-cloud / MUSIC views in-component (R3).
 
 Units are the platform's native sensor units (MHz/us, us, ksps, dBm, half-wavelength
-antenna locations). The scene device is ``cpu`` so the round trip is portable; the solve
-device comes from the RadarSensor component.
+antenna locations). Core owns the world and Radar owns the sensor configuration.
 """
 from typing import Any, Dict, Tuple
 
@@ -34,21 +33,37 @@ DEMO_CONFIG: Dict[str, Any] = {
 
 
 def radar_demo() -> Tuple[Any, Any]:
-    """Build the demo ``(radar.Scene, RadarConfig)`` pair."""
-    import witwin.radar as wr
+    """Build the demo ``(Core DynamicScene, RadarConfig)`` pair."""
+    import torch
+    import witwin.core as wc
+    from witwin.radar import RadarConfig
 
-    scene = wr.Scene(device="cpu")
-    scene.add_mesh(
+    wall = wc.Structure(
+        wc.Box(position=(0.0, 0.0, -4.0), size=(2.0, 2.0, 0.1)),
+        wc.PhysicalMaterial(eps_r=5.0, name="concrete", material_id=1),
         name="Wall",
-        geometry=wr.Box(position=(0.0, 0.0, -4.0), size=(2.0, 2.0, 0.1)),
-        material=wr.Material(eps_r=5.0, name="concrete"),
+        structure_id=1,
+        material_id=1,
+        assignment_id=1,
+        surface_id=1,
     )
-    scene.add_mesh(
+    car = wc.Structure(
+        wc.Box(position=(0.6, 0.0, -2.5), size=(0.6, 0.4, 0.4)),
+        wc.PhysicalMaterial(eps_r=8.0, name="metal", material_id=2),
         name="Car",
-        geometry=wr.Box(position=(0.6, 0.0, -2.5), size=(0.6, 0.4, 0.4)),
-        material=wr.Material(eps_r=8.0, name="metal"),
-        bsdf={"type": "conductor"},
-        dynamic=True,
+        structure_id=2,
+        material_id=2,
+        assignment_id=2,
+        surface_id=2,
     )
-    config = wr.RadarConfig.from_dict(DEMO_CONFIG)
-    return scene, config
+    scene = wc.Scene(structures=(wall, car))
+    dynamic = wc.DynamicScene(
+        scene,
+        structure_trajectories={
+            2: wc.LinearTrajectory(
+                origin=torch.zeros(3),
+                velocity=torch.tensor((0.2, 0.0, 0.0)),
+            )
+        },
+    )
+    return dynamic, RadarConfig.from_dict(DEMO_CONFIG)

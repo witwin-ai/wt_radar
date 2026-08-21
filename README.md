@@ -1,106 +1,53 @@
 # wt-radar
 
-Round-trips `witwin.radar` solver scenes to and from the witwin-studio editor and runs
-the FMCW radar engine, with in-component signal visualization. It is an independent
-plugin (its own git repo) built on the frozen core base layer
-(`witwin_server.platform_bridge`) — see
-[RADAR_PLUGIN_PLAN.md](../../RADAR_PLUGIN_PLAN.md) and the master
-[PLATFORM_SCENE_INTEGRATION_PLAN.md](../../PLATFORM_SCENE_INTEGRATION_PLAN.md).
+WiTwin Studio plugin for the WiTwin Radar 0.3 scene-driven API. The plugin maps
+ordinary visible Studio meshes to immutable `witwin.core.Scene` structures and runs
+FMCW simulation in the dedicated `witwin_runtime` Conda environment.
 
-This supersedes the old `wt_radar` (fake `SimpleRadar`); history is preserved in this
-same repo.
+## Runtime baseline
 
-## What's special about radar
+- `witwin-radar == 0.3.0`
+- `witwin == 0.4.0` (Core)
+- `witwin-channel == 0.5.0`
+- `rayd == 0.8.0` (`rayd-torch` and `rayd-drjit`)
+- PyTorch 2.10 with CUDA
 
-- **The sensor lives outside the scene.** The load/export contract carries a
-  **`(Scene, RadarConfig)` pair**, unlike maxwell/channel which carry a single scene.
-  `RadarConfig` maps to a singleton **Radar Settings** object.
-- **Mesh-first scene input.** Like channel/maxwell, the live solver walks ordinary
-  visible Studio `Mesh` objects and exports them directly as radar structures. Users do
-  not need radar-specific sidecar components for static targets.
-- **Two independent hierarchies.** The studio `Transform` parent tree is for static
-  pose; the radar **motion graph** (`scene._structure_motions`, a separate acyclic
-  rigid-motion graph) is for time-parameterized dynamics. They are never conflated.
-- **Non-SI sensor units on purpose.** `slope` in MHz/us, times in us, `sample_rate` in
-  ksps, `power` in dBm, antenna locations in half-wavelength units. The component unit
-  pickers keep the stored value in the platform's native unit, so the round trip is
-  exact — values are never silently converted to SI.
+Local plugin checkouts do not install Python requirements. Prepare the solver
+environment separately, then add this plugin path explicitly in Studio.
 
-## Layout
+## Data model
 
-```
-adapter/        RadarAdapter (detect/to_studio/to_platform) + config/structure/motion/solve maps
-components/      Unified Radar, optional RadarMotion, post-processors
-examples/        radar (Scene, RadarConfig) factories for the load demo
-library_items.py drag-to-create prefabs (Radar demo, settings, plain mesh target)
-tests/           per-phase round-trip + live-solve suites
-```
+- The platform payload is `(witwin.core.Scene | DynamicScene, RadarConfig)`.
+- Each exported structure has explicit Core structure/material/assignment/surface IDs.
+- Radar sites are authored with `RadarScatterer.site_offset` in the target object's
+  local frame. Place each site on or just outside a visible surface. The plugin never
+  derives sites from mesh geometry, matching Radar 0.3's explicit-site contract.
+- Scalar RCS, multipath depth, and shared endpoint polarization are authored in the
+  Radar component.
+- Motion uses `DynamicScene` and `LinearTrajectory`.
+- Signal processing uses the typed `witwin.radar.processing` records for range profile,
+  range-Doppler, CFAR, point cloud, and MUSIC.
+- Multi-radar execution is implemented as independent Radar 0.3 solves because the
+  upstream group entry point was removed.
 
-Human/SMPL bodies are owned by the **wt-human** plugin, not radar. A radar scene that
-contains one round-trips through the shared base geometry map (`kind="smpl"`) with no
-radar-side SMPL code; radar's only human-aware feature is the optional `RadarTimeline`
-"motion" source, which renders frames from a human placed by wt-human.
+## Tests
 
-## Phases
-
-| Phase | Scope |
-|-------|-------|
-| R0 | Scaffolding + structures + `(Scene, RadarConfig)` contract |
-| R1 | Full sensor config: antenna pattern / noise / polarization / receiver chain + sensor pose/backend + validation |
-| R2 | Dynamics (`RadarMotion` motion graph + parenting/acyclicity); human geometry is wt-human's |
-| R3 | Tracer + 3 solver backends + single-frame signal viz (range-doppler / point cloud / MUSIC / CFAR) + library items |
-| R4 | Multi-frame timeline (follow-up) |
-| R5 | Polish: `simulate_group`, pluggable post-processors, viewport point cloud (follow-up) |
-
-## Running the tests
-
-The round-trip + solve suites need the radar stack importable (`witwin.radar` /
-`witwin.core`, which pull in drjit + mitsuba; the package eagerly initializes the mitsuba
-CUDA variant) plus `witwin_server` on the path. With those present:
-
-```bash
-# from this directory, in an env that has witwin.radar + witwin.core
-PYTHONPATH=/path/to/witwin-studio/server python -m pytest tests/ -q
-```
-
-If the radar stack can't be imported, the suite skips itself rather than erroring.
-The dirichlet/slang backends require a CUDA device; the pytorch backend runs on CPU.
-
-On Windows, the dirichlet and slang backends compile through SlangTorch and write a
-per-source cache under the external radar package, for example
-`E:\Code\witwin-platform\radar\witwin\radar\solvers\.slangtorch_cache`. If pytest appears
-to hang before any RayD trace logs, check SlangTorch's lock path first. In this workspace
-the non-elevated sandbox could not acquire
-`dirichlet.slangb9c103f6b206b8e5.lock`; clearing `.slangtorch_cache` and running the GPU
-suite with permission to write/lock the external radar package fixed the apparent hang.
-
-## Measuring live stream throughput
-
-Use `tools/live_stream_throughput.py` from the studio repo root to measure the solver-side
-Start Stream path:
+From this plugin directory:
 
 ```powershell
-$env:PYTHONPATH="E:\Code\witwin-studio\server;E:\Code\witwin-studio\plugins;E:\Code\witwin-platform\radar;E:\Code\witwin-platform\core"
-conda run -n witwin2 python plugins\wt_radar\tools\live_stream_throughput.py --profile smoke --frames 20 --warmup-frames 2 --max-fps 30 --channels raw,rd,pc --backend dirichlet --device cuda --resolution 16 --encode-bytes
+$env:PYTHONPATH="E:\Code\witwin-plugins;E:\Code\witwin-studio\server"
+conda run -n witwin_runtime python -m pytest tests -q
 ```
 
-The script drives `solver_host.LiveSession` directly and reports frame FPS, inter-frame
-latency, solve/post-processing timings, channel payload bytes, and timeout/in-flight solve
-state. Use `--profile demo` to test the heavier default demo radar configuration.
+GPU tests require CUDA and the complete Radar/Core/Channel/RayD stack. Hardware tests
+skip explicitly when CUDA is unavailable; adapter and component tests still run.
 
-To measure the frontend component's actual canvas refresh rate, enable the stream widget
-metrics collector in the browser devtools console before starting the stream:
+## Live throughput benchmark
 
-```javascript
-localStorage.setItem("witwinStreamWidgetMetrics", "1");
-window.__WITWIN_STREAM_WIDGET_METRICS__ = undefined;
+```powershell
+conda run -n witwin_runtime python tools\live_stream_throughput.py `
+  --profile smoke --frames 20 --warmup-frames 2 --max-fps 30 `
+  --channels raw,rd,pc --target-rcs-m2 1.0 --encode-bytes
 ```
 
-Reload the app, start the radar stream, then inspect:
-
-```javascript
-window.__WITWIN_STREAM_WIDGET_METRICS__.summary()
-```
-
-That summary is based on completed `canvas` draws in the stream widgets, not on backend
-publish completion.
+Use `--multipath --max-reflections 2` to benchmark reflected paths.

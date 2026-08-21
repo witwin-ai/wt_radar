@@ -9,7 +9,12 @@ from typing import Any, Optional
 import numpy as np
 
 from witwin_server import SceneObject
-from witwin_server.features.platform.bridge import MaterialMap, StructureMap, TransformMap
+from witwin_server.features.platform.bridge import (
+    GeometryMap,
+    MaterialMap,
+    StructureMap,
+    TransformMap,
+)
 from witwin_server.utils.mitsuba_utils import get_world_transform
 
 from .common import render_mesh_arrays
@@ -28,11 +33,11 @@ class RadarStructureMap:
         return obj
 
     @staticmethod
-    def to_platform(obj: SceneObject) -> Optional[Any]:
+    def to_platform(obj: SceneObject, *, identity: int) -> Optional[Any]:
         """Rebuild a ``core.Structure`` from ordinary Studio mesh/material fields."""
-        base = RadarStructureMap._mesh_to_platform(obj)
+        base = RadarStructureMap._mesh_to_platform(obj, identity=identity)
         if base is None and obj.get_component("PlatformGeometry") is not None:
-            base = StructureMap.to_platform(obj)
+            base = RadarStructureMap._platform_geometry_to_platform(obj, identity=identity)
         if base is None:
             return None  # cameras / lights / empties (e.g. the Radar Settings object)
 
@@ -51,6 +56,47 @@ class RadarStructureMap:
             enabled=bool(base.enabled),
             tags=tuple(base.tags),
             metadata=metadata,
+            structure_id=identity,
+            material_id=identity,
+            assignment_id=identity,
+            surface_id=identity,
+        )
+
+    @staticmethod
+    def _platform_geometry_to_platform(obj: SceneObject, *, identity: int) -> Any:
+        """Rebuild a Studio platform primitive using current Core identities/materials."""
+        import witwin.core as wc
+
+        geom = obj.get_component("PlatformGeometry")
+        transform = obj.get_component("Transform")
+        vertices = faces = None
+        if str(geom.kind) == "mesh":
+            mesh = obj.get_component("Mesh")
+            if mesh is not None and not mesh.is_empty:
+                vertices = mesh.get_vertices_numpy()
+                faces = mesh.get_faces_numpy()
+        geometry = GeometryMap.to_platform(
+            geom,
+            RadarStructureMap._list(transform.position),
+            TransformMap.euler_to_quat(transform.rotation),
+            vertices=vertices,
+            faces=faces,
+        )
+        meta = obj.get_component("StructureMeta")
+        return wc.Structure(
+            geometry,
+            RadarStructureMap._material_to_platform(
+                obj.get_component("Material"), identity=identity
+            ),
+            name=obj.name,
+            priority=int(meta.priority) if meta is not None else 0,
+            enabled=bool(meta.enabled) if meta is not None else bool(obj.visible),
+            tags=tuple(str(tag) for tag in meta.tags) if meta is not None else (),
+            metadata=dict(meta.metadata) if meta is not None else {},
+            structure_id=identity,
+            material_id=identity,
+            assignment_id=identity,
+            surface_id=identity,
         )
 
     @staticmethod
@@ -83,7 +129,7 @@ class RadarStructureMap:
         return obj
 
     @staticmethod
-    def _mesh_to_platform(obj: SceneObject) -> Optional[Any]:
+    def _mesh_to_platform(obj: SceneObject, *, identity: int) -> Optional[Any]:
         import witwin.core as wc
 
         if not obj.visible:
@@ -101,8 +147,38 @@ class RadarStructureMap:
         material = obj.get_component("Material")
         return wc.Structure(
             geometry,
-            MaterialMap.to_platform(material) if material is not None else wc.Material(),
+            RadarStructureMap._material_to_platform(material, identity=identity),
             name=obj.name,
+            structure_id=identity,
+            material_id=identity,
+            assignment_id=identity,
+            surface_id=identity,
+        )
+
+    @staticmethod
+    def _material_to_platform(material: Any, *, identity: int) -> Any:
+        """Build the current Core physical material without the legacy ``Material`` alias."""
+        import witwin.core as wc
+
+        if material is None:
+            return wc.PhysicalMaterial(material_id=identity)
+        eps = material.eps_r
+        if hasattr(eps, "detach"):
+            eps = eps.detach().cpu()
+        if hasattr(eps, "tolist"):
+            eps = eps.tolist()
+        if isinstance(eps, (list, tuple)):
+            eps = complex(float(eps[0]) if eps else 1.0, float(eps[1]) if len(eps) > 1 else 0.0)
+        else:
+            eps = complex(eps)
+        eps_r = eps if eps.imag != 0.0 else eps.real
+        name = str(material.material_name) if material.material_name else None
+        return wc.PhysicalMaterial(
+            eps_r=eps_r,
+            mu_r=float(material.mu_r),
+            sigma_e=float(material.sigma_e),
+            name=name,
+            material_id=identity,
         )
 
     @staticmethod

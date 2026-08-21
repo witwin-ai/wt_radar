@@ -112,15 +112,22 @@ class BenchmarkContext:
 
 def bootstrap_paths(platform_root: str | None = None) -> None:
     """Make local studio server/plugins and optional witwin-platform packages importable."""
-    studio_root = Path(__file__).resolve().parents[3]
+    code_root = Path(__file__).resolve().parents[3]
+    studio_root = code_root / "witwin-studio"
+    plugin_root = Path(__file__).resolve().parents[1]
     candidates = [
         studio_root / "server",
-        studio_root / "plugins",
+        plugin_root.parent,
     ]
     platform_value = platform_root or os.environ.get("WITWIN_PLATFORM_ROOT")
     platform_path = Path(platform_value) if platform_value else Path("E:/Code/witwin-platform")
     if platform_path.exists():
-        candidates.extend([platform_path / "radar", platform_path / "core"])
+        candidates.extend([
+            platform_path / "radar",
+            platform_path / "core",
+            platform_path / "channel",
+            platform_path / "RayD",
+        ])
     for path in candidates:
         if path.exists() and str(path) not in sys.path:
             sys.path.insert(0, str(path))
@@ -257,16 +264,13 @@ def build_studio_scene(args: argparse.Namespace):
     scene.end_batch()
 
     radar = settings.get_component("Radar")
-    radar.backend = str(args.backend)
-    radar.device = str(args.device)
-    radar.resolution = int(args.resolution)
-    radar.sampling = str(args.sampling)
-    radar.ray_batch_size = int(args.ray_batch_size)
+    radar.target_rcs_m2 = float(args.target_rcs_m2)
+    radar.multipath = bool(args.multipath)
+    radar.max_reflections = int(args.max_reflections)
     radar.stream_channels = str(args.channels)
     radar.stream_max_fps = float(args.max_fps)
     radar.stream_history_length = 1
     radar.stream_on_change_only = False
-    radar.motion_sampling = "per_frame"
     return scene, radar
 
 
@@ -275,7 +279,7 @@ def install_timing_hooks(solver_host) -> tuple[Dict[str, Any], Callable[[], None
 
     timings: Dict[str, Any] = {
         "solve_ms": [],
-        "to_platform_ms": [],
+        "build_export_ms": [],
         "build_radar_ms": [],
         "wait_remaining_ms": [],
         "wait_ms": [],
@@ -287,7 +291,7 @@ def install_timing_hooks(solver_host) -> tuple[Dict[str, Any], Callable[[], None
     }
     original_run = solver_host.SolveRunner.run
     original_wait_until = solver_host._wait_until
-    original_to_platform = RadarAdapter.to_platform
+    original_build_export = RadarAdapter.build_export
     original_build_radar = solver_host.SolveRunner.build_radar
     original_rd = solver_host.SigProc.range_doppler
     original_pc = solver_host.SigProc.point_cloud
@@ -318,8 +322,8 @@ def install_timing_hooks(solver_host) -> tuple[Dict[str, Any], Callable[[], None
             timings["active_stage"] = None
             timings["active_stage_started"] = None
 
-    def timed_to_platform(self, *args, **kwargs):
-        return timed_stage("RadarAdapter.to_platform", "to_platform_ms", original_to_platform, self, *args, **kwargs)
+    def timed_build_export(self, *args, **kwargs):
+        return timed_stage("RadarAdapter.build_export", "build_export_ms", original_build_export, self, *args, **kwargs)
 
     def timed_build_radar(*args, **kwargs):
         return timed_stage("SolveRunner.build_radar", "build_radar_ms", original_build_radar, *args, **kwargs)
@@ -349,7 +353,7 @@ def install_timing_hooks(solver_host) -> tuple[Dict[str, Any], Callable[[], None
 
     solver_host.SolveRunner.run = staticmethod(timed_run)
     solver_host._wait_until = timed_wait_until
-    RadarAdapter.to_platform = timed_to_platform
+    RadarAdapter.build_export = timed_build_export
     solver_host.SolveRunner.build_radar = staticmethod(timed_build_radar)
     solver_host.SigProc.range_doppler = staticmethod(timed_rd)
     solver_host.SigProc.point_cloud = staticmethod(timed_pc)
@@ -357,7 +361,7 @@ def install_timing_hooks(solver_host) -> tuple[Dict[str, Any], Callable[[], None
     def restore() -> None:
         solver_host.SolveRunner.run = staticmethod(original_run)
         solver_host._wait_until = original_wait_until
-        RadarAdapter.to_platform = original_to_platform
+        RadarAdapter.build_export = original_build_export
         solver_host.SolveRunner.build_radar = staticmethod(original_build_radar)
         solver_host.SigProc.range_doppler = staticmethod(original_rd)
         solver_host.SigProc.point_cloud = staticmethod(original_pc)
@@ -420,11 +424,9 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
         "requested_frames": requested_frames,
         "target_max_fps": float(args.max_fps),
         "profile": args.profile,
-        "backend": args.backend,
-        "device": args.device,
-        "resolution": int(args.resolution),
-        "sampling": args.sampling,
-        "ray_batch_size": int(args.ray_batch_size),
+        "target_rcs_m2": float(args.target_rcs_m2),
+        "multipath": bool(args.multipath),
+        "max_reflections": int(args.max_reflections),
         "encode_bytes": bool(args.encode_bytes),
         "simulate_sdk_base64": bool(args.simulate_sdk_base64),
         "timeout_reached": bool(timeout_reached),
@@ -432,7 +434,7 @@ def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
         "last_completed_solve_elapsed_s": timings.get("active_solve_elapsed_s"),
         "active_stage": timings.get("active_stage"),
         "active_stage_elapsed_s": active_stage_elapsed,
-        "to_platform_ms": stats(timings["to_platform_ms"]),
+        "build_export_ms": stats(timings["build_export_ms"]),
         "build_radar_ms": stats(timings["build_radar_ms"]),
         "wait_remaining_ms": stats(timings["wait_remaining_ms"]),
         "wait_ms": stats(timings["wait_ms"]),
@@ -452,11 +454,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--max-fps", type=float, default=30.0)
     parser.add_argument("--channels", default="raw,rd,pc")
-    parser.add_argument("--backend", default="dirichlet")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--resolution", type=int, default=128)
-    parser.add_argument("--sampling", default="triangle")
-    parser.add_argument("--ray-batch-size", type=int, default=65536)
+    parser.add_argument("--target-rcs-m2", type=float, default=1.0)
+    parser.add_argument("--multipath", action="store_true")
+    parser.add_argument("--max-reflections", type=int, default=1)
     parser.add_argument("--adc-samples", type=int)
     parser.add_argument("--chirps", type=int)
     parser.add_argument("--range-bins", type=int)

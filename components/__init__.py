@@ -6,6 +6,7 @@ foldout groups; optional motion and the polymorphic post-processor hierarchy sta
 separate because they live on other scene objects.
 """
 from .motion import RadarMotionComponent
+from .scatterer import RadarScattererComponent
 from .post_processing import (
     PointCloudProcessorComponent,
     RadarPostProcessorComponent,
@@ -16,6 +17,7 @@ from .radar import RadarComponent
 __all__ = [
     "RadarComponent",
     "RadarMotionComponent",
+    "RadarScattererComponent",
     "RadarPostProcessorComponent",
     "RangeDopplerProcessorComponent",
     "PointCloudProcessorComponent",

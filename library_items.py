@@ -2,12 +2,13 @@
 
 Registers a ``Radar`` category with:
 
-- **Radar (Demo)** — a Radar Settings object (77 GHz FMCW defaults + sensor pose/backend
-  + tracer + the Simulate button) plus a plain static box target, so dropping it in is
+- **Radar (Demo)** — a Radar Settings object (77 GHz FMCW defaults + sensor pose,
+  scattering, and propagation settings) plus a plain static box target, so dropping it in is
   immediately simulable: press **Simulate** on the Radar Settings object to see the
   range-doppler / point-cloud views in-component.
 - **Radar Settings** — just the sensor singleton, to compose a custom scene.
-- **Radar Target** — a plain box mesh with radar-friendly material defaults.
+- **Radar Target** — a box mesh with radar-friendly material and one explicitly
+  authored surface scatter site.
 
 Human/SMPL bodies are owned by the wt-human plugin, not radar; a radar scene that contains
 one round-trips through the shared base geometry map with no radar-side SMPL code.
@@ -23,14 +24,16 @@ _CATEGORY = "radar"
 
 
 def _settings_object(name="Radar Settings"):
-    # The Radar Settings singleton with default 77 GHz FMCW config + sensor/tracer/result.
+    # The Radar Settings singleton with default 77 GHz FMCW + propagation settings.
     obj = ConfigMap.settings_to_studio(None)
     obj.name = name
     return obj
 
 
 def _target_object(name="Radar Target"):
-    # A plain Studio mesh: the adapter exports visible meshes directly as radar structures.
+    # Structures remain ordinary Studio meshes; Radar 0.3 requires scatter sites to be
+    # declared explicitly rather than derived from geometry.
+    from .components.scatterer import RadarScattererComponent
     from witwin_server import SceneObject
 
     obj = SceneObject(name=name, mesh_type="Cube")
@@ -39,8 +42,12 @@ def _target_object(name="Radar Target"):
     transform.scale = [0.6, 0.4, 0.4]
     material = obj.get_component("Material")
     if material is not None:
-        material.eps_r = 8.0
+        material.eps_r = [8.0, 0.0]
         material.material_name = "metal"
+    scatterer = obj.add_component(RadarScattererComponent())
+    # Local +Z is the face nearest the default sensor at the origin. A small clearance
+    # avoids classifying the declared site as inside the closed box.
+    scatterer.site_offset = [0.0, 0.0, 0.5025]
     return obj
 
 
@@ -49,7 +56,7 @@ def _target_object(name="Radar Target"):
 def _make_demo(ctx):
     settings = _settings_object(ctx.name)
     # Unique the target name so dropping the demo more than once does not produce two
-    # structures with the same name (the platform wr.Scene.add_structure rejects dups).
+    # structures with the same name.
     base = "Radar Target"
     existing = {obj.name for obj in ctx.scene.objects.values()}
     name = base
@@ -81,7 +88,7 @@ def register() -> None:
                           description="FMCW sensor config + Simulate button (build your own scene)")
     Library.register_item("radar_target", "Radar Target", _CATEGORY,
                           icon="box", object_type="mesh", factory=_make_target,
-                          description="A plain box mesh exported directly as a radar structure")
+                          description="Box target with an explicit surface scatter site")
 
 
 register()
