@@ -12,6 +12,13 @@ enabled = true
 [engines]
 witwin = "^1.0.0"
 
+[[contributes.tools]]
+module = "agent_tools"
+register = "register"
+
+[permissions]
+tools = ["read", "soft_write", "scene_write", "execute", "file_write"]
+
 [[contributes.solvers]]
 id = "witwin.radar.simulate"
 title = "Radar FMCW"
@@ -27,4 +34,4 @@ python = "${backend:python}"
 [contributes.solvers.capabilities]
 cancel = true
 partials = true
-query = ["raw_signal", "range_doppler", "point_cloud", "music"]
+query = ["raw_signal", "range_doppler", "point_cloud", "music", "snapshot_view", "animation_view", "animation_export", "animation_replay", "animation_manifest"]

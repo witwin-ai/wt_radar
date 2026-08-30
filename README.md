@@ -1,5 +1,132 @@
 # wt-radar
 
+## Studio baked-skin animation (native Radar 0.3)
+
+The **Studio Animation → Simulate Animation** button submits a detached copy of
+the current open scene, including unsaved geometry and the baked timeline.
+It uses the existing Studio skinning implementation and passes world-space
+surface positions and velocities through native `Kinematics` / `two_way_duals`.
+No Radar/Channel propagation or DSP equations are replaced.
+
+1. Open a furnished scene with an existing skinned character and baked Motion
+   Matching timeline. Pause playback/recording. Do not create a second character.
+2. Add or select **Library → Radar → Radar Settings** in that scene. Its Transform
+   is the simulated sensor pose; local -Z is forward. Place it at the intended
+   height and orient it toward the target in your own room. TX/RX antenna offsets
+   are relative to this pose.
+3. Set **Snapshot Target Id** to the existing skin ID (e.g. `catstray`). For
+   Animation, Snapshot Local Point is not used: one fixed surface vertex per
+   influenced bone is selected from bind geometry. Native Channel discovery is
+   run at every requested frame. Only stable site IDs with both inbound and
+   outbound paths for the whole interval are active. The assumed RCS is divided
+   by all originally declared sites; excluded sites' shares are not moved onto
+   visible sites. This is not a calibrated animal RCS or full skin EM.
+4. Set **T0**, **Animation Duration S**, and **Animation Fps** precisely. The
+   interval must fit the baked timeline; duration × FPS must be an integer.
+   Maximum duration/FPS is 30 seconds/30 Hz and raw result memory is capped at
+   1536 MiB, with an additional available-memory preflight. Unsupported settings
+   fail; they are never silently reduced.
+5. Leave extra environment reflections at zero, multipath/noise/CFAR/clutter
+   removal off. Click **Simulate Animation**. This is distinct from **Simulate**,
+   which remains the single-point frozen diagnostic. Legacy Stream/Generate
+   Frames are not the Studio animation path.
+6. Choose **range_profile**, **range_spectrum** or **range_doppler** and change
+   **Animation Frame Index**. Plots carry physical axes and recorded timestamps;
+   this control does not seek or rewrite the editor timeline.
+7. Click **Export Animation Result**. The validated complex result is copied to
+   a unique `.npz` under the project's `results/radar-animation/`, not disposable
+   solver cache. It includes native cube/axes, times, sites, velocities and model
+   metadata. Existing files are not overwritten. Saved-result replay supports
+   Range Profile/Spectrum/Doppler through the native processing API.
+8. Click **Prepare Synchronized Replay** after a completed animation or after
+   **Load Saved Result**. The existing numeric LineChart/Heatmap widgets display
+   the data directly, without matplotlib or per-frame image files. Use the
+   widget's **Maximize** to open it beside the room, leave **Follow scene time**
+   on, then seek/play the room's **Timeline** within the recorded interval.
+   The widget can switch between Range Profile and Range Doppler locally.
+   Outside the interval it explicitly shows no recorded measurement. Manual
+   widget review does not move the cat. Global amplitude limits are fixed across
+   the recording; values are not calibrated animal reflectivity.
+9. In Studio's recorded signal widget, **Download Comparison…** opens a
+   download-only exporter for the radar-view room reference, Range Profile and
+   Range Doppler. Pause the timeline and keep that room's viewport open, then
+   export the selected PNG, full MP4, or all PNGs in a ZIP. Comparison is not a
+   live preview tab; generation visits the saved measurement times explicitly
+   and does not run another simulation. The ordinary RP/RD previews remain live.
+
+Prepared numeric replay assets (128 MiB maximum) persist in the project's hidden
+runtime storage; when the scene is saved, its Figure can replay those bytes after
+a backend restart without rerunning simulation. Native solver handles and the
+component's live status labels are transient, however. Keep the exported NPZ as
+the durable user-owned result; use **Load Saved Result** if replay must be prepared
+again (for example after runtime cache cleanup). New recordings verify authored
+motion tracks at preparation, not full geometry or later edits. A recording from
+another scene is rejected; older recordings without a motion fingerprint are
+explicitly unverified. Replay does not support CFAR or clutter-removal toggles.
+
+### Strict failure boundaries
+
+Only LINEAR baked target/bone Transform tracks and a static sensor/room are
+supported. Other animated geometry, incomplete rigs, inconsistent hierarchy,
+nonfinite data, oversized results, overlapping CPIs and Doppler aliasing fail.
+Velocities are finite differences of the exact Studio world skin (at most 1 ms,
+right-hand at knots), not a second motion interpolation. Native per-CPI synthesis
+uses frozen weights with first-order carrier rate, not arbitrary within-CPI
+acceleration. Static room occlusion remains enabled; static room clutter,
+additional room bounces and target self-occlusion are not included.
+
+**Native topology boundary:** Radar 0.3 requires every site submitted for a
+frame to have discovered inbound and outbound legs. Before waveform synthesis,
+this interface therefore uses native Channel discovery over the exact requested
+frame grid and takes the intersection of reachable stable site IDs. It never
+invents paths, fills missing returns with zeros, or redistributes an excluded
+site's RCS. The result metadata records declared, active and occluded sites plus
+per-frame discovery evidence. If no site remains reachable for the whole
+interval, preflight fails before GPU waveform synthesis. This is a conservative
+measurement-interface policy, not a change to Channel propagation or Radar DSP.
+
+Focused tests:
+`python -m pytest -q tests/test_snapshot.py tests/test_saved_result.py tests/test_animation.py tests/test_animation_component.py`
+
+## Radar 0.3 Studio snapshot milestone
+
+**Simulate** now submits the current Studio scene through the existing solver
+worker to native Radar 0.3 / Channel 0.5. Select an existing **Snapshot Target ID**,
+explicit local point, assumed scalar RCS, and snapshot timeline time. Pause playback
+and recording first. The solver samples a copy, never the editor scene.
+
+This is deliberately a **single explicit point, frozen-pose diagnosis**, not a
+moving-cat measurement. The target mesh is replaced by that point; no target
+self-occlusion, skin scattering, gait Doppler, static room clutter, or extra
+environment reflections are claimed. Other visible unmodelled SkinnedMeshes are
+refused. Parent transforms and visibility are respected. Existing room meshes
+remain in the native propagation scene as occluders. RCS is an explicit uncalibrated
+assumption. Legacy tracer/noise/polarization/receiver options are not mapped by this
+milestone and unsupported settings fail instead of being silently ignored.
+
+Range Profile and Range Spectrum use the official processing API and physical
+range coordinates. Range Doppler also uses official DSP. All three views now use
+numeric Figure data and the shared native LineChart/Heatmap widgets. Physical
+axes, tiny-amplitude limits and scientific-notation labels are supported without
+normalization or changes to RF/DSP values.
+Stream and Generate Frames remain blocked;
+they are not the Studio skeletal timeline adapter.
+
+Run `python -m pytest -q tests/test_snapshot.py tests/test_saved_result.py` in the
+Studio/Radar environment. The snapshot tests include actual CUDA repeatability and
+a moved-sensor range-peak check; absence of CUDA is a skipped GPU check, not success.
+
+## Current Radar 0.3 saved-result UI milestone
+
+The `codex/radar-result-ui-bridge` branch adds **Saved GPU Result** to the existing
+Radar component. It replays metadata-bearing NPZ results through the official
+`witwin.radar.processing.range_profile` API and the existing Figure widget.
+Use **Load Saved Result**, then **Prepare Synchronized Replay**, to inspect a
+previous export in Studio. Saved replay is separate from the snapshot solver
+above. Start Stream and Generate Frames still fail explicitly on Radar 0.3.
+
+## Historical legacy adapter documentation (not Radar 0.3 support)
+
 Round-trips `witwin.radar` solver scenes to and from the witwin-studio editor and runs
 the FMCW radar engine, with in-component signal visualization. It is an independent
 plugin (its own git repo) built on the frozen core base layer

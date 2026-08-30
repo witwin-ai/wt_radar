@@ -22,6 +22,7 @@ is hidden from the UI; tests / scripts can still override ``backend`` / ``device
 """
 from dataclasses import asdict
 import asyncio
+import copy
 import json
 import threading
 import time
@@ -63,7 +64,7 @@ from ..adapter.solve import SensorSpec, SigProc, TracerSpec
 logger = get_logger("Radar")
 
 _CAT = "Simulation/Radar"
-_VIEWS = ["raw_signal", "range_doppler", "point_cloud", "music"]
+_VIEWS = ["range_profile", "range_spectrum", "raw_signal", "range_doppler", "point_cloud", "music"]
 
 # Foldout group ids (also used in string `show_if`/`hide_if` lookups by field name).
 _CONFIG = "Configuration"   # FMCW core: frequency/power + ADC + chirp/frame + FFT bins
@@ -75,6 +76,9 @@ _RECEIVER = "Receiver"
 _SOLVE = "Solve"
 _POSTPROC = "PostProcessing"   # signal views + detector/CFAR run on the solved signal
 _TIMELINE = "Timeline"
+_SAVED = "SavedResult"
+_SNAPSHOT = "SnapshotTarget"
+_ANIMATION = "StudioAnimation"
 
 # show_if / hide_if dict conditions reused across multiple fields.
 _PIXEL = {"field_name": "sampling", "operator": "eq", "value": "pixel"}
@@ -107,6 +111,13 @@ class RadarComponent(Component):
     _live_generation = 0
     _live_session_id = ""
     _auto_refreshing_view = False
+    _saved_result = None
+    _snapshot_result = False
+    _snapshot_running = False
+    _animation_result = False
+    _animation_view_generation = 0
+    _replay_preparing = False
+    _export_running = False
     _POSTPROC_AUTO_REFRESH_FIELDS = frozenset({
         "view",
         "tx_index",
@@ -129,11 +140,14 @@ class RadarComponent(Component):
 
     define_group(foldout_group(_CONFIG, display_name="Configuration"))
     define_group(foldout_group(_ANTENNA, display_name="Antenna"))
-    define_group(foldout_group(_TRACER, display_name="Ray Tracer"))
-    define_group(foldout_group(_NOISE, display_name="Noise Model", collapsed=True))
-    define_group(foldout_group(_POLARIZATION, display_name="Polarization", collapsed=True))
-    define_group(foldout_group(_RECEIVER, display_name="Receiver Chain", collapsed=True))
+    define_group(foldout_group(_TRACER, display_name="Legacy Ray Tracer (not snapshot sampling)", collapsed=True))
+    define_group(foldout_group(_NOISE, display_name="Legacy Noise (unsupported in snapshots)", collapsed=True))
+    define_group(foldout_group(_POLARIZATION, display_name="Legacy Polarization (unsupported in snapshots)", collapsed=True))
+    define_group(foldout_group(_RECEIVER, display_name="Legacy Receiver (unsupported in snapshots)", collapsed=True))
     define_group(foldout_group(_SOLVE, display_name="Solve"))
+    define_group(foldout_group(_SNAPSHOT, display_name="Target & Scattering Model (Radar 0.3)"))
+    define_group(foldout_group(_ANIMATION, display_name="Studio Animation"))
+    define_group(foldout_group(_SAVED, display_name="Saved GPU Result"))
     define_group(foldout_group(_POSTPROC, display_name="Post Processing"))
     define_group(foldout_group(_TIMELINE, display_name="Timeline", collapsed=True))
 
@@ -197,7 +211,7 @@ class RadarComponent(Component):
 
     # --- antenna pattern sub-config (RadarAntennaPattern) -------------------
     use_default = bool_field(True, group=_ANTENNA,
-                             description="Use the default half-wave dipole pattern")
+                             description="Use Radar's unconfigured antenna pattern (no custom gain map)")
     pattern_kind = string_field("separable", options=["separable", "map"], enum_toggle=True,
                                 hide_if="use_default", group=_ANTENNA,
                                 description="Separable per-axis cuts or a 2D gain map")
@@ -271,8 +285,8 @@ class RadarComponent(Component):
 
     # --- solve (RadarResult) ------------------------------------------------
     motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
-                                   group=_SOLVE, description="Re-trace per chirp or per frame")
-    t0 = float_field(0.0, group=_SOLVE, description="Solve start time (s)")
+                                   group=_SOLVE, hidden=True, description="Legacy only; snapshots freeze all motion")
+    t0 = float_field(0.0, group=_SOLVE, description="Snapshot timeline time (s); pose is frozen for the whole measurement")
     stream_max_fps = float_field(30.0, min=0.1, max=30.0, group=_SOLVE,
                                  description="Maximum realtime stream solves per second")
     stream_channels = string_field("rd", group=_SOLVE,
@@ -301,12 +315,45 @@ class RadarComponent(Component):
         group=_SOLVE,
         hide_label=True,
         show_header=False,
+        hide_if="saved_result_loaded",
     )
     signal_figure = figure(
         title="Radar Signal",
         group=_SOLVE,
         hide_if={"field_name": "stream_status", "operator": "in", "value": ["running", "paused"]},
     )
+
+    saved_result_path = string_field("", group=_SAVED,
+                                     description="Absolute path to a metadata-bearing radar_cube.npz")
+    saved_frame_index = int_field(0, min=0, group=_SAVED, description="Recorded frame index (not a simulation time)")
+    saved_chirp_index = int_field(0, min=0, group=_SAVED, description="Recorded chirp to display; no averaging")
+    saved_result_loaded = bool_field(False, readonly=True, hidden=True, transient=True, group=_SAVED)
+    saved_result_status = string_field("No saved result loaded", readonly=True, transient=True, group=_SAVED)
+
+    snapshot_model = string_field("One explicit RCS point; frozen pose, NO gait Doppler", readonly=True,
+                                  group=_SNAPSHOT, transient=True)
+    snapshot_target_id = string_field("", group=_SNAPSHOT,
+                                     description="Exact existing target ID. Snapshot uses one local point; Animation samples this object's skin.")
+    snapshot_local_point = vector3_field([0.0, 0.0, 0.0], group=_SNAPSHOT,
+                                        description="Authored local point in metres before object/parent scale; NOT an automatically sampled skin point.")
+    snapshot_rcs_m2 = float_field(0.1, min=0.0, group=_SNAPSHOT,
+                                  description="Assumed scalar RCS in square metres; not a calibrated cat value.")
+    snapshot_polarization = vector3_field([0.0, 1.0, 0.0], group=_SNAPSHOT,
+                                          description="World-space polarization for both propagation legs.")
+    snapshot_status = string_field("Not run. Simulate freezes the scene at Solve Start Time; LOS only.",
+                                   readonly=True, transient=True, group=_SNAPSHOT)
+    animation_duration_s = float_field(5.0, min=0.01, group=_ANIMATION,
+                                       description="Exact baked timeline duration (0..30 seconds), starting at t0.")
+    animation_fps = float_field(10.0, min=1.0, group=_ANIMATION,
+                                description="Actual independent GPU measurements per second (1..30), not repeated video frames.")
+    animation_frame_index = int_field(0, min=0, group=_ANIMATION,
+                                      description="Recorded result frame. Does not seek or modify the editor timeline.")
+    animation_status = string_field("Not run. Uses existing baked skin animation; LOS only, no extra room bounces.",
+                                    readonly=True, transient=True, group=_ANIMATION)
+    animation_export_path = string_field("", readonly=True, transient=True, group=_ANIMATION,
+                                         description="Exported native complex cube, times, skin positions/velocities and physical axes (.npz).")
+    replay_status = string_field("Not prepared. Uses this room's Timeline and numeric widgets.",
+                                 readonly=True, transient=True, group=_ANIMATION)
 
     # --- post processing: signal views + detector/CFAR (RadarResult) --------
     view = string_field("range_doppler", options=_VIEWS, enum_toggle=True, group=_POSTPROC,
@@ -346,6 +393,8 @@ class RadarComponent(Component):
 
     def on_draw_gizmos(self, ctx: GizmoContext) -> None:
         """Sphere at the sensor origin + an FOV/range cone along local -Z (Transform rotates it)."""
+        if self._saved_result is not None:
+            return  # A review object's Transform is not the recorded sensor pose.
         ctx.color = "#ffd400"
         ctx.draw_sphere(radius=0.05)
         ctx.draw_cone(fov="fov", range=self._max_range(), segments=4,
@@ -353,6 +402,28 @@ class RadarComponent(Component):
 
     def on_value_change(self, field_name, _old_value, _new_value):
         """Refresh solved post-processing previews when view controls change."""
+        if field_name == "saved_result_path" and self._saved_result is not None:
+            self._saved_result = None
+            self.saved_result_loaded = False
+            self.saved_result_status = "Result path changed; click Load Saved Result"
+            self.signal_figure.clear()
+            return
+        if self._saved_result is not None:
+            if field_name in self._POSTPROC_AUTO_REFRESH_FIELDS | {"saved_frame_index", "saved_chirp_index"}:
+                self.update_view()
+            return
+        if self._animation_result:
+            if field_name in self._POSTPROC_AUTO_REFRESH_FIELDS | {"animation_frame_index"}:
+                self.update_view()
+            elif field_name not in {"animation_status", "animation_export_path", "snapshot_status", "signal_figure", "replay_status"}:
+                self.animation_status = "Settings changed. Showing the recorded run; click Simulate Animation to recompute."
+            return
+        if self._snapshot_result:
+            if field_name in self._POSTPROC_AUTO_REFRESH_FIELDS:
+                self.update_view()
+            elif field_name not in {"snapshot_status", "signal_figure"}:
+                self.snapshot_status = "Settings changed. Display is the previous recorded snapshot; click Simulate to recompute."
+            return
         if field_name not in self._POSTPROC_AUTO_REFRESH_FIELDS:
             return
         if getattr(self, "_auto_refreshing_view", False):
@@ -375,7 +446,62 @@ class RadarComponent(Component):
             self._auto_refreshing_view = False
 
     def _has_preview_result(self):
-        return bool(getattr(self, "_solver_result_handle", "")) or getattr(self, "_signal", None) is not None
+        return self._saved_result is not None or bool(getattr(self, "_solver_result_handle", "")) or getattr(self, "_signal", None) is not None
+
+    @button(display_name="Load Saved Result", group=_SAVED)
+    def load_saved_result(self):
+        """Load exported producer metadata and reuse the existing figure UI."""
+        from ..adapter.saved_result import SavedRadarResult
+        if self._snapshot_running or self._export_running or self._replay_preparing or str(self.stream_status) in {"running", "paused"}:
+            raise ValueError("Stop the running solve/live stream before loading a saved result.")
+        self._saved_result = None
+        self._last_animation_view_metadata = {}
+        self._snapshot_result = False
+        self._animation_result = False
+        self._animation_view_generation += 1
+        self.animation_export_path = ""
+        self.saved_result_loaded = False
+        self._signal = None
+        self._frames = None
+        self._radar = None
+        self._solver_result_handle = ""
+        self._clear_query_cache()
+        self.signal_source = None
+        self.signal_stream = None
+        self.signal_figure.clear()
+        self.saved_result_status = "Loading saved result"
+        try:
+            result = SavedRadarResult.load(str(self.saved_result_path))
+        except Exception as exc:
+            self.saved_result_status = f"Load failed: {exc}"
+            raise
+        self.view = "range_profile"
+        self.tx_index = 0
+        self.rx_index = 0
+        self.static_clutter_removal = False
+        self.show_cfar = False
+        self.saved_frame_index = 0
+        self.saved_chirp_index = 0
+        self._saved_result = result
+        self.saved_result_loaded = True
+        self.saved_result_status = (
+            f"{len(result.times_s)} frames, {result.times_s[0]:.4f}..{result.times_s[-1]:.4f}s | "
+            f"{result.axes.waveform}/{result.axes.output_domain} | "
+            f"{result.producer.get('scene_id', 'unknown scene')} | "
+            f"{result.producer.get('physical_model', 'unspecified physical model')}"
+        )
+        return self.update_view()
+
+    @staticmethod
+    def _require_legacy_solver():
+        # The historical live adapter has not been ported to Radar 0.3. This
+        # is an explicit UI boundary, not a compatibility shim or fallback.
+        import importlib.util
+        if importlib.util.find_spec("witwin.radar.sigproc") is None:
+            raise RuntimeError(
+                "This plugin's legacy Stream/Generate adapter is not connected to Radar 0.3. "
+                "Use Simulate for a frozen-point snapshot or Load Saved Result for replay. No solver or DSP fallback is performed."
+            )
 
     def _max_range(self) -> float:
         return Derived.compute(self)["max_range_m"]
@@ -385,6 +511,15 @@ class RadarComponent(Component):
     @button(display_name="Show Derived Values", group=_ANTENNA)
     def show_derived(self):
         """Report the derived range/doppler resolution + max range/doppler."""
+        if self._saved_result is not None:
+            axes = self._saved_result.axes
+            msg = (
+                f"Saved producer axes: range bin {axes.range_bin_m:.6f} m; "
+                f"velocity bin {axes.velocity_bin_mps:.6f} m/s. "
+                "Current Configuration fields do not reinterpret this saved result."
+            )
+            Notifications.info("Radar", msg)
+            return msg
         d = Derived.compute(self)
         msg = (f"range res {d['range_resolution_m']:.4f} m | max range {d['max_range_m']:.2f} m | "
                f"doppler res {d['doppler_resolution_mps']:.4f} m/s | "
@@ -404,41 +539,231 @@ class RadarComponent(Component):
             return asyncio.run(_run())
         return _run()
 
-    async def _simulate_async(self):
-        """Rebuild + solve the live scene, keep the signal, and render the current view."""
-        logger.info("=== Simulate clicked ===")
-        spec = SensorSpec.from_component(self)
-        logger.info(f"Sensor pose:  position={spec.position}  target={spec.target}  up={spec.up}")
-        logger.info(f"Sensor:       backend={spec.backend} device={spec.device} fov={spec.fov}")
-        run = await asyncio.to_thread(
-            api.solvers.solve,
-            "witwin.radar.simulate",
-            scene=self.scene,
-            config=self._solver_config(spec),
-        )
-        if run.status != "succeeded":
-            message = (run.error or {}).get("message") or "simulate failed"
-            Notifications.error("Radar", message)
-            return f"Solve failed: {message}"
-        handle = (run.outputs or {}).get("resultHandle")
-        if not handle:
-            Notifications.error("Radar", "Solver returned no result handle")
-            return "Solve failed: no result handle"
-        self._solver_result_handle = str(handle)
-        self._solver_run_id = run.run_id
+    @button(display_name="Simulate Animation", group=_ANIMATION, operation="solver", cancellable=True,
+            progress_surface="component")
+    def simulate_animation(self):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._simulate_async(animation=True))
+        return self._simulate_async(animation=True)
+
+    @button(display_name="Export Animation Result", group=_ANIMATION)
+    async def export_animation_result(self):
+        if self._export_running or self._replay_preparing:
+            return "Export or replay preparation is already running; no duplicate file created."
+        self._export_running = True
+        task = asyncio.create_task(self._export_animation_result_once())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if task.done() and not task.cancelled():
+                task.exception()
+            raise
+        except Exception as exc:
+            if self._scene_is_live():
+                self.animation_status = f"Export failed (completed simulation retained): {exc}"
+            raise
+        finally:
+            self._export_running = False
+
+    async def _export_animation_result_once(self):
+        if not self._animation_result or self._snapshot_running or not self._scene_is_live():
+            raise ValueError("Complete Simulate Animation before exporting.")
+        identity = (self._solver_result_handle, self._solver_run_id)
+        self.animation_status = "Exporting full native result; please wait. Duplicate clicks will not create another file."
+        payload = await asyncio.to_thread(self._query_result, "animation_export", {})
+        if not self._scene_is_live() or not self._animation_result or identity != (self._solver_result_handle, self._solver_run_id):
+            return "Previous animation exported; current result has changed."
+        from ..adapter.animation import persist_export
+        path = await asyncio.to_thread(persist_export, api, payload)
+        if not self._scene_is_live() or not self._animation_result or identity != (self._solver_result_handle, self._solver_run_id):
+            return "Previous animation exported to " + path
+        self.animation_export_path = path
+        self.animation_status = "Exported native complex result + motion/axes metadata: " + self.animation_export_path
+        return self.animation_status
+
+    async def _simulate_async(self, animation=False, on_submitted=None):
+        """Submit an immutable copy of current Studio state to the native solver."""
+        from ..adapter.snapshot import snapshot_request, SUPPORTED_VIEWS
+        if self._snapshot_running or self._export_running or self._replay_preparing or str(self.stream_status) in {"running", "paused"}:
+            raise ValueError("A radar solve/stream is already active; stop it before another snapshot.")
+        self._snapshot_running = True
+        self._snapshot_result = False
+        self._animation_result = False
+        self._animation_view_generation += 1
+        self._saved_result = None
+        self.saved_result_loaded = False
+        self._solver_result_handle = ""
+        self._solver_run_id = ""
+        self._solver_pending_run_id = ""
         self._clear_query_cache()
         self._radar = None
         self._signal = None
-        self.update_view()
-        self._publish_signal_stream(channels=(self._stream_ref_channel(),))
-        self._run_post_processors()
-        Notifications.success("Radar", "Radar solve complete")
-        logger.info("=== Simulate done ===")
-        return "Solve complete"
+        self.signal_source = None
+        self.signal_stream = None
+        self.signal_figure.clear()
+        self.snapshot_status = "Running frozen-point GPU snapshot (not animation)"
+        if animation:
+            self.snapshot_status = "Animation simulation in progress; not a frozen snapshot."
+            self.animation_status = "Running native GPU simulation of baked Studio skin motion"
+            self.animation_export_path = ""
+            self.animation_frame_index = 0
+        try:
+            if animation:
+                from ..adapter.animation import animation_request
+                request = animation_request(self)
+            else:
+                request = snapshot_request(self)
+            if str(self.view) not in SUPPORTED_VIEWS or bool(self.static_clutter_removal) or bool(self.show_cfar):
+                raise ValueError("Choose Range Profile / Range Spectrum / Range Doppler and disable clutter removal / CFAR.")
+            from witwin_server.features.solvers.scene_ref import make_scene_ref
+            # No await while copying live values: nested keyframe lists must
+            # not alias author state once the worker starts JSON serialization.
+            scene_ref = copy.deepcopy(make_scene_ref(self.scene))
+            def _submitted(run_id):
+                self._solver_pending_run_id = str(run_id)
+                if on_submitted is not None:
+                    on_submitted(str(run_id))
+
+            solve_task = asyncio.create_task(asyncio.to_thread(
+                api.solvers.solve,
+                "witwin.radar.simulate",
+                scene=scene_ref,
+                config=request,
+                on_submitted=_submitted,
+            ))
+            completion_won_cancel_race = False
+            try:
+                run = await asyncio.shield(solve_task)
+            except asyncio.CancelledError:
+                # Cancelling the asyncio waiter does not stop the solver thread.
+                # The host publishes this request's immutable run id before it
+                # waits for the serialized solver slot. Never infer ownership
+                # from the host's global active run, which may belong to a
+                # different queued request.
+                # If native completion wins the race, keep its result instead of
+                # orphaning a valid result handle.
+                native_run_id = str(self._solver_pending_run_id or "")
+                cancel_sent = False
+                loop = asyncio.get_running_loop()
+                discovery_deadline = loop.time() + 5.0
+                while not solve_task.done() and not native_run_id and loop.time() < discovery_deadline:
+                    try:
+                        native_run_id = str(self._solver_pending_run_id or "")
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception as status_error:  # noqa: BLE001 - retain native task ownership
+                        logger.warning(f"Could not discover native Radar run for cancellation: {status_error}")
+                        break
+                    if not native_run_id and not solve_task.done():
+                        await asyncio.sleep(0.01)
+                if native_run_id and not solve_task.done():
+                    try:
+                        cancel_sent = bool(await asyncio.shield(asyncio.to_thread(
+                            api.solvers.cancel,
+                            native_run_id,
+                            "Studio Radar animation request cancelled",
+                        )))
+                    except asyncio.CancelledError:
+                        # A repeated UI/tool cancellation must not abandon the
+                        # native run while its first cancellation is in flight.
+                        cancel_sent = True
+                    except Exception as cancel_error:  # noqa: BLE001 - solve result remains authoritative
+                        logger.warning(f"Native Radar cancellation failed: {cancel_error}")
+                while not solve_task.done():
+                    try:
+                        await asyncio.shield(solve_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if solve_task.cancelled():
+                    raise
+                run = solve_task.result()
+                if getattr(run, "status", None) == "succeeded":
+                    completion_won_cancel_race = True
+                else:
+                    self._animation_result = self._snapshot_result = False
+                    if self._scene_is_live():
+                        suffix = " Native solver cancellation was sent." if cancel_sent else ""
+                        self.animation_status = "Animation task cancelled; no result displayed." + suffix
+                        self.snapshot_status = "Solve task cancelled; no result displayed." + suffix
+                    raise asyncio.CancelledError
+            if not self._scene_is_live():
+                return "Scene closed or replaced during the solve; result not attached to another scene."
+            if run.status != "succeeded":
+                raise RuntimeError((run.error or {}).get("message") or "Snapshot solve failed")
+            handle = (run.outputs or {}).get("resultHandle")
+            if not handle:
+                raise RuntimeError("Snapshot solver returned no result handle")
+            self._solver_result_handle = str(handle)
+            self._solver_run_id = run.run_id
+            self._solver_pending_run_id = ""
+            self._snapshot_result = not animation
+            self._animation_result = animation
+            if not animation:
+                self.update_view()
+            if animation:
+                count = round(request['duration_s'] * request['fps'])
+                self.animation_status = (
+                    f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
+                    f"{request['fps']:g} FPS. Uncalibrated skin sites; LOS only."
+                )
+                if completion_won_cancel_race:
+                    self.animation_status += " Native completion won the cancellation race; result preserved."
+                self.snapshot_status = "Animation result active, not a frozen snapshot."
+                await self._refresh_animation_view()
+                if "view failed" not in self.animation_status:
+                    metadata = dict(getattr(self, "_last_animation_view_metadata", {}) or {})
+                    topology = dict(metadata.get("topology_preflight") or {})
+                    declared = int(topology.get("declared_site_count", 0))
+                    active = int(topology.get("active_site_count", 0))
+                    if declared > 0 and 0 < active <= declared:
+                        coverage = 100.0 * active / declared
+                        quality = str(topology.get("visibility_quality") or "unknown")
+                        self.animation_status = (
+                            f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
+                            f"{request['fps']:g} FPS. Interval-visible sites {active}/{declared} "
+                            f"({coverage:.1f}%, {quality}); uncalibrated RCS; LOS only."
+                        )
+                        if completion_won_cancel_race:
+                            self.animation_status += (
+                                " Native completion won the cancellation race; result preserved."
+                            )
+                    Notifications.success("Radar", self.animation_status)
+                return self.animation_status
+            self.snapshot_status = f"GPU snapshot complete, t={request['time_s']:.3f}s. One RCS point; velocity frozen to zero."
+            Notifications.success("Radar", "Native GPU snapshot complete (not animated-cat simulation)")
+            return self.snapshot_status
+        except Exception as exc:
+            self._snapshot_result = False
+            self._animation_result = False
+            self._solver_result_handle = ""
+            self._solver_run_id = ""
+            self._solver_pending_run_id = ""
+            self._clear_query_cache()
+            if self._scene_is_live():
+                self.signal_figure.clear()
+                self.snapshot_status = f"Snapshot failed: {exc}"
+                if animation:
+                    self.animation_status = f"Animation failed: {exc}"
+            logger.error("Radar snapshot failed", exc_info=True)
+            raise
+        finally:
+            self._snapshot_running = False
 
     @button(display_name="Start Stream", group=_SOLVE)
     def start_stream(self):
         """Start solver-side realtime stream production."""
+        self._require_legacy_solver()
         logger.info("=== Radar Start Stream clicked ===")
         if self.scene is None or self.owner is None:
             logger.warning("Radar stream start ignored: component is not attached to a scene")
@@ -571,12 +896,128 @@ class RadarComponent(Component):
         logger.info("Radar stream stopped")
         return "Stream stopped"
 
+    def _scene_is_live(self):
+        scene, owner = self.scene, self.owner
+        if (scene is None or owner is None or scene.get_object(owner.id) is not owner
+                or owner.get_component("Radar") is not self):
+            return False
+        try:
+            return api.server.scenes.get(scene.scene_id) is scene
+        except RuntimeError:
+            return False
+
+    @button(display_name="Prepare Synchronized Replay", group=_ANIMATION)
+    async def prepare_synchronized_replay(self):
+        """Prepare numeric data once; frontend follows the existing scene clock."""
+        from ..adapter.replay import build_recording, publish_recording
+        if self._replay_preparing or self._snapshot_running or self._export_running:
+            raise ValueError("Wait for the current simulation/replay preparation to finish.")
+        if not self._scene_is_live():
+            raise ValueError("Open the source scene before preparing replay.")
+        if bool(self.static_clutter_removal) or bool(self.show_cfar):
+            raise ValueError("Replay does not apply clutter removal or CFAR; turn these controls off.")
+        saved = self._saved_result
+        identity = (self._solver_result_handle, self._solver_run_id, saved)
+        antennas = (int(self.tx_index), int(self.rx_index))
+        if saved is None and not self._animation_result:
+            raise ValueError("Complete Simulate Animation or Load Saved Result first.")
+        self._replay_preparing = True
+        self.replay_status = "Preparing native numeric RP/RD data (no images)"
+        def prepare():
+            if saved is not None:
+                return build_recording(saved, *antennas)
+            payload = self._query_result("animation_replay", {"tx": antennas[0], "rx": antennas[1]})
+            data = api.solvers.read_result_ref("witwin.radar.simulate", payload["reference"])
+            return payload["recording"], data
+        def still_current():
+            return (self._scene_is_live() and self._solver_result_handle == identity[0]
+                    and self._solver_run_id == identity[1] and self._saved_result is saved
+                    and antennas == (int(self.tx_index), int(self.rx_index)))
+        task = asyncio.create_task(asyncio.to_thread(prepare))
+        try:
+            record, data = await asyncio.shield(task)
+            if not still_current():
+                return "Source changed; old replay was not published."
+            if bool(self.static_clutter_removal) or bool(self.show_cfar):
+                raise ValueError("Clutter removal or CFAR was enabled during preparation; turn it off before replay.")
+            self._animation_view_generation += 1
+            self.replay_status = publish_recording(self, api, record, data)
+            return self.replay_status
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if task.done() and not task.cancelled():
+                task.exception()
+            raise
+        except Exception as exc:
+            if still_current():
+                self.replay_status = f"Replay preparation failed: {exc}"
+            logger.error("Replay preparation failed", exc_info=True)
+            raise
+        finally:
+            self._replay_preparing = False
+
+    async def _refresh_animation_view(self):
+        if not self._scene_is_live():
+            return "Scene closed or replaced; animation view not published."
+        from ..adapter.animation import animation_view_params, apply_animation_view
+        self._animation_view_generation += 1
+        generation = self._animation_view_generation
+        identity = (self._solver_result_handle, self._solver_run_id)
+        params = animation_view_params(self)
+        self.signal_figure.clear().title("Loading recorded animation frame")
+
+        def still_current():
+            return (self._scene_is_live() and self._animation_result and generation == self._animation_view_generation
+                    and identity == (self._solver_result_handle, self._solver_run_id)
+                    and params == animation_view_params(self))
+
+        try:
+            payload = await asyncio.to_thread(self._query_result, "animation_view", params)
+            if still_current():
+                return apply_animation_view(self, payload)
+            return "Superseded animation view"
+        except Exception as exc:
+            if still_current():
+                self.signal_figure.clear().title("Animation view unavailable: check frame / supported settings")
+                self.animation_status = f"Animation view failed: {exc}"
+                logger.error("Animation view failed", exc_info=True)
+            return "Animation view unavailable"
+
     def update_view(self):
         """Render the selected view from the last solved signal."""
+        if self._animation_result:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self._refresh_animation_view())
+            asyncio.create_task(self._refresh_animation_view())
+            return "Loading recorded animation frame"
+        if self._snapshot_result:
+            from ..adapter.snapshot import show_snapshot
+            try:
+                return show_snapshot(self)
+            except Exception:
+                self.signal_figure.clear().title("Snapshot view unavailable: check indices / supported settings")
+                raise
+        if self._saved_result is not None:
+            from ..adapter.saved_result import show_saved_result
+            try:
+                return show_saved_result(self)
+            except Exception:
+                self.signal_figure.clear().title("Saved result view unavailable: check indices / supported view")
+                raise
         if not self._solver_result_handle and self._signal is None:
             logger.info("Update View: no signal yet — run Simulate first")
             return "Simulate first"
         view = str(self.view)
+        if view in {"range_profile", "range_spectrum"}:
+            return "Load a metadata-bearing saved result first"
         logger.info(f"Update View: rendering '{view}' (tx={self._tx()} rx={self._rx()})")
         if view == "raw_signal":
             return self._show_raw()
@@ -589,6 +1030,7 @@ class RadarComponent(Component):
     @button(display_name="Generate Frames", group=_TIMELINE)
     def generate_timeline(self):
         """Build the timeline + radar, generate the frame stack, and show the first frame."""
+        self._require_legacy_solver()
         import torch
         if not torch.cuda.is_available():
             Notifications.warning("Radar", "Timeline generation requires a CUDA device")
@@ -1569,8 +2011,11 @@ class RadarComponent(Component):
             op,
             params,
             run_id=self._solver_run_id or None,
+            **({"timeout": 180.0} if op in {"animation_export", "animation_replay", "animation_manifest"} else {}),
         )
         data = response.get("data") or {}
+        if len(cache) >= 8:
+            cache.pop(next(iter(cache)))
         cache[cache_key] = data
         return data
 
