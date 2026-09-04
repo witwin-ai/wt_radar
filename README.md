@@ -2,6 +2,16 @@
 
 ## Studio baked-skin animation (native Radar 0.3)
 
+Agent orchestration supports explicit `fixed` sensor placement and opt-in
+`automatic` placement. Automatic mode searches at most 16 poses near the authored
+motion, at world Y = `height_m` (default 1 m), and calls the unchanged native
+animation preflight over the requested interval for each candidate. Trials use
+a detached scene; only an accepted pose is applied. Do not supply coordinates
+in automatic mode: conflicting explicit inputs are rejected, never overridden.
+This is a bounded placement search, not an RF algorithm change or a guarantee
+that every room has a usable pose. Timing, CUDA and configuration errors are
+reported immediately rather than treated as placement failures.
+
 The **Studio Animation → Simulate Animation** button submits a detached copy of
 the current open scene, including unsaved geometry and the baked timeline.
 It uses the existing Studio skinning implementation and passes world-space

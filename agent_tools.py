@@ -308,6 +308,27 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
+def _persisted_numeric_identity(value: Any) -> Any:
+    """Canonicalize authored numbers to the precision Studio persists.
+
+    Component and Timeline numeric fields round-trip through Studio's float32
+    storage.  Hashing the pre-save Python float64 spelling made an unchanged
+    Radar appear edited after reopening a Scene (for example 77e9 becomes
+    76999999488.0).  The solver already consumes these persisted values, so
+    float32 is the exact durable-authoring boundary rather than a tolerance.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, (str, int)):
+        return value
+    if isinstance(value, (float, np.floating)):
+        canonical = float(np.float32(value))
+        return 0.0 if canonical == 0.0 else canonical
+    if isinstance(value, dict):
+        return {str(key): _persisted_numeric_identity(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_persisted_numeric_identity(item) for item in value]
+    return _persisted_numeric_identity(_jsonable(value))
+
+
 def _package_version(name: str) -> str | None:
     try:
         return version(name)
@@ -423,33 +444,89 @@ def _geometry_content_digest(scene: Any) -> str:
     return digest.hexdigest()
 
 
-def _scene_input_fingerprint(scene: Any) -> str:
-    from witwin_server.features.timeline.fingerprint import authored_scene_payload
-    payload = _jsonable(authored_scene_payload(scene))
-    for obj in (payload.get("objects") or {}).values():
-        for component in obj.get("components") or []:
-            if component.get("type") != "Radar":
-                continue
-            properties = component.get("properties") or {}
-            for key in _RUNTIME_RADAR_FIELDS:
-                properties.pop(key, None)
-    payload["solver_geometry_content_sha256"] = _geometry_content_digest(scene)
-    payload["scene_fingerprint_schema"] = "witwin.radar.authored-scene.v3"
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+def _hash_json(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
+def _scene_input_evidence(scene: Any) -> dict[str, Any]:
+    from witwin_server.features.timeline.fingerprint import authored_scene_payload
+    payload = _jsonable(authored_scene_payload(scene))
+    radar_object_ids: set[str] = set()
+    for object_id, obj in (payload.get("objects") or {}).items():
+        if any(component.get("type") == "Radar" for component in obj.get("components") or []):
+            radar_object_ids.add(str(object_id))
+    geometry = _geometry_content_digest(scene)
+    payload["solver_geometry_content_sha256"] = geometry
+    payload["scene_fingerprint_schema"] = "witwin.radar.authored-scene.v5"
+    # Component values are stored by Studio's field system as float32, but
+    # Timeline key times/values remain JSON/TOML doubles and the native motion
+    # sampler consumes those doubles.  Canonicalizing the entire Scene to
+    # float32 would make distinct solver inputs share one identity.
+    payload["objects"] = _persisted_numeric_identity(payload.get("objects") or {})
+    objects = payload.get("objects") or {}
+    non_radar_objects = {
+        key: value for key, value in objects.items() if str(key) not in radar_object_ids
+    }
+    # Radar authoring is represented separately by _radar_measurement_contract.
+    # Excluding the settings object here prevents its runtime/review state and
+    # quaternion serialization round-trips from contaminating room/motion identity.
+    payload["objects"] = non_radar_objects
+    return {
+        "schema": "witwin.radar.authored-scene.v5",
+        "fingerprint": _hash_json(payload),
+        "metadata_fingerprint": _hash_json({
+            key: value for key, value in payload.items()
+            if key not in {"objects", "timeline", "solver_geometry_content_sha256"}
+        }),
+        "timeline_fingerprint": _hash_json(payload.get("timeline")),
+        "non_radar_objects_fingerprint": _hash_json(non_radar_objects),
+        "geometry_content_sha256": geometry,
+    }
+
+
+def _scene_input_fingerprint(scene: Any) -> str:
+    return str(_scene_input_evidence(scene)["fingerprint"])
+
+
+def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
+    """Durable authored Radar inputs actually consumed by the native adapter."""
+    from dataclasses import asdict
+    from .adapter.config_map import ConfigMap
+    from .adapter.solve import SensorSpec, TracerSpec
+
     radar = obj.get_component("Radar")
+    sensor = asdict(SensorSpec.from_component(radar))
+    contract = _persisted_numeric_identity({
+        "config": ConfigMap.build_dict(obj),
+        "tracer": asdict(TracerSpec.from_component(radar)),
+        "target": {
+            "object_id": str(radar.snapshot_target_id or ""),
+            "local_point_m": _jsonable(radar.snapshot_local_point),
+            "rcs_m2": float(radar.snapshot_rcs_m2),
+            "polarization": _jsonable(radar.snapshot_polarization),
+        },
+        "animation": {
+            "start_s": float(radar.t0),
+            "duration_s": float(radar.animation_duration_s),
+            "fps": float(radar.animation_fps),
+            "motion_sampling": str(radar.motion_sampling),
+        },
+    })
+    # SensorSpec is derived from the exact float32 world matrix consumed by
+    # the solver.  Do not decimal-round it: adjacent authored pose ULPs can
+    # change LOS at a visibility boundary and therefore must change identity.
+    contract["sensor"] = _jsonable(sensor)
+    return contract
+
+
+def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
     payload = {
-        "schema": "witwin.radar.agent-input.v3",
+        "schema": "witwin.radar.agent-input.v5",
         "scene_fingerprint": _scene_input_fingerprint(scene),
         "scene_id": str(scene.scene_id),
         "radar_object_id": str(obj.id),
-        "target_object_id": str(radar.snapshot_target_id or ""),
-        "start_s": float(radar.t0),
-        "duration_s": float(radar.animation_duration_s),
-        "fps": float(radar.animation_fps),
+        "radar_contract": _radar_measurement_contract(obj),
         "physics": {"components": ["los"], "max_depth": 0, "device": "cuda"},
         "packages": {
             name: _package_version(name)
@@ -544,7 +621,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
     target_id = str(getattr(radar, "snapshot_target_id", "") or "")
     result_present = bool(getattr(radar, "_animation_result", False))
     current_fingerprint = None
-    if result_present and getattr(obj, "scene", None) is not None:
+    if getattr(obj, "scene", None) is not None:
         try:
             current_fingerprint = _measurement_input_fingerprint(obj.scene, obj)
         except Exception:
@@ -559,6 +636,10 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
         "up": _jsonable(pose.up),
         "fov_deg": float(radar.fov),
         "target_object_id": target_id or None,
+        # Read-only current authored measurement identity.  Orchestrators use
+        # this to distinguish harmless Radar UI/runtime-state normalization
+        # from a real pose/FOV/target/waveform/scene-input change after export.
+        "measurement_input_fingerprint": current_fingerprint,
         "animation": {
             "start_s": float(radar.t0),
             "duration_s": float(radar.animation_duration_s),
@@ -1107,24 +1188,28 @@ def register(ctx: Any) -> None:
             "selected_radar": selected,
             "blockers": blockers,
             "scene_input_fingerprint": _scene_input_fingerprint(scene),
+            "scene_input_evidence": _scene_input_evidence(scene),
         }
 
     @tool(
         name="ensure_sensor",
         description=(
             "Idempotently create or configure one Studio Radar Settings object at an "
-            "explicit world position, aimed at an explicit world point, and bind it to "
+            "explicit world position (fixed mode), or choose a native-preflight-verified "
+            "pose near the authored motion (automatic mode), and bind it to "
             "one animated target. This only edits Studio orchestration fields; it does "
             "not alter Radar or Channel algorithms."
         ),
         input_schema={
             "type": "object",
-            "required": ["scene_id", "operation_id", "target_object_id", "position_m", "aim_point_m"],
+            "required": ["scene_id", "operation_id", "target_object_id"],
             "properties": {
                 "scene_id": SCENE_ID_PROPERTY,
                 "operation_id": {"type": "string", "minLength": 1},
                 "radar_object_id": {"type": "string"},
                 "target_object_id": {"type": "string", "minLength": 1},
+                "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
+                "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
                 "position_m": {
                     "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
                 },
@@ -1143,6 +1228,7 @@ def register(ctx: Any) -> None:
         requires_confirmation=True,
         permission_tier="scene_write",
         idempotent=True,
+        timeout=300.0,
     )
     def _ensure_sensor(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1216,9 +1302,12 @@ def register(ctx: Any) -> None:
                 code="target_not_skinned",
                 detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
             )
-        position = _as_vector3(args["position_m"], "position_m")
-        aim = _as_vector3(args["aim_point_m"], "aim_point_m")
-        rotation = _look_at_euler(position, aim)
+        automatic = args.get("placement_mode", "fixed") == "automatic"
+        if automatic and ("position_m" in args or "aim_point_m" in args):
+            raise ToolError("Automatic placement cannot override explicit coordinates; use fixed mode.",
+                            code="conflicting_sensor_placement")
+        if not automatic and not all(key in args for key in ("position_m", "aim_point_m")):
+            raise ToolError("Fixed placement requires position_m and aim_point_m.", code="missing_sensor_pose")
         requested = str(args.get("radar_object_id") or "").strip()
         created = False
         if requested:
@@ -1245,8 +1334,16 @@ def register(ctx: Any) -> None:
             else:
                 obj = _settings_object("Agent Radar")
                 obj.tag = _PIPELINE_RADAR_TAG
-                scene.add_object(obj)
                 created = True
+        placement = None
+        if automatic:
+            from .sensor_placement import choose_sensor_placement
+            placement = choose_sensor_placement(scene, args, radar_object_id=None if created else str(obj.id))
+        position = _as_vector3(placement["position_m"] if placement else args["position_m"], "position_m")
+        aim = _as_vector3(placement["aim_point_m"] if placement else args["aim_point_m"], "aim_point_m")
+        rotation = _look_at_euler(position, aim)
+        if created:
+            scene.add_object(obj)
         radar = obj.get_component("Radar")
         transform = obj.get_component("Transform")
         if transform is None or getattr(transform, "parent", None) is not None:
@@ -1301,6 +1398,7 @@ def register(ctx: Any) -> None:
             "operation_id": operation_id,
             "created": created,
             "reused_operation": False,
+            "placement": placement or {"mode": "fixed", "position_m": position.tolist(), "aim_point_m": aim.tolist()},
             "radar": _sensor_summary(obj),
             "scene_input_fingerprint": _scene_input_fingerprint(scene),
         }
@@ -1422,6 +1520,8 @@ def register(ctx: Any) -> None:
             "native_preflight": native_preflight,
             "runtime": runtime,
             "input_fingerprint": input_fingerprint,
+            "scene_input_fingerprint": _scene_input_fingerprint(scene),
+            "scene_input_evidence": _scene_input_evidence(scene),
             "completion_requirements": {
                 "actual_frame_count": measurement["frame_count"],
                 "all_frames_finite": True,
@@ -1788,6 +1888,22 @@ def register(ctx: Any) -> None:
             status = await radar.prepare_synchronized_replay()
         except Exception as exc:
             raise ToolError(str(exc), code="replay_preparation_failed") from exc
+        recorded = _recorded_replay_summary(ctx, obj)
+        if (
+            recorded.get("status") != "available"
+            or recorded.get("payload_available") is not True
+            or recorded.get("payload_integrity_verified") is not True
+            or recorded.get("motion_current") is not True
+            or recorded.get("ready_for_timeline") is not True
+        ):
+            raise ToolError(
+                "Synchronized replay was not published as a current, verified numeric asset.",
+                code="replay_preparation_unverified",
+                detail={
+                    "component_status": str(status),
+                    "recorded_replay": recorded,
+                },
+            )
         receipt = _put_operation(ctx, {
             **receipt,
             "status": "replay_ready" if receipt.get("status") != "exported" else "exported",
@@ -1796,6 +1912,7 @@ def register(ctx: Any) -> None:
                 "status": str(status),
                 "tx_index": radar.tx_index,
                 "rx_index": radar.rx_index,
+                "recorded_replay": recorded,
             },
             "next_step": "export_result",
         })

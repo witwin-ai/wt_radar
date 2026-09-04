@@ -9,6 +9,7 @@ import pytest
 from witwin_server import SceneObject
 from witwin_server.core.components import MeshComponent, SkinnedMeshComponent
 from witwin_server.core.scene import Scene
+from witwin_server.core import wtscene
 from witwin_server.features.timeline import TimelineManager
 from witwin_server.tools.base import ToolError
 
@@ -64,6 +65,11 @@ def test_measurement_fingerprint_tracks_authored_inputs_not_playback(harness, ap
     rotation.add_keyframe(0., [0., 0., 0.])
     rotation.add_keyframe(1., [0., 90., 0.])
     expected = radar_tools._measurement_input_fingerprint(scene, sensor)
+    inspected = run(tools, "inspect_pipeline", {
+        "scene_id": scene.scene_id,
+        "radar_object_id": sensor.id,
+    })
+    assert inspected["selected_radar"]["measurement_input_fingerprint"] == expected
     scene.timeline_manager.set_time(.5, apply_to_scene=apply_to_scene)
     scene.timeline_manager.is_looping = True
     assert radar_tools._measurement_input_fingerprint(scene, sensor) == expected
@@ -344,6 +350,77 @@ def test_review_controls_do_not_change_measurement_fingerprint(harness):
     radar.static_clutter_removal = True
     radar.show_cfar = True
     assert radar_tools._measurement_input_fingerprint(scene, sensor) == before
+
+
+def test_measurement_fingerprint_is_stable_across_studio_float32_persistence(harness):
+    scene, tools = harness
+    result = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "float32-persistence",
+        "target_object_id": "catstray",
+        "position_m": [1.123456789, 1.0, 2.987654321],
+        "aim_point_m": [0.0, 0.4, 0.0],
+    })
+    sensor = scene.get_object(result["radar"]["object_id"])
+    radar = sensor.get_component("Radar")
+    before = radar_tools._measurement_input_fingerprint(scene, sensor)
+
+    # Match the exact numeric coercion performed by .wtscene persistence.
+    for field in ("fc", "slope", "snapshot_rcs_m2", "animation_duration_s", "animation_fps"):
+        setattr(radar, field, float(np.float32(getattr(radar, field))))
+    transform = sensor.get_component("Transform")
+    transform.position = [float(np.float32(value)) for value in transform.position]
+    transform.rotation = [float(np.float32(value)) for value in transform.rotation]
+    assert radar_tools._measurement_input_fingerprint(scene, sensor) == before
+
+    restored = Scene.from_dict(wtscene.loads(wtscene.dumps(scene.to_dict())))
+    restored_sensor = restored.get_object(sensor.id)
+    assert radar_tools._measurement_input_fingerprint(restored, restored_sensor) == before
+
+    # One durable authored float32 step is still a real input change.
+    radar.fov = float(np.nextafter(np.float32(radar.fov), np.float32(180.0)))
+    assert radar_tools._measurement_input_fingerprint(scene, sensor) != before
+
+
+def test_measurement_fingerprint_distinguishes_adjacent_timeline_double(harness):
+    scene, tools = harness
+    result = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "timeline-double-identity",
+        "target_object_id": "catstray",
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+    })
+    sensor = scene.get_object(result["radar"]["object_id"])
+    track = scene.timeline_manager.clip.get_or_create_track(
+        "catstray", "Transform", "position",
+    )
+    track.add_keyframe(0.0, [0.0, 0.0, 0.0])
+    track.add_keyframe(0.5, [1.0, 0.0, 0.0])
+    before = radar_tools._measurement_input_fingerprint(scene, sensor)
+
+    track.keyframes[1].time = float(np.nextafter(np.float64(0.5), np.float64(1.0)))
+
+    assert radar_tools._measurement_input_fingerprint(scene, sensor) != before
+
+
+def test_measurement_fingerprint_distinguishes_adjacent_sensor_pose_ulp(harness):
+    scene, tools = harness
+    result = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "sensor-pose-ulp-identity",
+        "target_object_id": "catstray",
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+    })
+    sensor = scene.get_object(result["radar"]["object_id"])
+    transform = sensor.get_component("Transform")
+    before = radar_tools._measurement_input_fingerprint(scene, sensor)
+    rotation = transform.rotation.detach().cpu().numpy().astype(np.float32)
+    rotation[0] = np.nextafter(rotation[0], np.float32(np.inf))
+    transform.rotation = rotation.tolist()
+
+    assert radar_tools._measurement_input_fingerprint(scene, sensor) != before
 
 
 def test_scene_fingerprint_tracks_static_mesh_vertex_content(harness):
@@ -726,6 +803,54 @@ def test_submit_observe_and_verify_requires_native_evidence(harness, monkeypatch
             assert repeated["verification"]["passed"] is True
             assert repeated["next_step"] == "complete"
     assert radar_tools._get_operation(ctx, "job-1") == persisted_before
+
+
+def test_prepare_replay_refuses_component_status_without_published_asset(harness, monkeypatch):
+    scene, tools = harness
+    ensured = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "unpublished-replay-ensure",
+        "target_object_id": "catstray",
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+        "duration_s": 5.0,
+        "fps": 10.0,
+    })
+    sensor = scene.get_object(ensured["radar"]["object_id"])
+    radar = sensor.get_component("Radar")
+    fingerprint = radar_tools._measurement_input_fingerprint(scene, sensor)
+    radar._animation_result = True
+    radar._solver_run_id = "unpublished-run"
+    radar._solver_result_handle = "unpublished-result"
+    radar._last_result_input_fingerprint = fingerprint
+    radar_tools._put_operation(scene._radar_test_context, {
+        "operation_id": "unpublished-replay-job",
+        "scene_id": scene.scene_id,
+        "radar_object_id": sensor.id,
+        "input_fingerprint": fingerprint,
+        "status": "verified",
+        "run_id": "unpublished-run",
+        "result_handle": "unpublished-result",
+        "verification": {"passed": True},
+        "next_step": "prepare_replay_or_export",
+    })
+
+    async def source_changed():
+        return "Source changed; old replay was not published."
+
+    monkeypatch.setattr(radar, "prepare_synchronized_replay", source_changed)
+    with pytest.raises(ToolError) as error:
+        asyncio.run(tools["prepare_replay"].run({
+            "scene_id": scene.scene_id,
+            "radar_object_id": sensor.id,
+            "operation_id": "unpublished-replay-job",
+        }))
+    assert error.value.code == "replay_preparation_unverified"
+    assert error.value.detail["component_status"].startswith("Source changed")
+    assert error.value.detail["recorded_replay"]["status"] == "not_prepared"
+    assert radar_tools._get_operation(
+        scene._radar_test_context, "unpublished-replay-job",
+    )["status"] == "verified"
 
 
 def test_cancel_simulation_waits_for_interrupted_receipt(harness, monkeypatch):
