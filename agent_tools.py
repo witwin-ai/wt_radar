@@ -27,6 +27,17 @@ from witwin_server.tools.base import ToolError, tool
 from .adapter.memory_budget import MAX_RESULT_BYTES, available_memory_bytes
 from .adapter.solve import SensorSpec
 from .library_items import _settings_object
+from .retrieval_tags import (
+    CANCEL_TAGS,
+    ENSURE_TAGS,
+    EXPORT_TAGS,
+    INSPECT_TAGS,
+    PLAN_TAGS,
+    REPLAY_TAGS,
+    STATUS_TAGS,
+    SUBMIT_TAGS,
+    VERIFY_TAGS,
+)
 
 
 SCENE_ID_PROPERTY = {
@@ -1104,6 +1115,7 @@ def register(ctx: Any) -> None:
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         permission_tier="read",
         idempotent=True,
+        tags=INSPECT_TAGS,
     )
     def _runtime_diagnostics(args: Dict[str, Any]) -> dict[str, Any]:
         runtime = _runtime_evidence()
@@ -1137,6 +1149,7 @@ def register(ctx: Any) -> None:
         },
         permission_tier="read",
         idempotent=True,
+        tags=INSPECT_TAGS,
     )
     def _inspect_pipeline(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1230,6 +1243,7 @@ def register(ctx: Any) -> None:
         idempotent=True,
         durable_confirmation=True,
         timeout=300.0,
+        tags=ENSURE_TAGS,
     )
     def _ensure_sensor(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1437,6 +1451,7 @@ def register(ctx: Any) -> None:
         },
         permission_tier="read",
         idempotent=True,
+        tags=PLAN_TAGS,
     )
     def _plan_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1559,6 +1574,7 @@ def register(ctx: Any) -> None:
         permission_tier="execute",
         idempotent=True,
         durable_confirmation=True,
+        tags=SUBMIT_TAGS,
     )
     async def _submit_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1666,6 +1682,7 @@ def register(ctx: Any) -> None:
         },
         permission_tier="read",
         idempotent=True,
+        tags=STATUS_TAGS,
     )
     def _get_simulation(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1712,6 +1729,7 @@ def register(ctx: Any) -> None:
         requires_confirmation=True,
         permission_tier="execute",
         idempotent=True,
+        tags=CANCEL_TAGS,
     )
     async def _cancel_simulation(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1777,6 +1795,7 @@ def register(ctx: Any) -> None:
         },
         permission_tier="read",
         idempotent=True,
+        tags=VERIFY_TAGS,
         timeout=180.0,
     )
     async def _verify_result(args: Dict[str, Any]) -> dict[str, Any]:
@@ -1871,6 +1890,7 @@ def register(ctx: Any) -> None:
         idempotent=True,
         durable_confirmation=True,
         timeout=180.0,
+        tags=REPLAY_TAGS,
     )
     async def _prepare_replay(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1946,6 +1966,7 @@ def register(ctx: Any) -> None:
         idempotent=True,
         durable_confirmation=True,
         timeout=180.0,
+        tags=EXPORT_TAGS,
     )
     async def _export_result(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)

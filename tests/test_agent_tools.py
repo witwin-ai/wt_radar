@@ -217,6 +217,13 @@ def test_registers_narrow_domain_tools(harness):
         assert tools[name].permission_tier == tier
         assert tools[name].idempotent is True
         assert tools[name].durable_confirmation is True
+    assert "hint-explicit-intent:只运行雷达" in tools[
+        "submit_animation_measurement"
+    ].tags
+    assert "hint-explicit-intent:只回放" in tools["prepare_replay"].tags
+    assert "hint-explicit-intent:只导出" in tools["export_result"].tags
+    assert "hint-explicit-only" in tools["submit_animation_measurement"].tags
+    assert "hint-explicit-only" not in tools["plan_animation_measurement"].tags
 
 
 def test_operation_receipt_corruption_fails_closed_without_reset(harness):
