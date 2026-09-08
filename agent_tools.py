@@ -1228,6 +1228,7 @@ def register(ctx: Any) -> None:
         requires_confirmation=True,
         permission_tier="scene_write",
         idempotent=True,
+        durable_confirmation=True,
         timeout=300.0,
     )
     def _ensure_sensor(args: Dict[str, Any]) -> dict[str, Any]:
@@ -1557,6 +1558,7 @@ def register(ctx: Any) -> None:
         requires_confirmation=True,
         permission_tier="execute",
         idempotent=True,
+        durable_confirmation=True,
     )
     async def _submit_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
@@ -1864,8 +1866,10 @@ def register(ctx: Any) -> None:
             "additionalProperties": False,
         },
         side_effects=True,
+        requires_confirmation=True,
         permission_tier="soft_write",
         idempotent=True,
+        durable_confirmation=True,
         timeout=180.0,
     )
     async def _prepare_replay(args: Dict[str, Any]) -> dict[str, Any]:
@@ -1937,9 +1941,10 @@ def register(ctx: Any) -> None:
             "additionalProperties": False,
         },
         side_effects=True,
-        requires_confirmation=False,
+        requires_confirmation=True,
         permission_tier="file_write",
         idempotent=True,
+        durable_confirmation=True,
         timeout=180.0,
     )
     async def _export_result(args: Dict[str, Any]) -> dict[str, Any]:

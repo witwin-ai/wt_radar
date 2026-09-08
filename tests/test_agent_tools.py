@@ -206,6 +206,17 @@ def test_registers_narrow_domain_tools(harness):
     assert tools["ensure_sensor"].permission_tier == "scene_write"
     assert tools["ensure_sensor"].requires_confirmation
     assert tools["ensure_sensor"].idempotent
+    assert tools["ensure_sensor"].durable_confirmation
+    for name, tier in (
+        ("submit_animation_measurement", "execute"),
+        ("prepare_replay", "soft_write"),
+        ("export_result", "file_write"),
+    ):
+        assert tools[name].side_effects is True
+        assert tools[name].requires_confirmation is True
+        assert tools[name].permission_tier == tier
+        assert tools[name].idempotent is True
+        assert tools[name].durable_confirmation is True
 
 
 def test_operation_receipt_corruption_fails_closed_without_reset(harness):
