@@ -26,6 +26,7 @@ from witwin_server.tools.base import ToolError, tool
 
 from .adapter.memory_budget import MAX_RESULT_BYTES, available_memory_bytes
 from .adapter.solve import SensorSpec
+from .agent_tool_tags import TOOL_TAGS
 from .library_items import _settings_object
 
 
@@ -1097,6 +1098,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="runtime_diagnostics",
+        tags=TOOL_TAGS["runtime_diagnostics"],
         description=(
             "Report the exact Radar, Channel, Torch and CUDA runtime without changing "
             "the scene or silently substituting a CPU backend."
@@ -1122,6 +1124,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="inspect_pipeline",
+        tags=TOOL_TAGS["inspect_pipeline"],
         description=(
             "Inspect Radar Settings, selected animated target, timeline and existing "
             "native result evidence in one exact Studio scene. This is read-only."
@@ -1193,6 +1196,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="ensure_sensor",
+        tags=TOOL_TAGS["ensure_sensor"],
         description=(
             "Idempotently create or configure one Studio Radar Settings object at an "
             "explicit world position (fixed mode), or choose a native-preflight-verified "
@@ -1417,6 +1421,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="plan_animation_measurement",
+        tags=TOOL_TAGS["plan_animation_measurement"],
         description=(
             "Read-only preflight for a real Radar 0.3 CUDA animation measurement. "
             "It validates the exact target, timeline interval, frame/cube shape, host "
@@ -1537,6 +1542,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="submit_animation_measurement",
+        tags=TOOL_TAGS["submit_animation_measurement"],
         description=(
             "Submit the already-preflighted Studio animation to the existing native "
             "Radar 0.3 CUDA solver. Returns immediately with an operation receipt; "
@@ -1648,6 +1654,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="get_simulation",
+        tags=TOOL_TAGS["get_simulation"],
         description=(
             "Observe one submitted Radar animation operation. A missing in-memory task "
             "after restart is reported as interrupted, never guessed to have succeeded."
@@ -1691,6 +1698,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="cancel_simulation",
+        tags=TOOL_TAGS["cancel_simulation"],
         description=(
             "Cancel one owned in-flight Radar animation operation and wait until its "
             "orchestration task has published an interrupted receipt. Completed native "
@@ -1758,6 +1766,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="verify_result",
+        tags=TOOL_TAGS["verify_result"],
         description=(
             "Verify the completed native result against the preflight fingerprint, "
             "actual frame count, cube shape, finite CUDA data and package provenance. "
@@ -1846,6 +1855,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="prepare_replay",
+        tags=TOOL_TAGS["prepare_replay"],
         description=(
             "Prepare the existing native Range Profile and Range Doppler recording "
             "for synchronized Studio Timeline playback. It reuses official processing "
@@ -1920,6 +1930,7 @@ def register(ctx: Any) -> None:
 
     @tool(
         name="export_result",
+        tags=TOOL_TAGS["export_result"],
         description=(
             "Export one verified native Radar animation NPZ into the current project's "
             "results/radar-animation directory. Repeating the same export operation "

@@ -49,6 +49,31 @@ def run(tools, name, args):
     return tools[name].run(args)
 
 
+def test_registered_tools_publish_discovery_tags_without_changing_permissions(harness):
+    from wt_radar.agent_tool_tags import TOOL_TAGS
+
+    _, tools = harness
+    expected_tiers = {
+        "runtime_diagnostics": "read", "inspect_pipeline": "read",
+        "plan_animation_measurement": "read", "get_simulation": "read",
+        "verify_result": "read", "ensure_sensor": "scene_write",
+        "submit_animation_measurement": "execute", "cancel_simulation": "execute",
+        "prepare_replay": "soft_write", "export_result": "file_write",
+    }
+    assert set(tools) == set(TOOL_TAGS) == set(expected_tiers)
+    for name, registered in tools.items():
+        schema = registered.to_schema()
+        assert schema["tags"] == list(TOOL_TAGS[name])
+        assert "pack:witwin.radar-pipeline" in schema["tags"]
+        assert schema["permissionTier"] == expected_tiers[name]
+        if expected_tiers[name] != "read":
+            assert registered.side_effects is True
+            assert "hint-explicit-only" in schema["tags"]
+            assert "hint-requires-pack" in schema["tags"]
+    for name in ("ensure_sensor", "submit_animation_measurement", "cancel_simulation"):
+        assert tools[name].requires_confirmation is True
+
+
 @pytest.mark.parametrize("apply_to_scene", [False, True])
 def test_measurement_fingerprint_tracks_authored_inputs_not_playback(harness, apply_to_scene):
     scene, tools = harness
