@@ -380,6 +380,34 @@ def test_repeated_export_reuses_verified_file_without_solver_cache(export_source
     assert destination.read_bytes() == raw
 
 
+def test_export_button_reuses_same_run_but_exports_new_run_separately(component, export_source, monkeypatch):
+    from wt_radar.components import radar
+
+    api, reference, source, project, raw = export_source
+    monkeypatch.setattr(radar, 'api', api)
+    notices = []
+    monkeypatch.setattr(radar.Notifications, 'success', lambda *args: notices.append(args))
+    monkeypatch.setattr(component, '_query_result', lambda *_: reference)
+    first = asyncio.run(component.export_animation_result())
+    first_path = component.animation_export_path
+    assert 'Exported native' in first
+    source.unlink()  # Only the pytest-owned temporary cache, not the permanent file.
+    repeated = asyncio.run(component.export_animation_result())
+    assert 'existing NPZ verified (no new copy)' in repeated
+    assert component.animation_export_path == first_path
+    assert len(list((project / 'results' / 'radar-animation').glob('*.npz'))) == 1
+    assert notices[-1][1] == 'Existing NPZ verified; no new copy created.'
+    assert not component._export_running
+    # A new simulation clears this path; its export must not reuse the prior run.
+    component._solver_result_handle = 'new-result'
+    component._solver_run_id = 'new-run'
+    component.animation_export_path = ''
+    source.write_bytes(raw)
+    asyncio.run(component.export_animation_result())
+    assert component.animation_export_path != first_path
+    assert len(list((project / 'results' / 'radar-animation').glob('*.npz'))) == 2
+
+
 @pytest.mark.parametrize('tamper', ['contents', 'size', 'outside_project'])
 def test_repeated_export_never_trusts_path_alone(export_source, tmp_path, tamper):
     from wt_radar.adapter.animation import persist_export

@@ -586,16 +586,20 @@ class RadarComponent(Component):
         if not self._animation_result or self._snapshot_running or not self._scene_is_live():
             raise ValueError("Complete Simulate Animation before exporting.")
         identity = (self._solver_result_handle, self._solver_run_id)
-        self.animation_status = "Exporting full native result; please wait. Duplicate clicks will not create another file."
+        previous_path = self.animation_export_path
+        self.animation_status = "Checking existing export; please wait." if previous_path else "Exporting full native result; please wait."
         payload = await asyncio.to_thread(self._query_result, "animation_export", {})
         if not self._scene_is_live() or not self._animation_result or identity != (self._solver_result_handle, self._solver_run_id):
             return "Previous animation exported; current result has changed."
         from ..adapter.animation import persist_export
-        path = await asyncio.to_thread(persist_export, api, payload)
+        path = await asyncio.to_thread(persist_export, api, payload, existing_path=previous_path)
         if not self._scene_is_live() or not self._animation_result or identity != (self._solver_result_handle, self._solver_run_id):
             return "Previous animation exported to " + path
         self.animation_export_path = path
-        self.animation_status = "Exported native complex result + motion/axes metadata: " + self.animation_export_path
+        reused = path == previous_path
+        self.animation_status = ("Already exported; existing NPZ verified (no new copy): " if reused
+                                 else "Exported native complex result + motion/axes metadata: ") + path
+        Notifications.success("Radar", "Existing NPZ verified; no new copy created." if reused else "Radar NPZ exported.")
         return self.animation_status
 
     async def _simulate_async(self, animation=False, on_submitted=None):
