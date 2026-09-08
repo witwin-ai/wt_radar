@@ -201,6 +201,7 @@ def test_registers_narrow_domain_tools(harness):
         "verify_result",
         "prepare_replay",
         "export_result",
+        "describe_pipeline_contract",
     }
     assert tools["inspect_pipeline"].permission_tier == "read"
     assert tools["ensure_sensor"].permission_tier == "scene_write"
@@ -224,6 +225,24 @@ def test_registers_narrow_domain_tools(harness):
     assert "hint-explicit-intent:只导出" in tools["export_result"].tags
     assert "hint-explicit-only" in tools["submit_animation_measurement"].tags
     assert "hint-explicit-only" not in tools["plan_animation_measurement"].tags
+
+
+def test_pipeline_capability_is_derived_from_registered_action_contracts(harness):
+    _scene, tools = harness
+    capability = run(tools, "describe_pipeline_contract", {})
+
+    assert capability["schema"] == "witwin.radar.pipeline-capabilities.v1"
+    assert capability["actions"]["replay"]["input_schema"] == (
+        tools["prepare_replay"].input_schema
+    )
+    assert capability["actions"]["replay"]["requires_confirmation"] is True
+    assert capability["actions"]["preflight"]["requires_confirmation"] is False
+    assert capability["dependencies"]["export"] == ["verify"]
+
+    capability["actions"]["replay"]["input_schema"]["properties"].clear()
+    assert run(tools, "describe_pipeline_contract", {})["actions"]["replay"][
+        "input_schema"
+    ]["properties"]
 
 
 def test_operation_receipt_corruption_fails_closed_without_reset(harness):

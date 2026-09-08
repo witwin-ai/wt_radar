@@ -2033,6 +2033,45 @@ def register(ctx: Any) -> None:
             })
             return {**_operation_result(receipt, obj), "export": export, "reused": False}
 
+    @tool(
+        name="describe_pipeline_contract",
+        description=(
+            "Return the versioned Radar planning and result-action contracts for "
+            "orchestrators and plan editors. Does not inspect or edit a scene."
+        ),
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        permission_tier="read",
+        idempotent=True,
+    )
+    def _describe_pipeline_contract(_args: Dict[str, Any]) -> dict[str, Any]:
+        actions = {
+            "configure": _ensure_sensor,
+            "preflight": _plan_animation_measurement,
+            "simulate": _submit_animation_measurement,
+            "verify": _verify_result,
+            "replay": _prepare_replay,
+            "export": _export_result,
+        }
+        return {
+            "schema": "witwin.radar.pipeline-capabilities.v1",
+            "actions": {
+                name: {
+                    "tool_name": value.name,
+                    "input_schema": copy.deepcopy(value.input_schema),
+                    "permission_tier": value.permission_tier,
+                    "requires_confirmation": value.requires_confirmation,
+                    "idempotent": value.idempotent,
+                }
+                for name, value in actions.items()
+            },
+            "dependencies": {
+                "simulate": ["configure", "preflight"],
+                "verify": ["simulate"],
+                "replay": ["verify"],
+                "export": ["verify"],
+            },
+        }
+
     for value in (
         _runtime_diagnostics,
         _inspect_pipeline,
@@ -2044,5 +2083,6 @@ def register(ctx: Any) -> None:
         _verify_result,
         _prepare_replay,
         _export_result,
+        _describe_pipeline_contract,
     ):
         ctx.tools.register(value)
