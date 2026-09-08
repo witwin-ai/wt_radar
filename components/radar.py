@@ -60,6 +60,7 @@ from ..adapter.common import (
     num,
 )
 from ..adapter.solve import SensorSpec, SigProc, TracerSpec
+from .radar_ui import present_radar_controls
 
 logger = get_logger("Radar")
 
@@ -92,6 +93,13 @@ _MOTION_SOURCE = {"field_name": "timeline_source", "operator": "eq", "value": "m
 @component(name="Radar", display_name="Radar", category=_CAT)
 class RadarComponent(Component):
     """Unified Radar Settings component — FMCW config + sensor + sub-configs + solve + timeline."""
+
+    def to_dict(self):
+        return present_radar_controls(super().to_dict())
+
+    @classmethod
+    def get_definition(cls):
+        return present_radar_controls(super().get_definition())
 
     _signal = None   # runtime MIMO cube (TX, RX, chirps, ADC); never serialized
     _radar = None    # runtime Radar
