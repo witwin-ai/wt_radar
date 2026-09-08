@@ -146,17 +146,17 @@ class RadarComponent(Component):
         "point_cloud": "pc",
     }
 
-    define_group(foldout_group(_CONFIG, display_name="Configuration"))
-    define_group(foldout_group(_ANTENNA, display_name="Antenna"))
+    define_group(foldout_group(_CONFIG, display_name="Radar Configuration", collapsed=True))
+    define_group(foldout_group(_ANTENNA, display_name="Antenna", collapsed=True))
     define_group(foldout_group(_TRACER, display_name="Legacy Ray Tracer (not snapshot sampling)", collapsed=True))
     define_group(foldout_group(_NOISE, display_name="Legacy Noise (unsupported in snapshots)", collapsed=True))
     define_group(foldout_group(_POLARIZATION, display_name="Legacy Polarization (unsupported in snapshots)", collapsed=True))
     define_group(foldout_group(_RECEIVER, display_name="Legacy Receiver (unsupported in snapshots)", collapsed=True))
-    define_group(foldout_group(_SOLVE, display_name="Solve"))
-    define_group(foldout_group(_SNAPSHOT, display_name="Target & Scattering Model (Radar 0.3)"))
-    define_group(foldout_group(_ANIMATION, display_name="Studio Animation"))
-    define_group(foldout_group(_SAVED, display_name="Saved GPU Result"))
-    define_group(foldout_group(_POSTPROC, display_name="Post Processing"))
+    define_group(foldout_group(_SOLVE, display_name="Snapshot Simulation", collapsed=True))
+    define_group(foldout_group(_SNAPSHOT, display_name="Target & Scattering Model"))
+    define_group(foldout_group(_ANIMATION, display_name="Animation Simulation & Replay"))
+    define_group(foldout_group(_SAVED, display_name="Load Saved Recording", collapsed=True))
+    define_group(foldout_group(_POSTPROC, display_name="Result Display"))
     define_group(foldout_group(_TIMELINE, display_name="Timeline", collapsed=True))
 
     # --- frequency / power (RadarConfig) ------------------------------------
@@ -339,7 +339,7 @@ class RadarComponent(Component):
     saved_result_status = string_field("No saved result loaded", readonly=True, transient=True, group=_SAVED)
 
     snapshot_model = string_field("One explicit RCS point; frozen pose, NO gait Doppler", readonly=True,
-                                  group=_SNAPSHOT, transient=True)
+                                  display_name="Snapshot diagnostic model", group=_SNAPSHOT, transient=True)
     snapshot_target_id = string_field("", group=_SNAPSHOT,
                                      description="Exact existing target ID. Snapshot uses one local point; Animation samples this object's skin.")
     snapshot_local_point = vector3_field([0.0, 0.0, 0.0], group=_SNAPSHOT,
@@ -535,7 +535,7 @@ class RadarComponent(Component):
         Notifications.info("Radar", msg)
         return msg
 
-    @button(display_name="Simulate", group=_SOLVE, operation="solver", cancellable=True,
+    @button(display_name="Simulate Snapshot", group=_SOLVE, operation="solver", cancellable=True,
             progress_surface="component")
     def simulate(self):
         async def _run():
