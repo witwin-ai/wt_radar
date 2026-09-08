@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass, replace
 from importlib.metadata import version
 import io
+import hashlib
 import json
 from pathlib import Path
 import uuid
@@ -370,17 +371,35 @@ def export_animation(ctx, result):
                           metadata={"frameCount": len(result.times_s), "model": MODEL})
 
 
-def persist_export(api, reference):
+def persist_export(api, reference, *, existing_path=None):
     """Validate the solver blob and copy it to a user-owned, unique project file.
 
     Solver result refs are disposable on host shutdown, not permanent exports.
     Exclusive creation never overwrites an existing experiment or result.
     """
-    payload = api.solvers.read_result_ref("witwin.radar.simulate", reference)
     project = Path(api.server.default_scene_dir).resolve()
     folder = project / "results" / "radar-animation"
     if not folder.resolve().is_relative_to(project):
         raise ValueError("Animation export directory escapes the current project.")
+    if existing_path:
+        existing = Path(existing_path).resolve()
+        if not existing.is_relative_to(folder.resolve()) or existing.suffix.lower() != '.npz':
+            raise ValueError('Existing export is outside the Project Radar results directory.')
+        if existing.is_file():
+            # Verify against the reference bound to this solver run, not merely
+            # the displayed filename. The disposable solver blob is not needed.
+            digest = hashlib.sha256()
+            size = 0
+            with existing.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+                    size += len(chunk)
+            if size != reference.get('size'):
+                raise ValueError('Existing export size changed; the file was not overwritten.')
+            if f'sha256:{digest.hexdigest()}' != reference.get('contentHash'):
+                raise ValueError('Existing export checksum changed; the file was not overwritten.')
+            return str(existing)
+    payload = api.solvers.read_result_ref("witwin.radar.simulate", reference)
     folder.mkdir(parents=True, exist_ok=True)
     destination = folder / f"studio-animation-{uuid.uuid4().hex}.npz"
     with destination.open("xb") as stream:

@@ -369,6 +369,38 @@ def test_permanent_export_survives_solver_cache_removal_and_reloads(export_sourc
     assert destination.read_bytes() == raw
 
 
+def test_repeated_export_reuses_verified_file_without_solver_cache(export_source):
+    from wt_radar.adapter.animation import persist_export
+
+    api, reference, source, project, raw = export_source
+    destination = Path(persist_export(api, reference))
+    source.unlink()  # Only the pytest-owned temporary solver result.
+    assert persist_export(api, reference, existing_path=str(destination)) == str(destination)
+    assert list((project / 'results' / 'radar-animation').glob('*.npz')) == [destination]
+    assert destination.read_bytes() == raw
+
+
+@pytest.mark.parametrize('tamper', ['contents', 'size', 'outside_project'])
+def test_repeated_export_never_trusts_path_alone(export_source, tmp_path, tamper):
+    from wt_radar.adapter.animation import persist_export
+
+    api, reference, _, _, raw = export_source
+    destination = Path(persist_export(api, reference))
+    if tamper == 'outside_project':
+        destination = tmp_path / 'unrelated.npz'
+        destination.write_bytes(raw)
+    elif tamper == 'contents':
+        changed = bytearray(raw)
+        changed[-1] ^= 1
+        destination.write_bytes(changed)
+    else:
+        destination.write_bytes(raw[:-1])
+    before = destination.read_bytes()
+    with pytest.raises(ValueError, match='(?i)(checksum|size|outside)'):
+        persist_export(api, reference, existing_path=str(destination))
+    assert destination.read_bytes() == before
+
+
 @pytest.mark.parametrize("tamper", ["hash", "size", "path_escape"])
 def test_export_refuses_invalid_source_without_publishing(export_source, tmp_path, tamper):
     from wt_radar.adapter.animation import persist_export
