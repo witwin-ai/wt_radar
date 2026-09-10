@@ -73,12 +73,15 @@ def test_cold_result_replay_and_export_without_solver(cold_result):
     assert selected["durable_results"][0]["operation_id"] == "recording"
     assert selected["durable_results"][0]["status"] == "available"
     assert scene.to_dict() == before_inspect
-    replay = asyncio.run(run(tools, "prepare_replay", args))
+    # A caller who knows only the Scene can discover both required result IDs.
+    discovered = {"scene_id": scene.scene_id, "radar_object_id": selected["object_id"],
+                  "operation_id": selected["durable_results"][0]["operation_id"]}
+    replay = asyncio.run(run(tools, "prepare_replay", discovered))
     assert replay["completion_status"] == "exported"
     assert agent_tools._recorded_replay_summary(ctx, radar.owner)["ready_for_timeline"]
     assert not radar._animation_result and not radar._solver_result_handle and radar._saved_result is None
     for export_id in ("first", "second", "second"):
-        exported = asyncio.run(run(tools, "export_result", {**args, "export_operation_id": export_id}))
+        exported = asyncio.run(run(tools, "export_result", {**discovered, "export_operation_id": export_id}))
         assert exported["export"]["path"] == str(path)
         assert exported["reused"] is True
         assert path.read_bytes() == before_file

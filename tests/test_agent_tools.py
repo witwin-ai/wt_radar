@@ -227,6 +227,19 @@ def test_registers_narrow_domain_tools(harness):
     assert "hint-explicit-only" not in tools["plan_animation_measurement"].tags
 
 
+@pytest.mark.parametrize("term", ["saved recording", "replay", "npz", "export", "download"])
+def test_saved_result_discovery_hints_belong_only_to_read_only_inspection(harness, term):
+    _scene, tools = harness
+    inspect = tools["inspect_pipeline"]
+    assert f"hint-term:{term}" in inspect.tags
+    assert inspect.permission_tier == "read" and not inspect.side_effects
+    assert not inspect.requires_confirmation
+    assert inspect.input_schema["required"] == ["scene_id"]
+    assert "operation_id" in inspect.description and "recorded_replay" in inspect.description
+    for name in ("runtime_diagnostics", "ensure_sensor", "submit_animation_measurement", "prepare_replay", "export_result"):
+        assert f"hint-term:{term}" not in tools[name].tags
+
+
 def test_pipeline_capability_is_derived_from_registered_action_contracts(harness):
     _scene, tools = harness
     capability = run(tools, "describe_pipeline_contract", {})

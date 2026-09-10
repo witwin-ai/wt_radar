@@ -34,6 +34,12 @@ def actions(*intents: str, boost: int = 19) -> tuple[str, ...]:
 
 
 INSPECT_TAGS = hints("radar", "radar result", "雷达", "雷达结果", boost=16)
+# Result discovery is read-only and does not make runtime diagnostics or writers
+# relevant merely because a user asks about a saved recording or an export.
+RESULT_INSPECT_TAGS = INSPECT_TAGS + tuple(f"hint-term:{term}" for term in (
+    "saved recording", "recorded result", "existing result", "replay", "play back",
+    "npz", "export", "download", "已有结果", "保存的录制", "回放", "导出",
+))
 PLAN_TAGS = hints(
     "plan radar", "radar preflight", "check radar simulation", "雷达预检", boost=18,
 )

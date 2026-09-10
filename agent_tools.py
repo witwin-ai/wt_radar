@@ -34,6 +34,7 @@ from .retrieval_tags import (
     INSPECT_TAGS,
     PLAN_TAGS,
     REPLAY_TAGS,
+    RESULT_INSPECT_TAGS,
     STATUS_TAGS,
     SUBMIT_TAGS,
     VERIFY_TAGS,
@@ -1176,7 +1177,14 @@ def register(ctx: Any) -> None:
         name="inspect_pipeline",
         description=(
             "Inspect Radar Settings, selected animated target, timeline and existing "
-            "native result evidence in one exact Studio scene. This is read-only."
+            "native result evidence in one exact Studio scene. Start here to discover "
+            "a saved recording for replay, playback, NPZ export or download using only "
+            "scene_id; radar_object_id is optional. Returns Radar and target object IDs, "
+            "recorded_replay availability, and durable_results with operation_id, export "
+            "identity and current/unavailable status. Use these discovered identities "
+            "for subsequent result tools instead of asking the user for internal IDs "
+            "or searching project files. Multiple candidates remain explicit choices. "
+            "This is read-only: it does not run a simulation, prepare replay or export."
         ),
         input_schema={
             "type": "object",
@@ -1189,7 +1197,7 @@ def register(ctx: Any) -> None:
         },
         permission_tier="read",
         idempotent=True,
-        tags=INSPECT_TAGS,
+        tags=RESULT_INSPECT_TAGS,
     )
     def _inspect_pipeline(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
