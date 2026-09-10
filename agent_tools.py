@@ -1918,8 +1918,10 @@ def register(ctx: Any) -> None:
         name="prepare_replay",
         description=(
             "Prepare the existing native Range Profile and Range Doppler recording "
-            "for synchronized Studio Timeline playback. It reuses official processing "
-            "and does not implement alternate DSP."
+            "for synchronized Studio Timeline playback. Requires the recording's "
+            "scene and motion inputs to still match; stale results are rejected. "
+            "There is no allow-stale or mismatched-animation preview mode. "
+            "This does not run a new simulation or change animation."
         ),
         input_schema={
             "type": "object",
