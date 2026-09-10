@@ -768,6 +768,46 @@ def _require_live_result_identity(obj: Any, receipt: dict[str, Any]) -> Any:
     return radar
 
 
+def _result_source(ctx: Any, obj: Any, receipt: dict[str, Any]):
+    """Use a live result or a receipt-bound export, never invent a worker handle."""
+    radar = obj.get_component("Radar")
+    if (radar._animation_result or radar._solver_result_handle or radar._solver_run_id):
+        return _require_live_result_identity(obj, receipt), None, None
+    from .adapter.durable_result import load_verified_export
+    from .adapter.replay import motion_fingerprint
+    saved, export = load_verified_export(
+        ctx.api.server.default_scene_dir, receipt, scene_id=obj.scene.scene_id,
+        input_fingerprint=_measurement_input_fingerprint(obj.scene, obj),
+        motion_fingerprint=motion_fingerprint(obj.scene),
+    )
+    return radar, saved, export
+
+
+def _durable_result_summaries(ctx: Any, obj: Any) -> list[dict[str, Any]]:
+    summaries = []
+    for operation_id in _operation_map(ctx):
+        receipt = _get_operation(ctx, operation_id)
+        if (receipt.get("scene_id") != obj.scene.scene_id
+                or receipt.get("radar_object_id") != obj.id or not receipt.get("exports")):
+            continue
+        summary = {"operation_id": operation_id, "status": "unavailable",
+                   "created_at": receipt.get("created_at"), "updated_at": receipt.get("updated_at")}
+        try:
+            from .adapter.durable_result import load_verified_export
+            from .adapter.replay import motion_fingerprint
+            saved, export = load_verified_export(
+                ctx.api.server.default_scene_dir, receipt, scene_id=obj.scene.scene_id,
+                input_fingerprint=_measurement_input_fingerprint(obj.scene, obj),
+                motion_fingerprint=motion_fingerprint(obj.scene),
+            )
+            summary.update(status="available", current=True, export=export,
+                           frame_count=len(saved.times_s), source="verified_native_npz")
+        except ToolError as exc:
+            summary.update(current=False, error={"code": exc.code, "message": str(exc)})
+        summaries.append(summary)
+    return summaries
+
+
 def _expected_result_evidence(scene: Any, radar: Any, native_preflight: dict[str, Any]) -> dict[str, Any]:
     measurement = _validate_interval(
         scene, radar, float(radar.t0), float(radar.animation_duration_s), float(radar.animation_fps),
@@ -1155,7 +1195,8 @@ def register(ctx: Any) -> None:
         scene = _scene_from_args(ctx, args)
         sensors = _radar_objects(scene)
         summaries = [
-            {**_sensor_summary(obj), "recorded_replay": _recorded_replay_summary(ctx, obj)}
+            {**_sensor_summary(obj), "recorded_replay": _recorded_replay_summary(ctx, obj),
+             "durable_results": _durable_result_summaries(ctx, obj)}
             for obj in sensors
         ]
         requested = str(args.get("radar_object_id") or "").strip()
@@ -1905,13 +1946,19 @@ def register(ctx: Any) -> None:
             raise ToolError("Verify the native result before preparing replay.", code="result_not_verified")
         if _measurement_input_fingerprint(scene, obj) != receipt["input_fingerprint"]:
             raise ToolError("Scene inputs changed after simulation.", code="stale_result")
-        radar = _require_live_result_identity(obj, receipt)
+        radar, saved, _export = _result_source(ctx, obj, receipt)
         radar.tx_index = int(args.get("tx_index", 0))
         radar.rx_index = int(args.get("rx_index", 0))
+        previous_saved = radar._saved_result
+        radar._saved_result = saved
         try:
             status = await radar.prepare_synchronized_replay()
         except Exception as exc:
             raise ToolError(str(exc), code="replay_preparation_failed") from exc
+        finally:
+            radar._saved_result = previous_saved
+        if _measurement_input_fingerprint(scene, obj) != receipt["input_fingerprint"]:
+            raise ToolError("Scene inputs changed while preparing replay.", code="stale_result")
         recorded = _recorded_replay_summary(ctx, obj)
         if (
             recorded.get("status") != "available"
@@ -1981,7 +2028,6 @@ def register(ctx: Any) -> None:
             raise ToolError("Verify the native result before export.", code="result_not_verified")
         if _measurement_input_fingerprint(scene, obj) != receipt["input_fingerprint"]:
             raise ToolError("Scene inputs changed after simulation.", code="stale_result")
-        _require_live_result_identity(obj, receipt)
         export_id = str(args["export_operation_id"])
         # One native result has one export critical section. Different client
         # export ids must not race the same Radar component or lose journal data.
@@ -1996,6 +2042,7 @@ def register(ctx: Any) -> None:
                 scene_id=str(scene.scene_id),
                 radar_object_id=str(obj.id),
             )
+            radar, _saved, durable_export = _result_source(ctx, obj, receipt)
             exports = dict(receipt.get("exports") or {})
             prior = exports.get(export_id)
             if isinstance(prior, dict):
@@ -2007,9 +2054,10 @@ def register(ctx: Any) -> None:
                     code="export_receipt_stale",
                     detail={"export": prior},
                 )
-            radar = _require_live_result_identity(obj, receipt)
             current_path = Path(str(getattr(radar, "animation_export_path", "") or ""))
-            if current_path.is_file():
+            if durable_export is not None:
+                export = durable_export
+            elif current_path.is_file():
                 export = _export_evidence(ctx, current_path)
             else:
                 try:
@@ -2031,7 +2079,7 @@ def register(ctx: Any) -> None:
                 "exports": exports,
                 "next_step": "complete",
             })
-            return {**_operation_result(receipt, obj), "export": export, "reused": False}
+            return {**_operation_result(receipt, obj), "export": export, "reused": durable_export is not None}
 
     @tool(
         name="describe_pipeline_contract",
