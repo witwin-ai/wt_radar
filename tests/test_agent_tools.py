@@ -223,6 +223,9 @@ def test_registers_narrow_domain_tools(harness):
     ].tags
     assert "hint-explicit-intent:只回放" in tools["prepare_replay"].tags
     assert "hint-explicit-intent:只导出" in tools["export_result"].tags
+    assert "word-intent:previous recording" in tools["prepare_replay"].tags
+    assert "hint-explicit-intent:watch" in tools["prepare_replay"].tags
+    assert "hint-explicit-intent:npz" in tools["export_result"].tags
     assert "hint-explicit-only" in tools["submit_animation_measurement"].tags
     assert "hint-explicit-only" not in tools["plan_animation_measurement"].tags
 

@@ -9,6 +9,12 @@ RADAR_PACK_TAGS = (
     "word-intent:range doppler",
     "word-intent:radar result",
     "word-intent:radar export",
+    "word-intent:saved recording",
+    "word-intent:previous recording",
+    "word-intent:existing result",
+    "word-intent:same result",
+    "word-intent:last successful recording",
+    "word-intent:recording we already have",
     "intent:雷达仿真",
     "intent:雷达测量",
     "intent:距离像",
@@ -55,9 +61,11 @@ CANCEL_TAGS = actions("cancel radar simulation", "取消雷达仿真", boost=20)
 VERIFY_TAGS = hints("verify radar", "verify result", "验证雷达", "验证结果", boost=18)
 REPLAY_TAGS = actions(
     "prepare radar replay", "replay only", "show radar on timeline",
+    "replay", "watch", "play back",
     "只回放", "准备雷达回放", "同步雷达预览", boost=18,
 )
 EXPORT_TAGS = actions(
     "export radar", "export only", "save radar npz",
+    "export", "download", "npz",
     "只导出", "导出雷达", "保存雷达 NPZ", boost=19,
 )
