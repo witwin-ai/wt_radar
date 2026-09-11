@@ -90,7 +90,7 @@ def test_cold_result_replay_and_export_without_solver(cold_result):
 
 
 def test_matching_live_result_reuses_verified_durable_export(cold_result):
-    _scene, radar, tools, _ctx, args, path = cold_result
+    _scene, radar, tools, ctx, args, path = cold_result
     before = path.read_bytes()
     radar._animation_result = True
     radar._solver_run_id = "native-run"
@@ -104,6 +104,7 @@ def test_matching_live_result_reuses_verified_durable_export(cold_result):
     assert exported["export"]["path"] == str(path)
     assert path.read_bytes() == before
     assert list(path.parent.iterdir()) == [path]
+    assert list(ctx._radar_operation_fallback["recording"]["exports"]) == ["first"]
 
 
 @pytest.mark.parametrize("action", ["prepare_replay", "export_result"])

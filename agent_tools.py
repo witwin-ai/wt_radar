@@ -2226,10 +2226,18 @@ def register(ctx: Any) -> None:
                     code="export_receipt_stale",
                     detail={"export": prior},
                 )
-            current_path = Path(str(getattr(radar, "animation_export_path", "") or ""))
+            # The client id scopes an export request, not the result artifact.
+            # Once this receipt already owns a verified durable export, another
+            # id must reuse it without appending duplicate evidence or touching
+            # workspace state.
             if durable_export is not None:
-                export = durable_export
-            elif current_path.is_file():
+                return {
+                    **_operation_result(receipt, obj),
+                    "export": durable_export,
+                    "reused": True,
+                }
+            current_path = Path(str(getattr(radar, "animation_export_path", "") or ""))
+            if current_path.is_file():
                 export = _export_evidence(ctx, current_path)
             else:
                 try:
@@ -2251,7 +2259,7 @@ def register(ctx: Any) -> None:
                 "exports": exports,
                 "next_step": "complete",
             })
-            return {**_operation_result(receipt, obj), "export": export, "reused": durable_export is not None}
+            return {**_operation_result(receipt, obj), "export": export, "reused": False}
 
     @tool(
         name="describe_pipeline_contract",
