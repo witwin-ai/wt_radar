@@ -47,7 +47,9 @@ RESULT_INSPECT_TAGS = INSPECT_TAGS + tuple(f"hint-term:{term}" for term in (
     "npz", "export", "download", "已有结果", "保存的录制", "回放", "导出",
 ))
 PLAN_TAGS = hints(
-    "plan radar", "radar preflight", "check radar simulation", "雷达预检", boost=18,
+    "plan radar", "radar preflight", "check radar simulation",
+    "rerun radar", "measure again", "current radar position", "moved radar",
+    "雷达预检", "重新测量", "当前位置", "移动雷达", boost=18,
 )
 SENSOR_PLAN_TAGS = hints(
     "plan radar position", "plan radar placement", "radar position", "radar placement",

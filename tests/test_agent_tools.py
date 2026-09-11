@@ -234,6 +234,11 @@ def test_registers_narrow_domain_tools(harness):
     assert "hint-explicit-intent:npz" in tools["export_result"].tags
     assert "hint-explicit-only" in tools["submit_animation_measurement"].tags
     assert "hint-explicit-only" not in tools["plan_animation_measurement"].tags
+    for term in (
+        "rerun radar", "measure again", "current radar position", "moved radar",
+        "重新测量", "当前位置", "移动雷达",
+    ):
+        assert f"hint-term:{term}" in tools["plan_animation_measurement"].tags
 
 
 @pytest.mark.parametrize("term", ["saved recording", "replay", "npz", "export", "download"])
