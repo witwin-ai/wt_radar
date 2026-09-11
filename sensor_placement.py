@@ -10,10 +10,23 @@ import numpy as np
 from witwin_server.tools.base import ToolError
 
 
-def candidate_positions(aim, height_m):
+def candidate_positions(aim, height_m, distance_m=None):
     # World Y is up. A bounded ring search around the authored motion avoids
     # inventing a room-origin coordinate before the room has even been built.
-    for radius in (1., 1.5):
+    if distance_m is None:
+        radii = (1., 1.5)
+    else:
+        vertical = float(height_m) - float(aim[1])
+        horizontal_sq = float(distance_m) ** 2 - vertical ** 2
+        if horizontal_sq <= 1e-8:
+            raise ToolError(
+                'Requested Radar distance is not reachable at the requested height.',
+                code='invalid_sensor_placement',
+                detail={'distance_m': float(distance_m), 'height_m': float(height_m),
+                        'aim_height_m': float(aim[1])},
+            )
+        radii = (math.sqrt(horizontal_sq),)
+    for radius in radii:
         for direction in range(8):
             angle = direction * math.pi / 4
             yield [float(aim[0] + radius * math.cos(angle)), float(height_m),
@@ -43,11 +56,14 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     times = np.linspace(radar.t0, radar.t0 + radar.animation_duration_s - 1 / radar.animation_fps, 3)
     aim = np.concatenate([sampler.positions(float(t)) for t in times]).mean(axis=0)
     height = float(args.get('height_m', 1.))
-    if not np.isfinite(aim).all() or not math.isfinite(height) or not .2 <= height <= 3.:
+    requested_distance = args.get('distance_m')
+    distance = float(requested_distance) if requested_distance is not None else None
+    if (not np.isfinite(aim).all() or not math.isfinite(height) or not .2 <= height <= 3.
+            or (distance is not None and (not math.isfinite(distance) or not .25 <= distance <= 10.))):
         raise ToolError('Automatic placement needs finite target motion and height [0.2,3] m.',
                         code='invalid_sensor_placement')
     failures = []
-    for position in candidate_positions(aim, height):
+    for position in candidate_positions(aim, height, distance):
         detached.update_transform(str(sensor.id), position=position,
                                   rotation=_look_at_euler(np.asarray(position), aim))
         try:
@@ -59,6 +75,8 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         # them immediately, without changing physics settings or reducing FPS.
         return {'position_m': position, 'aim_point_m': aim.tolist(),
                 'mode': 'automatic', 'height_m': height,
+                'requested_distance_m': distance,
+                'actual_distance_m': float(np.linalg.norm(np.asarray(position) - aim)),
                 'tested_candidates': len(failures) + 1,
                 'native_preflight': evidence, 'rejected_candidates': failures}
     raise ToolError('No automatic sensor pose passed native visibility preflight; choose an explicit pose.',

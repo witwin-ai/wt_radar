@@ -1273,6 +1273,10 @@ def register(ctx: Any) -> None:
                 "target_object_id": {"type": "string", "minLength": 1},
                 "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
                 "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
+                "distance_m": {
+                    "type": "number", "minimum": 0.25, "maximum": 10,
+                    "description": "Requested world-space distance from the animated target, for automatic placement only.",
+                },
                 "position_m": {
                     "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
                 },
@@ -1333,6 +1337,11 @@ def register(ctx: Any) -> None:
             )
         if placement_mode == "fixed" and not all(key in args for key in ("position_m", "aim_point_m")):
             raise ToolError("Fixed placement requires position_m and aim_point_m.", code="missing_sensor_pose")
+        if placement_mode == "fixed" and "distance_m" in args:
+            raise ToolError(
+                "Fixed placement is defined by explicit coordinates and cannot also request distance_m.",
+                code="conflicting_sensor_placement",
+            )
 
         proposed = {
             "scene_id": str(scene.scene_id),
@@ -1344,6 +1353,8 @@ def register(ctx: Any) -> None:
         if requested_radar:
             _select_radar(scene, requested_radar)
             proposed["radar_object_id"] = requested_radar
+        if "distance_m" in args:
+            proposed["distance_m"] = float(args["distance_m"])
         if placement_mode == "fixed":
             position = _as_vector3(args["position_m"], "position_m")
             aim = _as_vector3(args["aim_point_m"], "aim_point_m")
@@ -1360,6 +1371,7 @@ def register(ctx: Any) -> None:
             placement = {
                 "mode": "automatic",
                 "height_m": proposed["height_m"],
+                "distance_m": proposed.get("distance_m"),
                 "verification": "deferred_to_native_preflight_after_motion_exists",
             }
         return {
@@ -1398,6 +1410,10 @@ def register(ctx: Any) -> None:
                 "target_object_id": {"type": "string", "minLength": 1},
                 "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
                 "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
+                "distance_m": {
+                    "type": "number", "minimum": 0.25, "maximum": 10,
+                    "description": "Requested world-space distance from the animated target, for automatic placement only.",
+                },
                 "position_m": {
                     "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
                 },
@@ -1498,6 +1514,11 @@ def register(ctx: Any) -> None:
                             code="conflicting_sensor_placement")
         if not automatic and not all(key in args for key in ("position_m", "aim_point_m")):
             raise ToolError("Fixed placement requires position_m and aim_point_m.", code="missing_sensor_pose")
+        if not automatic and "distance_m" in args:
+            raise ToolError(
+                "Fixed placement is defined by explicit coordinates and cannot also request distance_m.",
+                code="conflicting_sensor_placement",
+            )
         requested = str(args.get("radar_object_id") or "").strip()
         created = False
         if requested:

@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 import pytest
 from test_agent_tools import harness, run
 from test_snapshot import scene
@@ -26,6 +27,25 @@ def test_trials_are_detached_and_use_unchanged_native_preflight(scene, monkeypat
     }, radar_object_id='radar')
     assert result['tested_candidates'] == 2
     assert result['position_m'][1] == 1.
+    assert original.to_dict() == before
+
+
+def test_requested_automatic_distance_is_preserved_in_world_space(scene, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    before = copy.deepcopy(original.to_dict())
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+        'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
+    })
+
+    result = sensor_placement.choose_sensor_placement(original, {
+        'target_object_id': 'target', 'duration_s': .2, 'fps': 10,
+        'height_m': 1., 'distance_m': 2.,
+    }, radar_object_id='radar')
+
+    assert result['requested_distance_m'] == 2.
+    assert result['actual_distance_m'] == pytest.approx(2.)
+    assert np.linalg.norm(np.asarray(result['position_m']) - np.asarray(result['aim_point_m'])) == pytest.approx(2.)
     assert original.to_dict() == before
 
 
