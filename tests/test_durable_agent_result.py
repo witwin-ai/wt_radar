@@ -89,6 +89,23 @@ def test_cold_result_replay_and_export_without_solver(cold_result):
     assert scene.timeline_manager.clip.to_dict() == before_timeline
 
 
+def test_matching_live_result_reuses_verified_durable_export(cold_result):
+    _scene, radar, tools, _ctx, args, path = cold_result
+    before = path.read_bytes()
+    radar._animation_result = True
+    radar._solver_run_id = "native-run"
+    radar._solver_result_handle = "native-result"
+
+    exported = asyncio.run(run(tools, "export_result", {
+        **args, "export_operation_id": "warm-reuse",
+    }))
+
+    assert exported["reused"] is True
+    assert exported["export"]["path"] == str(path)
+    assert path.read_bytes() == before
+    assert list(path.parent.iterdir()) == [path]
+
+
 @pytest.mark.parametrize("action", ["prepare_replay", "export_result"])
 @pytest.mark.parametrize("change", ["motion", "file", "producer", "schema", "receipt", "outside"])
 def test_cold_result_refuses_stale_or_invalid_source(cold_result, action, change):

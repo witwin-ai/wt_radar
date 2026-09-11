@@ -774,7 +774,22 @@ def _result_source(ctx: Any, obj: Any, receipt: dict[str, Any]):
     """Use a live result or a receipt-bound export, never invent a worker handle."""
     radar = obj.get_component("Radar")
     if (radar._animation_result or radar._solver_result_handle or radar._solver_run_id):
-        return _require_live_result_identity(obj, receipt), None, None
+        # A matching live handle does not invalidate an already verified,
+        # receipt-bound export. Prefer those durable bytes so another logical
+        # export id remains idempotent instead of serializing a second NPZ with
+        # a different archive identity. Verify the live identity first so an
+        # unrelated in-memory result can never be hidden by an older file.
+        radar = _require_live_result_identity(obj, receipt)
+        if receipt.get("exports"):
+            from .adapter.durable_result import load_verified_export
+            from .adapter.replay import motion_fingerprint
+            saved, export = load_verified_export(
+                ctx.api.server.default_scene_dir, receipt, scene_id=obj.scene.scene_id,
+                input_fingerprint=_measurement_input_fingerprint(obj.scene, obj),
+                motion_fingerprint=motion_fingerprint(obj.scene),
+            )
+            return radar, saved, export
+        return radar, None, None
     from .adapter.durable_result import load_verified_export
     from .adapter.replay import motion_fingerprint
     saved, export = load_verified_export(
