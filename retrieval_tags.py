@@ -49,6 +49,10 @@ RESULT_INSPECT_TAGS = INSPECT_TAGS + tuple(f"hint-term:{term}" for term in (
 PLAN_TAGS = hints(
     "plan radar", "radar preflight", "check radar simulation", "雷达预检", boost=18,
 )
+SENSOR_PLAN_TAGS = hints(
+    "plan radar position", "plan radar placement", "radar position", "radar placement",
+    "point radar", "雷达位置", "规划雷达位置", "雷达摆位", boost=20,
+)
 ENSURE_TAGS = actions(
     "place radar", "configure radar", "放置雷达", "配置雷达", boost=19,
 )

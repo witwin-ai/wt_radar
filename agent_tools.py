@@ -35,6 +35,7 @@ from .retrieval_tags import (
     PLAN_TAGS,
     REPLAY_TAGS,
     RESULT_INSPECT_TAGS,
+    SENSOR_PLAN_TAGS,
     STATUS_TAGS,
     SUBMIT_TAGS,
     VERIFY_TAGS,
@@ -1254,6 +1255,131 @@ def register(ctx: Any) -> None:
         }
 
     @tool(
+        name="plan_sensor_placement",
+        description=(
+            "Plan one Radar Settings placement without changing the scene, timeline, "
+            "project or native simulation state. Validates explicit fixed coordinates "
+            "and resolves an exact skinned target when unambiguous. Automatic placement "
+            "is recorded as deferred to ensure_sensor, whose native preflight verifies "
+            "visibility after authored motion exists. Use this for plan-only placement "
+            "requests and revisions; it never creates or configures Radar."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "target_object_id": {"type": "string", "minLength": 1},
+                "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
+                "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
+                "position_m": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                },
+                "aim_point_m": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                },
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        tags=SENSOR_PLAN_TAGS,
+    )
+    def _plan_sensor_placement(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        target_id = str(args.get("target_object_id") or "").strip()
+        candidates = [
+            obj for obj in (getattr(scene, "objects", {}) or {}).values()
+            if callable(getattr(obj, "get_component", None))
+            and obj.get_component("SkinnedMesh") is not None
+        ]
+        if target_id:
+            target = scene.get_object(target_id)
+            if target is None:
+                raise ToolError(
+                    f"Radar target does not exist in scene: {target_id}",
+                    code="missing_target",
+                    detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
+                )
+            if target.get_component("SkinnedMesh") is None:
+                raise ToolError(
+                    "Radar animation target must have a SkinnedMesh component.",
+                    code="target_not_skinned",
+                    detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
+                )
+        elif len(candidates) == 1:
+            target_id = str(candidates[0].id)
+        else:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "scene_id": str(scene.scene_id),
+                "blockers": [{
+                    "code": "missing_target" if not candidates else "ambiguous_target",
+                    "message": "Select one exact skinned Radar target.",
+                    "target_object_ids": [str(obj.id) for obj in candidates],
+                }],
+                "mutates_scene": False,
+                "mutates_timeline": False,
+                "mutates_project": False,
+            }
+
+        placement_mode = str(args.get("placement_mode") or "fixed")
+        if placement_mode == "automatic" and ("position_m" in args or "aim_point_m" in args):
+            raise ToolError(
+                "Automatic placement cannot override explicit coordinates; use fixed mode.",
+                code="conflicting_sensor_placement",
+            )
+        if placement_mode == "fixed" and not all(key in args for key in ("position_m", "aim_point_m")):
+            raise ToolError("Fixed placement requires position_m and aim_point_m.", code="missing_sensor_pose")
+
+        proposed = {
+            "scene_id": str(scene.scene_id),
+            "target_object_id": target_id,
+            "placement_mode": placement_mode,
+            "height_m": float(args.get("height_m", 1.0)),
+        }
+        requested_radar = str(args.get("radar_object_id") or "").strip()
+        if requested_radar:
+            _select_radar(scene, requested_radar)
+            proposed["radar_object_id"] = requested_radar
+        if placement_mode == "fixed":
+            position = _as_vector3(args["position_m"], "position_m")
+            aim = _as_vector3(args["aim_point_m"], "aim_point_m")
+            proposed["position_m"] = position.tolist()
+            proposed["aim_point_m"] = aim.tolist()
+            rotation = _look_at_euler(position, aim)
+            placement = {
+                "mode": "fixed",
+                "position_m": position.tolist(),
+                "aim_point_m": aim.tolist(),
+                "rotation_euler_zxy_rad": rotation,
+            }
+        else:
+            placement = {
+                "mode": "automatic",
+                "height_m": proposed["height_m"],
+                "verification": "deferred_to_native_preflight_after_motion_exists",
+            }
+        return {
+            "ok": True,
+            "status": "ready_for_confirmation",
+            "scene_id": str(scene.scene_id),
+            "target_object_id": target_id,
+            "placement": placement,
+            "proposed_ensure_sensor_arguments": proposed,
+            "next_step": {
+                "tool": "witwin.radar.ensure_sensor",
+                "requires_fresh_operation_id": True,
+                "requires_confirmation": True,
+            },
+            "mutates_scene": False,
+            "mutates_timeline": False,
+            "mutates_project": False,
+        }
+
+    @tool(
         name="ensure_sensor",
         description=(
             "Idempotently create or configure one Studio Radar Settings object at an "
@@ -2103,6 +2229,7 @@ def register(ctx: Any) -> None:
     )
     def _describe_pipeline_contract(_args: Dict[str, Any]) -> dict[str, Any]:
         actions = {
+            "plan_placement": _plan_sensor_placement,
             "configure": _ensure_sensor,
             "preflight": _plan_animation_measurement,
             "simulate": _submit_animation_measurement,
@@ -2133,6 +2260,7 @@ def register(ctx: Any) -> None:
     for value in (
         _runtime_diagnostics,
         _inspect_pipeline,
+        _plan_sensor_placement,
         _ensure_sensor,
         _plan_animation_measurement,
         _submit_animation_measurement,

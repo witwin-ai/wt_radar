@@ -193,6 +193,7 @@ def test_registers_narrow_domain_tools(harness):
     assert set(tools) == {
         "runtime_diagnostics",
         "inspect_pipeline",
+        "plan_sensor_placement",
         "ensure_sensor",
         "plan_animation_measurement",
         "submit_animation_measurement",
@@ -204,6 +205,9 @@ def test_registers_narrow_domain_tools(harness):
         "describe_pipeline_contract",
     }
     assert tools["inspect_pipeline"].permission_tier == "read"
+    assert tools["plan_sensor_placement"].permission_tier == "read"
+    assert tools["plan_sensor_placement"].side_effects is False
+    assert tools["plan_sensor_placement"].requires_confirmation is False
     assert tools["ensure_sensor"].permission_tier == "scene_write"
     assert tools["ensure_sensor"].requires_confirmation
     assert tools["ensure_sensor"].idempotent
@@ -293,6 +297,43 @@ def test_inspect_reports_missing_radar_without_mutating_scene(harness):
     assert result["status"] == "blocked"
     assert result["blockers"][0]["code"] == "missing_radar"
     assert set(scene.objects) == before
+
+
+def test_plan_sensor_placement_is_read_only_and_resolves_single_skinned_target(harness):
+    scene, tools = harness
+    before = copy.deepcopy(scene.to_dict())
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id,
+        "position_m": [3, 1, 2],
+        "aim_point_m": [0, 0.4, 0],
+    })
+
+    assert result["status"] == "ready_for_confirmation"
+    assert result["target_object_id"] == "catstray"
+    assert result["placement"]["position_m"] == [3.0, 1.0, 2.0]
+    assert result["proposed_ensure_sensor_arguments"]["aim_point_m"] == [0.0, 0.4, 0.0]
+    assert result["next_step"]["requires_confirmation"] is True
+    assert result["mutates_scene"] is False
+    assert scene.to_dict() == before
+
+
+def test_plan_sensor_placement_blocks_ambiguous_target_without_writing(harness):
+    scene, tools = harness
+    second = SceneObject(id="other-cat", name="Other Cat", mesh_type="Empty")
+    second.add_component(SkinnedMeshComponent())
+    scene.add_object(second)
+    before = copy.deepcopy(scene.to_dict())
+
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id,
+        "position_m": [3, 1, 2],
+        "aim_point_m": [0, 0.4, 0],
+    })
+
+    assert result["status"] == "blocked"
+    assert result["blockers"][0]["code"] == "ambiguous_target"
+    assert result["blockers"][0]["target_object_ids"] == ["catstray", "other-cat"]
+    assert scene.to_dict() == before
 
 
 def test_ensure_sensor_creates_once_and_aims_local_minus_z(harness):
