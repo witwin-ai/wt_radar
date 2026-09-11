@@ -628,6 +628,17 @@ def _recorded_replay_summary(ctx: Any, obj: Any) -> dict[str, Any]:
         return {**summary, "status": "invalid_manifest", "detail": str(exc)}
 
 
+def _recorded_replay_is_ready(summary: dict[str, Any]) -> bool:
+    """One completion predicate shared by automatic and explicit Replay paths."""
+    return (
+        summary.get("status") == "available"
+        and summary.get("payload_available") is True
+        and summary.get("payload_integrity_verified") is True
+        and summary.get("motion_current") is True
+        and summary.get("ready_for_timeline") is True
+    )
+
+
 def _sensor_summary(obj: Any) -> dict[str, Any]:
     radar = obj.get_component("Radar")
     pose = SensorSpec.from_component(radar)
@@ -936,14 +947,89 @@ async def _run_animation_job(
             raise RuntimeError(
                 "Native simulation returned without publishing an animation result, run id, and result handle."
             )
-        setattr(radar, "_last_result_input_fingerprint", input_fingerprint)
-        _put_operation(ctx, {
-            **receipt,
-            "status": "simulated",
+        latest = _get_operation(ctx, operation_id) or receipt
+        completed = {
+            **latest,
             "run_id": run_id,
             "result_handle": result_handle,
+        }
+        manifest = await asyncio.to_thread(radar._query_result, "animation_manifest", {})
+        expected = dict(completed.get("expected_evidence") or {})
+        checks = _native_manifest_checks(manifest, completed, expected)
+        if not all(checks.values()):
+            _put_operation(ctx, {
+                **completed,
+                "status": "failed",
+                "verification": {"passed": False, "checks": checks, "manifest": manifest},
+                "error": {
+                    "code": "result_evidence_mismatch",
+                    "message": "Native result did not satisfy every preflight completion requirement.",
+                },
+                "next_step": "inspect_failure",
+            })
+            return
+        setattr(radar, "_last_result_input_fingerprint", input_fingerprint)
+        recorded = _recorded_replay_summary(ctx, obj)
+        if not _recorded_replay_is_ready(recorded):
+            try:
+                replay_status = await radar.prepare_synchronized_replay()
+            except Exception as replay_error:  # noqa: BLE001 - preserve diagnostic evidence
+                _put_operation(ctx, {
+                    **completed,
+                    "status": "failed",
+                    "verification": {"passed": True, "checks": checks, "manifest": manifest},
+                    "error": {
+                        "code": "replay_preparation_failed",
+                        "type": type(replay_error).__name__,
+                        "message": str(replay_error),
+                    },
+                    "next_step": "inspect_failure",
+                })
+                return
+            recorded = _recorded_replay_summary(ctx, obj)
+        else:
+            replay_status = str(getattr(radar, "replay_status", "Replay ready"))
+        current = _measurement_input_fingerprint(scene, obj)
+        if current != input_fingerprint:
+            _put_operation(ctx, {
+                **completed,
+                "status": "stale",
+                "verification": {"passed": True, "checks": checks, "manifest": manifest},
+                "error": {
+                    "code": "scene_changed_during_replay_publication",
+                    "message": "The scene changed before the completed Replay could be bound.",
+                    "expected_input_fingerprint": input_fingerprint,
+                    "current_input_fingerprint": current,
+                },
+                "next_step": "plan_again",
+            })
+            return
+        if not _recorded_replay_is_ready(recorded):
+            _put_operation(ctx, {
+                **completed,
+                "status": "failed",
+                "verification": {"passed": True, "checks": checks, "manifest": manifest},
+                "error": {
+                    "code": "replay_preparation_unverified",
+                    "message": "The multi-frame result exists, but no current verified Timeline Replay was published.",
+                    "recorded_replay": recorded,
+                },
+                "next_step": "inspect_failure",
+            })
+            return
+        _put_operation(ctx, {
+            **completed,
+            "status": "replay_ready",
+            "verification": {"passed": True, "checks": checks, "manifest": manifest},
+            "replay": {
+                "ready": True,
+                "status": str(replay_status),
+                "tx_index": int(radar.tx_index),
+                "rx_index": int(radar.rx_index),
+                "recorded_replay": recorded,
+            },
             "error": None,
-            "next_step": "verify_result",
+            "next_step": "export_result",
         })
     except asyncio.CancelledError:
         latest = _get_operation(ctx, operation_id) or receipt
@@ -1766,8 +1852,9 @@ def register(ctx: Any) -> None:
         name="submit_animation_measurement",
         description=(
             "Submit the already-preflighted Studio animation to the existing native "
-            "Radar 0.3 CUDA solver. Returns immediately with an operation receipt; "
-            "poll get_simulation and then call verify_result. No fallback is allowed."
+            "Radar 0.3 CUDA solver. Returns immediately with an operation receipt; the "
+            "background job verifies native evidence and publishes Timeline Replay as one "
+            "completion contract. Poll get_simulation; no fallback is allowed."
         ),
         input_schema={
             "type": "object",
@@ -1990,9 +2077,9 @@ def register(ctx: Any) -> None:
     @tool(
         name="verify_result",
         description=(
-            "Verify the completed native result against the preflight fingerprint, "
+            "Re-verify a completed native result against the preflight fingerprint, "
             "actual frame count, cube shape, finite CUDA data and package provenance. "
-            "Only this tool may promote a simulated operation to verified."
+            "Normal submissions perform this check automatically before Replay is ready."
         ),
         input_schema={
             "type": "object",
@@ -2132,13 +2219,7 @@ def register(ctx: Any) -> None:
         if _measurement_input_fingerprint(scene, obj) != receipt["input_fingerprint"]:
             raise ToolError("Scene inputs changed while preparing replay.", code="stale_result")
         recorded = _recorded_replay_summary(ctx, obj)
-        if (
-            recorded.get("status") != "available"
-            or recorded.get("payload_available") is not True
-            or recorded.get("payload_integrity_verified") is not True
-            or recorded.get("motion_current") is not True
-            or recorded.get("ready_for_timeline") is not True
-        ):
+        if not _recorded_replay_is_ready(recorded):
             raise ToolError(
                 "Synchronized replay was not published as a current, verified numeric asset.",
                 code="replay_preparation_unverified",

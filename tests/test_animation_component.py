@@ -177,6 +177,44 @@ def test_completed_animation_automatically_prepares_replay(component, monkeypatc
     assert prepared == [("next-run", "next")]
 
 
+def test_static_snapshot_uses_separate_identity_and_preserves_replay(component, monkeypatch):
+    from wt_radar.components import radar
+    from wt_radar.adapter import snapshot
+
+    run = SimpleNamespace(status="succeeded", outputs={"resultHandle": "snapshot-result"}, run_id="snapshot-run")
+    stub_solve_transport(component, monkeypatch, lambda *args, **kwargs: run)
+    monkeypatch.setattr(snapshot, "snapshot_request", lambda value: {
+        "duration_s": 0.0, "fps": 1.0, "time_s": 0.5,
+    })
+    observed = []
+
+    def query(_solver, handle, operation, params, **kwargs):
+        observed.append((handle, kwargs.get("run_id"), operation))
+        return {"data": {
+            "view": "range_profile",
+            "tx": 0,
+            "rx": 0,
+            "range_m": [0.0, 1.0],
+            "magnitude": [0.0, 1.0],
+            "metadata": {"target_object_id": "cat", "snapshot_time_s": 0.5},
+        }}
+
+    radar.api.solvers.query = query
+    component.signal_source = {"sourceId": "replay-source", "mode": "timeline"}
+    component.signal_figure.line([0, 1], [2, 3], label="replay")
+    replay_source = component.signal_source
+
+    asyncio.run(component._simulate_async(animation=False))
+
+    assert observed == [("snapshot-result", "snapshot-run", "snapshot_view")]
+    assert component._solver_result_handle == "recorded-animation"
+    assert component._solver_run_id == "run-animation"
+    assert component._animation_result
+    assert component.signal_source == replay_source
+    assert component.signal_figure._series
+    assert component.snapshot_figure.to_dict()["data"]
+
+
 def test_animation_status_reports_interval_visibility_coverage(component, monkeypatch):
     from wt_radar.adapter import animation
 

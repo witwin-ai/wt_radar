@@ -12,6 +12,13 @@ def test_current_controls_keep_simulation_replay_and_export():
         assert not groups.keys() & {"Tracer", "Noise", "Polarization", "Receiver", "Timeline"}
         assert groups["Compatibility"]["collapsed"] is True
         assert all("Legacy" not in group["display_name"] for group in groups.values())
+        assert groups["StudioAnimation"]["display_name"] == "Simulation & Replay (multi-frame)"
+        assert groups["SnapshotTarget"]["display_name"] == "Static Snapshot (1-frame diagnostic)"
+        assert groups["SnapshotTarget"]["collapsed"] is True
+        fields = {field["name"]: field for field in metadata["fields"]}
+        assert fields["signal_source"]["group"] == "StudioAnimation"
+        assert fields["signal_figure"]["group"] == "StudioAnimation"
+        assert fields["snapshot_figure"]["group"] == "SnapshotTarget"
 
 
 def test_old_settings_round_trip_and_remain_available_for_repair():

@@ -260,9 +260,14 @@ def show_snapshot(component):
     from .replay import numeric_plot
     params = {"view": str(component.view), "tx": int(component.tx_index), "rx": int(component.rx_index),
               "static_clutter_removal": bool(component.static_clutter_removal), "show_cfar": bool(component.show_cfar)}
-    payload = component._query_result("snapshot_view", params)
+    payload = component._query_result(
+        "snapshot_view",
+        params,
+        result_handle=component._snapshot_solver_result_handle,
+        run_id=component._snapshot_solver_run_id,
+    )
     meta = payload["metadata"]
     payload["title"] = (f"Frozen point snapshot | {meta['target_object_id']} | t={meta['snapshot_time_s']:.3f}s | "
                         f"TX{payload['tx']} RX{payload['rx']} | linear amplitude")
-    component.signal_figure.set_plot_data(numeric_plot(payload))
+    component.snapshot_figure.set_plot_data(numeric_plot(payload))
     return "Native GPU snapshot displayed; not a moving-cat measurement"

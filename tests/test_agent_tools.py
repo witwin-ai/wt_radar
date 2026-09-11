@@ -821,28 +821,11 @@ def test_submit_observe_and_verify_requires_native_evidence(harness, monkeypatch
     monkeypatch.setattr(radar, "_simulate_async", fake_simulate)
     expected = radar_tools._measurement_input_fingerprint(scene, sensor)
     remember_preflight(scene, sensor, expected)
-
-    async def exercise():
-        submitted = await tools["submit_animation_measurement"].run({
-            "scene_id": scene.scene_id,
-            "radar_object_id": sensor_id,
-            "operation_id": "job-1",
-            "expected_input_fingerprint": expected,
-        })
-        assert submitted["status"] == "queued"
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-    asyncio.run(exercise())
-    observed = run(tools, "get_simulation", {
-        "scene_id": scene.scene_id, "radar_object_id": sensor_id, "operation_id": "job-1",
-    })
-    assert observed["status"] == "simulated"
     expected_versions = {
         name: radar_tools._package_version(name)
         for name in ("witwin-radar", "witwin-channel", "witwin")
     }
-    monkeypatch.setattr(radar, "_query_result", lambda operation, params: {
+    current_manifest = [{
         **topology_manifest(),
         "frame_count": 50,
         "cube_shape": [50, 3, 4, 128, 256],
@@ -865,11 +848,39 @@ def test_submit_observe_and_verify_requires_native_evidence(harness, monkeypatch
         "model": "studio_visible_skinned_surface_sites_v2",
         "versions": expected_versions,
         "times_s": (np.arange(50, dtype=np.float64) / 10.0).tolist(),
+    }]
+    monkeypatch.setattr(radar, "_query_result", lambda *_: current_manifest[0])
+    ready_replay = {
+        "status": "available", "payload_available": True,
+        "payload_integrity_verified": True, "motion_current": True,
+        "ready_for_timeline": True, "frame_count": 50,
+    }
+    monkeypatch.setattr(radar_tools, "_recorded_replay_summary", lambda *_: ready_replay)
+
+    async def exercise():
+        submitted = await tools["submit_animation_measurement"].run({
+            "scene_id": scene.scene_id,
+            "radar_object_id": sensor_id,
+            "operation_id": "job-1",
+            "expected_input_fingerprint": expected,
+        })
+        assert submitted["status"] == "queued"
+        task = radar_tools._ACTIVE_JOBS[
+            radar_tools._job_key(scene._radar_test_context, "job-1")
+        ]
+        await task
+
+    asyncio.run(exercise())
+    observed = run(tools, "get_simulation", {
+        "scene_id": scene.scene_id, "radar_object_id": sensor_id, "operation_id": "job-1",
     })
+    assert observed["status"] == "replay_ready"
+    assert observed["verification"]["passed"] is True
+    assert observed["can_claim_success"] is True
     verified = asyncio.run(tools["verify_result"].run({
         "scene_id": scene.scene_id, "radar_object_id": sensor_id, "operation_id": "job-1",
     }))
-    assert verified["status"] == "verified"
+    assert verified["status"] == "replay_ready"
     assert verified["verification"]["passed"] is True
     assert verified["can_claim_success"] is True
 
@@ -884,7 +895,7 @@ def test_submit_observe_and_verify_requires_native_evidence(harness, monkeypatch
     elif change == "identity":
         radar._solver_result_handle = "other-result"
     elif change == "manifest":
-        monkeypatch.setattr(radar, "_query_result", lambda *_: {})
+        current_manifest[0] = {}
     args = {"scene_id": scene.scene_id, "radar_object_id": sensor_id, "operation_id": "job-1"}
     if change == "identity":
         with pytest.raises(ToolError) as error:
@@ -1032,6 +1043,21 @@ def test_verify_rejects_wrong_shape_scene_model_versions_and_sites(harness, monk
     monkeypatch.setattr(radar, "_simulate_async", fake_simulate)
     expected = radar_tools._measurement_input_fingerprint(scene, sensor)
     remember_preflight(scene, sensor, expected)
+    monkeypatch.setattr(radar, "_query_result", lambda *_: {
+        **topology_manifest(site_count=999),
+        "frame_count": 50,
+        "cube_shape": [50, 1],
+        "all_finite": True,
+        "site_count": 999,
+        "timebase_finite": True,
+        "motion_arrays_finite": True,
+        "device": "cuda",
+        "input_fingerprint": expected,
+        "scene_id": "wrong-scene",
+        "model": "wrong-model",
+        "versions": {},
+        "times_s": (np.arange(50, dtype=np.float64) / 10.0).tolist(),
+    })
 
     async def exercise():
         submitted = await tools["submit_animation_measurement"].run({
@@ -1041,24 +1067,11 @@ def test_verify_rejects_wrong_shape_scene_model_versions_and_sites(harness, monk
             "expected_input_fingerprint": expected,
         })
         assert submitted["can_claim_success"] is False
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        monkeypatch.setattr(radar, "_query_result", lambda *_: {
-            **topology_manifest(site_count=999),
-            "frame_count": 50,
-            "cube_shape": [50, 1],
-            "all_finite": True,
-            "site_count": 999,
-            "timebase_finite": True,
-            "motion_arrays_finite": True,
-            "device": "cuda",
-            "input_fingerprint": expected,
-            "scene_id": "wrong-scene",
-            "model": "wrong-model",
-            "versions": {},
-            "times_s": (np.arange(50, dtype=np.float64) / 10.0).tolist(),
-        })
-        return await tools["verify_result"].run({
+        task = radar_tools._ACTIVE_JOBS[
+            radar_tools._job_key(scene._radar_test_context, "bad-evidence-job")
+        ]
+        await task
+        return tools["get_simulation"].run({
             "scene_id": scene.scene_id,
             "radar_object_id": sensor.id,
             "operation_id": "bad-evidence-job",
@@ -1150,25 +1163,27 @@ def test_verify_rejects_noncanonical_cuda_device(harness, monkeypatch, fake_devi
     expected = radar_tools._measurement_input_fingerprint(scene, sensor)
     remember_preflight(scene, sensor, expected)
     versions = {name: radar_tools._package_version(name) for name in ("witwin-radar", "witwin-channel", "witwin")}
+    monkeypatch.setattr(radar, "_query_result", lambda *_: {
+        **topology_manifest(),
+        "frame_count": 50, "cube_shape": [50, 3, 4, 128, 256],
+        "all_finite": True, "site_count": 4, "frame_diagnostics_count": 50,
+        "timebase_finite": True,
+        "motion_arrays_finite": True,
+        "device": fake_device, "input_fingerprint": expected,
+        "scene_id": scene.scene_id, "model": "studio_visible_skinned_surface_sites_v2",
+        "versions": versions, "times_s": (np.arange(50) / 10.0).tolist(),
+    })
 
     async def exercise():
         await tools["submit_animation_measurement"].run({
             "scene_id": scene.scene_id, "radar_object_id": sensor.id,
             "operation_id": f"device-job-{fake_device}", "expected_input_fingerprint": expected,
         })
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        monkeypatch.setattr(radar, "_query_result", lambda *_: {
-            **topology_manifest(),
-            "frame_count": 50, "cube_shape": [50, 3, 4, 128, 256],
-            "all_finite": True, "site_count": 4, "frame_diagnostics_count": 50,
-            "timebase_finite": True,
-            "motion_arrays_finite": True,
-            "device": fake_device, "input_fingerprint": expected,
-            "scene_id": scene.scene_id, "model": "studio_visible_skinned_surface_sites_v2",
-            "versions": versions, "times_s": (np.arange(50) / 10.0).tolist(),
-        })
-        return await tools["verify_result"].run({
+        task = radar_tools._ACTIVE_JOBS[
+            radar_tools._job_key(scene._radar_test_context, f"device-job-{fake_device}")
+        ]
+        await task
+        return tools["get_simulation"].run({
             "scene_id": scene.scene_id, "radar_object_id": sensor.id,
             "operation_id": f"device-job-{fake_device}",
         })

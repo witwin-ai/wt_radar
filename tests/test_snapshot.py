@@ -160,18 +160,25 @@ def test_profile_widget_preserves_tiny_native_amplitudes():
     assert 2e-8 < plot["data"]["ylim"][1] < 3e-8
 
 
-def test_failed_request_clears_previous_result_and_figure(scene, monkeypatch):
+def test_failed_static_snapshot_preserves_existing_replay(scene, monkeypatch):
     _, component = scene
     monkeypatch.setattr(component, "_scene_is_live", lambda: True)
     component._snapshot_result = True
+    component._animation_result = True
     component._solver_result_handle = "old"
+    component._solver_run_id = "old-run"
+    component.signal_source = {"sourceId": "existing-replay", "mode": "timeline"}
     component.signal_figure.line([0, 1], [2, 3])
     component.snapshot_target_id = ""
     with pytest.raises(ValueError, match="Target ID"):
         asyncio.run(component._simulate_async())
-    assert component._solver_result_handle == ""
+    assert component._solver_result_handle == "old"
+    assert component._solver_run_id == "old-run"
+    assert component._animation_result
     assert not component._snapshot_result
-    assert not component.signal_figure._series
+    assert component.signal_source["sourceId"] == "existing-replay"
+    assert component.signal_figure._series
+    assert not component.snapshot_figure._series
     assert "failed" in component.snapshot_status
     assert not component._snapshot_running
 

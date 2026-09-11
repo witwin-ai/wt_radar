@@ -107,6 +107,9 @@ class RadarComponent(Component):
     _timeline_radar = None
     _solver_result_handle = ""
     _solver_run_id = ""
+    _snapshot_solver_result_handle = ""
+    _snapshot_solver_run_id = ""
+    _snapshot_solver_pending_run_id = ""
     _signal_stream_id = ""
     _signal_source_id = ""
     _live_thread = None
@@ -152,9 +155,13 @@ class RadarComponent(Component):
     define_group(foldout_group(_NOISE, display_name="Legacy Noise (unsupported in snapshots)", collapsed=True))
     define_group(foldout_group(_POLARIZATION, display_name="Legacy Polarization (unsupported in snapshots)", collapsed=True))
     define_group(foldout_group(_RECEIVER, display_name="Legacy Receiver (unsupported in snapshots)", collapsed=True))
-    define_group(foldout_group(_SOLVE, display_name="Snapshot Simulation", collapsed=True))
-    define_group(foldout_group(_SNAPSHOT, display_name="Target & Scattering Model"))
-    define_group(foldout_group(_ANIMATION, display_name="Animation Simulation & Replay"))
+    define_group(foldout_group(_SOLVE, display_name="Advanced runtime settings", collapsed=True))
+    define_group(foldout_group(
+        _SNAPSHOT,
+        display_name="Static Snapshot (1-frame diagnostic)",
+        collapsed=True,
+    ))
+    define_group(foldout_group(_ANIMATION, display_name="Simulation & Replay (multi-frame)"))
     define_group(foldout_group(_SAVED, display_name="Load Saved Recording", collapsed=True))
     define_group(foldout_group(_POSTPROC, display_name="Result Display"))
     define_group(foldout_group(_TIMELINE, display_name="Timeline", collapsed=True))
@@ -294,7 +301,8 @@ class RadarComponent(Component):
     # --- solve (RadarResult) ------------------------------------------------
     motion_sampling = string_field("per_chirp", options=["per_chirp", "per_frame"], enum_toggle=True,
                                    group=_SOLVE, hidden=True, description="Legacy only; snapshots freeze all motion")
-    t0 = float_field(0.0, group=_SOLVE, description="Snapshot timeline time (s); pose is frozen for the whole measurement")
+    t0 = float_field(0.0, group=_ANIMATION,
+                     description="Measurement start time (s). Multi-frame simulation continues from here; Snapshot freezes here.")
     stream_max_fps = float_field(30.0, min=0.1, max=30.0, group=_SOLVE,
                                  description="Maximum realtime stream solves per second")
     stream_channels = string_field("rd", group=_SOLVE,
@@ -320,14 +328,14 @@ class RadarComponent(Component):
         default_channel="rd",
         mode="stream",
         kind="radar.result",
-        group=_SOLVE,
+        group=_ANIMATION,
         hide_label=True,
         show_header=False,
         hide_if="saved_result_loaded",
     )
     signal_figure = figure(
-        title="Radar Signal",
-        group=_SOLVE,
+        title="Radar Replay",
+        group=_ANIMATION,
         hide_if={"field_name": "stream_status", "operator": "in", "value": ["running", "paused"]},
     )
 
@@ -348,8 +356,9 @@ class RadarComponent(Component):
                                   description="Assumed scalar RCS in square metres; not a calibrated cat value.")
     snapshot_polarization = vector3_field([0.0, 1.0, 0.0], group=_SNAPSHOT,
                                           description="World-space polarization for both propagation legs.")
-    snapshot_status = string_field("Not run. Simulate freezes the scene at Solve Start Time; LOS only.",
+    snapshot_status = string_field("Not run. Static Snapshot freezes the scene at the measurement start time; LOS only.",
                                    readonly=True, transient=True, group=_SNAPSHOT)
+    snapshot_figure = figure(title="Static diagnostic snapshot (one frame)", group=_SNAPSHOT)
     animation_duration_s = float_field(5.0, min=0.01, group=_ANIMATION,
                                        description="Exact baked timeline duration (0..30 seconds), starting at t0.")
     animation_fps = float_field(10.0, min=1.0, group=_ANIMATION,
@@ -423,14 +432,14 @@ class RadarComponent(Component):
         if self._animation_result:
             if field_name in self._POSTPROC_AUTO_REFRESH_FIELDS | {"animation_frame_index"}:
                 self.update_view()
-            elif field_name not in {"animation_status", "animation_export_path", "snapshot_status", "signal_figure", "replay_status"}:
-                self.animation_status = "Settings changed. Showing the recorded run; click Simulate Animation to recompute."
+            elif field_name not in {"animation_status", "animation_export_path", "snapshot_status", "snapshot_figure", "signal_figure", "replay_status"}:
+                self.animation_status = "Settings changed. Showing the recorded run; click Simulate & Prepare Replay to recompute."
             return
         if self._snapshot_result:
             if field_name in self._POSTPROC_AUTO_REFRESH_FIELDS:
                 self.update_view()
-            elif field_name not in {"snapshot_status", "signal_figure"}:
-                self.snapshot_status = "Settings changed. Display is the previous recorded snapshot; click Simulate to recompute."
+            elif field_name not in {"snapshot_status", "snapshot_figure", "signal_figure"}:
+                self.snapshot_status = "Settings changed. Display is the previous diagnostic; run Static Snapshot to recompute."
             return
         if field_name not in self._POSTPROC_AUTO_REFRESH_FIELDS:
             return
@@ -535,7 +544,7 @@ class RadarComponent(Component):
         Notifications.info("Radar", msg)
         return msg
 
-    @button(display_name="Simulate Snapshot", group=_SOLVE, operation="solver", cancellable=True,
+    @button(display_name="Run Static Snapshot (1 frame)", group=_SNAPSHOT, operation="solver", cancellable=True,
             progress_surface="component")
     def simulate(self):
         async def _run():
@@ -547,7 +556,7 @@ class RadarComponent(Component):
             return asyncio.run(_run())
         return _run()
 
-    @button(display_name="Simulate Animation", group=_ANIMATION, operation="solver", cancellable=True,
+    @button(display_name="Simulate & Prepare Replay", group=_ANIMATION, operation="solver", cancellable=True,
             progress_surface="component")
     def simulate_animation(self):
         try:
@@ -606,28 +615,37 @@ class RadarComponent(Component):
         """Submit an immutable copy of current Studio state to the native solver."""
         from ..adapter.snapshot import snapshot_request, SUPPORTED_VIEWS
         if self._snapshot_running or self._export_running or self._replay_preparing or str(self.stream_status) in {"running", "paused"}:
-            raise ValueError("A radar solve/stream is already active; stop it before another snapshot.")
+            raise ValueError("A Radar solve/stream is already active; wait before starting another simulation.")
         self._snapshot_running = True
-        self._snapshot_result = False
-        self._animation_result = False
-        self._animation_view_generation += 1
-        self._saved_result = None
-        self.saved_result_loaded = False
-        self._solver_result_handle = ""
-        self._solver_run_id = ""
-        self._solver_pending_run_id = ""
-        self._clear_query_cache()
-        self._radar = None
-        self._signal = None
-        self.signal_source = None
-        self.signal_stream = None
-        self.signal_figure.clear()
-        self.snapshot_status = "Running frozen-point GPU snapshot (not animation)"
         if animation:
+            # A new multi-frame measurement replaces the previous measurement.
+            # Static snapshots use their own result identity and figure below,
+            # so they can never destroy a valid Timeline replay.
+            self._snapshot_result = False
+            self._animation_result = False
+            self._animation_view_generation += 1
+            self._saved_result = None
+            self.saved_result_loaded = False
+            self._solver_result_handle = ""
+            self._solver_run_id = ""
+            self._solver_pending_run_id = ""
+            self._clear_query_cache()
+            self._radar = None
+            self._signal = None
+            self.signal_source = None
+            self.signal_stream = None
+            self.signal_figure.clear()
             self.snapshot_status = "Animation simulation in progress; not a frozen snapshot."
             self.animation_status = "Running native GPU simulation of baked Studio skin motion"
             self.animation_export_path = ""
             self.animation_frame_index = 0
+        else:
+            self._snapshot_result = False
+            self._snapshot_solver_result_handle = ""
+            self._snapshot_solver_run_id = ""
+            self._snapshot_solver_pending_run_id = ""
+            self.snapshot_figure.clear()
+            self.snapshot_status = "Running one-frame frozen-point diagnostic; existing Replay is preserved."
         try:
             if animation:
                 from ..adapter.animation import animation_request
@@ -641,7 +659,10 @@ class RadarComponent(Component):
             # not alias author state once the worker starts JSON serialization.
             scene_ref = copy.deepcopy(make_scene_ref(self.scene))
             def _submitted(run_id):
-                self._solver_pending_run_id = str(run_id)
+                if animation:
+                    self._solver_pending_run_id = str(run_id)
+                else:
+                    self._snapshot_solver_pending_run_id = str(run_id)
                 if on_submitted is not None:
                     on_submitted(str(run_id))
 
@@ -663,13 +684,19 @@ class RadarComponent(Component):
                 # different queued request.
                 # If native completion wins the race, keep its result instead of
                 # orphaning a valid result handle.
-                native_run_id = str(self._solver_pending_run_id or "")
+                native_run_id = str(
+                    self._solver_pending_run_id if animation
+                    else self._snapshot_solver_pending_run_id
+                )
                 cancel_sent = False
                 loop = asyncio.get_running_loop()
                 discovery_deadline = loop.time() + 5.0
                 while not solve_task.done() and not native_run_id and loop.time() < discovery_deadline:
                     try:
-                        native_run_id = str(self._solver_pending_run_id or "")
+                        native_run_id = str(
+                            self._solver_pending_run_id if animation
+                            else self._snapshot_solver_pending_run_id
+                        )
                     except asyncio.CancelledError:
                         continue
                     except Exception as status_error:  # noqa: BLE001 - retain native task ownership
@@ -703,7 +730,10 @@ class RadarComponent(Component):
                 if getattr(run, "status", None) == "succeeded":
                     completion_won_cancel_race = True
                 else:
-                    self._animation_result = self._snapshot_result = False
+                    if animation:
+                        self._animation_result = False
+                    else:
+                        self._snapshot_result = False
                     if self._scene_is_live():
                         suffix = " Native solver cancellation was sent." if cancel_sent else ""
                         self.animation_status = "Animation task cancelled; no result displayed." + suffix
@@ -716,14 +746,12 @@ class RadarComponent(Component):
             handle = (run.outputs or {}).get("resultHandle")
             if not handle:
                 raise RuntimeError("Snapshot solver returned no result handle")
-            self._solver_result_handle = str(handle)
-            self._solver_run_id = run.run_id
-            self._solver_pending_run_id = ""
-            self._snapshot_result = not animation
-            self._animation_result = animation
-            if not animation:
-                self.update_view()
             if animation:
+                self._solver_result_handle = str(handle)
+                self._solver_run_id = run.run_id
+                self._solver_pending_run_id = ""
+                self._snapshot_result = False
+                self._animation_result = True
                 count = round(request['duration_s'] * request['fps'])
                 self.animation_status = (
                     f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
@@ -739,11 +767,15 @@ class RadarComponent(Component):
                 # fails, but make that failure explicit instead of silently
                 # leaving a static preview that appears replayable.
                 binary_assets = getattr(getattr(api, "server", None), "handlers", {}).get("binary_assets")
+                replay_error_message = None
+                replay_completion_status = None
                 if binary_assets is not None and "view failed" not in self.animation_status:
                     try:
-                        await self.prepare_synchronized_replay()
+                        replay_completion_status = await self.prepare_synchronized_replay()
                     except Exception as replay_error:  # noqa: BLE001 - native result remains exportable
-                        self.animation_status += f" Replay unavailable: {replay_error}"
+                        replay_error_message = str(replay_error)
+                elif binary_assets is None:
+                    replay_error_message = "Studio binary asset service is unavailable."
                 if "view failed" not in self.animation_status:
                     metadata = dict(getattr(self, "_last_animation_view_metadata", {}) or {})
                     topology = dict(metadata.get("topology_preflight") or {})
@@ -761,23 +793,39 @@ class RadarComponent(Component):
                             self.animation_status += (
                                 " Native completion won the cancellation race; result preserved."
                             )
-                    Notifications.success("Radar", self.animation_status)
+                    if replay_error_message:
+                        self.animation_status += f" Replay unavailable: {replay_error_message}"
+                        Notifications.warning("Radar", self.animation_status)
+                    else:
+                        self.animation_status += f" {replay_completion_status or self.replay_status}"
+                        Notifications.success("Radar", self.animation_status)
                 return self.animation_status
+            self._snapshot_solver_result_handle = str(handle)
+            self._snapshot_solver_run_id = run.run_id
+            self._snapshot_solver_pending_run_id = ""
+            self._snapshot_result = True
+            from ..adapter.snapshot import show_snapshot
+            show_snapshot(self)
             self.snapshot_status = f"GPU snapshot complete, t={request['time_s']:.3f}s. One RCS point; velocity frozen to zero."
             Notifications.success("Radar", "Native GPU snapshot complete (not animated-cat simulation)")
             return self.snapshot_status
         except Exception as exc:
             self._snapshot_result = False
-            self._animation_result = False
-            self._solver_result_handle = ""
-            self._solver_run_id = ""
-            self._solver_pending_run_id = ""
-            self._clear_query_cache()
             if self._scene_is_live():
-                self.signal_figure.clear()
+                self.snapshot_figure.clear()
                 self.snapshot_status = f"Snapshot failed: {exc}"
                 if animation:
+                    self._animation_result = False
+                    self._solver_result_handle = ""
+                    self._solver_run_id = ""
+                    self._solver_pending_run_id = ""
+                    self._clear_query_cache()
+                    self.signal_figure.clear()
                     self.animation_status = f"Animation failed: {exc}"
+                else:
+                    self._snapshot_solver_result_handle = ""
+                    self._snapshot_solver_run_id = ""
+                    self._snapshot_solver_pending_run_id = ""
             logger.error("Radar snapshot failed", exc_info=True)
             raise
         finally:
@@ -933,7 +981,11 @@ class RadarComponent(Component):
     async def prepare_synchronized_replay(self):
         """Prepare numeric data once; frontend follows the existing scene clock."""
         from ..adapter.replay import build_recording, publish_recording
-        if self._replay_preparing or self._snapshot_running or self._export_running:
+        # _simulate_async marks the operation running until its automatically
+        # published Replay is complete. Once the native animation result is
+        # attached, Replay preparation is the final phase of that same job.
+        if (self._replay_preparing or self._export_running
+                or (self._snapshot_running and not self._animation_result)):
             raise ValueError("Wait for the current simulation/replay preparation to finish.")
         if not self._scene_is_live():
             raise ValueError("Open the source scene before preparing replay.")
@@ -943,7 +995,7 @@ class RadarComponent(Component):
         identity = (self._solver_result_handle, self._solver_run_id, saved)
         antennas = (int(self.tx_index), int(self.rx_index))
         if saved is None and not self._animation_result:
-            raise ValueError("Complete Simulate Animation or Load Saved Result first.")
+            raise ValueError("Complete Simulate & Prepare Replay or Load Saved Result first.")
         self._replay_preparing = True
         self.replay_status = "Preparing native numeric RP/RD data (no images)"
         def prepare():
@@ -2014,14 +2066,24 @@ class RadarComponent(Component):
             }
         return config
 
-    def _query_result(self, op: str, params: dict):
+    def _query_result(
+        self,
+        op: str,
+        params: dict,
+        *,
+        result_handle: str | None = None,
+        run_id: str | None = None,
+    ):
+        """Query one immutable result identity without changing the active Replay."""
+        handle = str(result_handle if result_handle is not None else self._solver_result_handle)
+        identity_run_id = str(run_id if run_id is not None else self._solver_run_id)
         cache = getattr(self, "_query_cache", None)
         if cache is None:
             cache = {}
             self._query_cache = cache
         cache_key = (
-            str(self._solver_result_handle or ""),
-            str(self._solver_run_id or ""),
+            handle,
+            identity_run_id,
             str(op),
             json.dumps(params, sort_keys=True, separators=(",", ":"), default=str),
         )
@@ -2030,10 +2092,10 @@ class RadarComponent(Component):
             return cache[cache_key]
         response = api.solvers.query(
             "witwin.radar.simulate",
-            self._solver_result_handle,
+            handle,
             op,
             params,
-            run_id=self._solver_run_id or None,
+            run_id=identity_run_id or None,
             **({"timeout": 180.0} if op in {"animation_export", "animation_replay", "animation_manifest"} else {}),
         )
         data = response.get("data") or {}
