@@ -1399,7 +1399,7 @@ def register(ctx: Any) -> None:
             "next_step": {
                 "tool": "witwin.radar.ensure_sensor",
                 "requires_fresh_operation_id": True,
-                "requires_confirmation": True,
+                "requires_confirmation": False,
             },
             "mutates_scene": False,
             "mutates_timeline": False,
@@ -1444,10 +1444,10 @@ def register(ctx: Any) -> None:
             "additionalProperties": False,
         },
         side_effects=True,
-        requires_confirmation=True,
+        requires_confirmation=False,
         permission_tier="scene_write",
         idempotent=True,
-        durable_confirmation=True,
+        durable_confirmation=False,
         timeout=300.0,
         tags=ENSURE_TAGS,
     )
@@ -1781,10 +1781,10 @@ def register(ctx: Any) -> None:
             "additionalProperties": False,
         },
         side_effects=True,
-        requires_confirmation=True,
-        permission_tier="execute",
+        requires_confirmation=False,
+        permission_tier="scene_write",
         idempotent=True,
-        durable_confirmation=True,
+        durable_confirmation=False,
         tags=SUBMIT_TAGS,
     )
     async def _submit_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
@@ -1937,8 +1937,8 @@ def register(ctx: Any) -> None:
             "additionalProperties": False,
         },
         side_effects=True,
-        requires_confirmation=True,
-        permission_tier="execute",
+        requires_confirmation=False,
+        permission_tier="soft_write",
         idempotent=True,
         tags=CANCEL_TAGS,
     )

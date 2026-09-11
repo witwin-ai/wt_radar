@@ -209,19 +209,21 @@ def test_registers_narrow_domain_tools(harness):
     assert tools["plan_sensor_placement"].side_effects is False
     assert tools["plan_sensor_placement"].requires_confirmation is False
     assert tools["ensure_sensor"].permission_tier == "scene_write"
-    assert tools["ensure_sensor"].requires_confirmation
+    assert not tools["ensure_sensor"].requires_confirmation
     assert tools["ensure_sensor"].idempotent
-    assert tools["ensure_sensor"].durable_confirmation
+    assert not tools["ensure_sensor"].durable_confirmation
+    assert tools["cancel_simulation"].permission_tier == "soft_write"
+    assert not tools["cancel_simulation"].requires_confirmation
     for name, tier in (
-        ("submit_animation_measurement", "execute"),
+        ("submit_animation_measurement", "scene_write"),
         ("prepare_replay", "soft_write"),
         ("export_result", "file_write"),
     ):
         assert tools[name].side_effects is True
-        assert tools[name].requires_confirmation is True
+        assert tools[name].requires_confirmation is (name in {"prepare_replay", "export_result"})
         assert tools[name].permission_tier == tier
         assert tools[name].idempotent is True
-        assert tools[name].durable_confirmation is True
+        assert tools[name].durable_confirmation is (name in {"prepare_replay", "export_result"})
     assert "hint-explicit-intent:只运行雷达" in tools[
         "submit_animation_measurement"
     ].tags
@@ -312,7 +314,7 @@ def test_plan_sensor_placement_is_read_only_and_resolves_single_skinned_target(h
     assert result["target_object_id"] == "catstray"
     assert result["placement"]["position_m"] == [3.0, 1.0, 2.0]
     assert result["proposed_ensure_sensor_arguments"]["aim_point_m"] == [0.0, 0.4, 0.0]
-    assert result["next_step"]["requires_confirmation"] is True
+    assert result["next_step"]["requires_confirmation"] is False
     assert result["mutates_scene"] is False
     assert scene.to_dict() == before
 
