@@ -733,6 +733,17 @@ class RadarComponent(Component):
                     self.animation_status += " Native completion won the cancellation race; result preserved."
                 self.snapshot_status = "Animation result active, not a frozen snapshot."
                 await self._refresh_animation_view()
+                # A multi-frame measurement is not complete from a user's
+                # perspective until its replay asset is bound to this scene.
+                # Keep the verified native result if local replay publication
+                # fails, but make that failure explicit instead of silently
+                # leaving a static preview that appears replayable.
+                binary_assets = getattr(getattr(api, "server", None), "handlers", {}).get("binary_assets")
+                if binary_assets is not None and "view failed" not in self.animation_status:
+                    try:
+                        await self.prepare_synchronized_replay()
+                    except Exception as replay_error:  # noqa: BLE001 - native result remains exportable
+                        self.animation_status += f" Replay unavailable: {replay_error}"
                 if "view failed" not in self.animation_status:
                     metadata = dict(getattr(self, "_last_animation_view_metadata", {}) or {})
                     topology = dict(metadata.get("topology_preflight") or {})

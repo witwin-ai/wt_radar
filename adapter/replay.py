@@ -13,6 +13,96 @@ def motion_fingerprint(scene):
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _stable_fingerprint(value):
+    """Hash persisted provenance without relying on object identity or dict order."""
+    return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def scene_geometry_fingerprint(scene):
+    """Fingerprint authored scene geometry independently from baked motion.
+
+    Radar's native input fingerprint remains the authoritative solver guard.  This
+    smaller, user-visible digest lets a saved replay say *why* it became stale
+    after furniture or room geometry changed, without pretending a Timeline seek
+    is a geometry edit.
+    """
+    scene_data = scene.to_dict()
+    scene_data.pop("timeline", None)
+    scene_data.pop("timeline_manager", None)
+    objects = scene_data.get("objects")
+    if isinstance(objects, dict):
+        values = objects.values()
+    elif isinstance(objects, list):
+        values = objects
+    else:
+        values = []
+    geometry = []
+    for raw in values:
+        item = dict(raw)
+        components = item.get("components")
+        if isinstance(components, dict):
+            # Radar configuration is covered by its own fingerprint below.  Do
+            # not make a replay look geometry-stale merely because its status
+            # text changed while it was being prepared.
+            item["components"] = {
+                name: value for name, value in components.items() if name != "Radar"
+            }
+        geometry.append(item)
+    return _stable_fingerprint(geometry)
+
+
+def radar_pose_config_fingerprint(component):
+    owner = getattr(component, "owner", None)
+    owner_data = owner.to_dict() if owner is not None else {}
+    radar_data = component.to_properties_dict() if hasattr(component, "to_properties_dict") else {}
+    return _stable_fingerprint({"owner": owner_data, "radar": radar_data})
+
+
+def _recording_source_descriptor(component, record, asset_id):
+    """Create the persistent DataSource contract stored alongside the Figure."""
+    owner = getattr(component, "owner", None)
+    source_id = f"radar.{getattr(owner, 'id', 'unknown')}.replay.{asset_id.rsplit('-', 1)[-1][:16]}"
+    return {
+        "sourceId": source_id,
+        "mode": "timeline",
+        "kind": "radar.replay",
+        "label": "Radar Result & Replay",
+        "defaultChannel": "range_doppler",
+        "owner": {
+            "kind": "component",
+            "componentName": "Radar",
+            "fieldName": "signal_figure",
+            "objectId": getattr(owner, "id", ""),
+            "sceneId": component.scene.scene_id,
+        },
+        "retention": "persistent",
+        "timebase": {
+            "unit": "seconds",
+            "times": list(record["timesS"]),
+            "fps": record["fps"],
+        },
+        "channels": [
+            {"channelId": "range_profile", "label": "Range Profile", "dtype": "float32",
+             "shape": [len(record["rangeM"])], "semantic": "radar.range_profile"},
+            {"channelId": "range_doppler", "label": "Range-Doppler", "dtype": "float32",
+             "shape": [len(record["velocityMps"]), len(record["rangeM"])], "semantic": "radar.range_doppler"},
+        ],
+        "presentation": {
+            "replay": True,
+            "followTimeline": True,
+            "frameCount": len(record["timesS"]),
+            "assetId": asset_id,
+        },
+        "metadata": {
+            "resultId": record["resultId"],
+            "sceneGeometryFingerprint": record["sceneGeometryFingerprint"],
+            "motionFingerprint": record.get("sceneFingerprint"),
+            "radarPoseConfigFingerprint": record["radarPoseConfigFingerprint"],
+            "stale": False,
+        },
+    }
+
+
 def numeric_plot(payload):
     from witwin_server.core.components.core.plot import PlotData
     title = payload.get("title", "Native Radar result")
@@ -68,11 +158,14 @@ def build_recording(result, tx=0, rx=0):
         end = float(times[0] + metadata["duration_s"])
     if not np.isfinite(end) or end <= times[-1]:
         raise ValueError("Invalid recorded end time.")
+    fps = float(1.0 / np.median(np.diff(times)))
     record = {"schema": 1, "sceneId": metadata.get("scene_id", ""), "timesS": times.tolist(),
               "rangeM": axes.range_m.tolist(), "velocityMps": axes.velocity_mps.tolist(),
               "frameStride": stride, "endTimeS": end, "profileMax": max(float(values[:, :nr].max()), 1e-30),
               "dopplerMax": max(float(values[:, nr:].max()), 1e-30),
               "sourceLabel": f"Native Radar | TX{tx} RX{rx} | {len(times)} recorded frames",
+              "fps": fps,
+              "resultId": str(metadata.get("result_id") or metadata.get("run_id") or "pending-result"),
               "sceneFingerprint": metadata.get("motion_fingerprint"),
               "fingerprintScope": "authored motion tracks only; geometry is not verified"}
     if not record["sceneFingerprint"]:
@@ -101,11 +194,42 @@ def publish_recording(component, api, record, data):
                                         data=data, scene_id=component.scene.scene_id,
                                         persistent=True, asset_id=f"radar-replay-{content_id}")
     old_id = getattr(component, "_replay_asset_id", None)
-    record = {**record, "asset": ref.to_dict(), "view": "range_doppler", "motionVerifiedAtPreparation": bool(fingerprint)}
+    result_id = record.get("resultId")
+    if not result_id or result_id == "pending-result":
+        result_id = str(getattr(component, "_solver_run_id", "") or getattr(component, "_solver_result_handle", "") or "saved-result")
+    record = {
+        **record,
+        "resultId": result_id,
+        "asset": ref.to_dict(),
+        "view": "range_doppler",
+        "motionVerifiedAtPreparation": bool(fingerprint),
+        "sceneGeometryFingerprint": scene_geometry_fingerprint(component.scene),
+        "radarPoseConfigFingerprint": radar_pose_config_fingerprint(component),
+        "stale": False,
+    }
+    descriptor = _recording_source_descriptor(component, record, ref.asset_id)
+    record["dataSource"] = descriptor
+    previous_source = getattr(component, "signal_source", None)
+    registered_source = False
+    data_sources = getattr(api, "data_sources", None)
     try:
+        if data_sources is not None:
+            data_sources.register(descriptor)
+            registered_source = True
+        component.signal_source = {
+            "sourceId": descriptor["sourceId"],
+            "mode": "timeline",
+            "kind": "radar.replay",
+            "defaultChannel": descriptor["defaultChannel"],
+            "channelId": descriptor["defaultChannel"],
+        }
         component.signal_figure.set_plot_data(PlotData("line", {"recording": record},
                                                       title="Recorded radar — follows this room's Timeline"))
     except Exception:
+        component.signal_source = previous_source
+        unregister = getattr(data_sources, "unregister", None)
+        if registered_source and callable(unregister):
+            unregister(descriptor["sourceId"])
         handler.service.clear(ref.asset_id)
         raise
     component._replay_asset_id = ref.asset_id

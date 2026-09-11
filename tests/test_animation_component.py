@@ -156,6 +156,27 @@ def test_initial_preview_query_is_not_on_asyncio_loop(component, monkeypatch):
     assert observed == ["worker"]
 
 
+def test_completed_animation_automatically_prepares_replay(component, monkeypatch):
+    from wt_radar.components import radar
+    from wt_radar.adapter import animation
+
+    run = SimpleNamespace(status="succeeded", outputs={"resultHandle": "next"}, run_id="next-run")
+    stub_solve_transport(component, monkeypatch, lambda *args, **kwargs: run)
+    radar.api.server = SimpleNamespace(handlers={"binary_assets": object()})
+    monkeypatch.setattr(component, "_query_result", lambda *_: {})
+    monkeypatch.setattr(animation, "apply_animation_view", lambda *_: "preview")
+    prepared = []
+
+    async def prepare():
+        prepared.append((component._solver_run_id, component._solver_result_handle))
+        return "Replay ready"
+
+    monkeypatch.setattr(component, "prepare_synchronized_replay", prepare)
+    asyncio.run(component._simulate_async(animation=True))
+
+    assert prepared == [("next-run", "next")]
+
+
 def test_animation_status_reports_interval_visibility_coverage(component, monkeypatch):
     from wt_radar.adapter import animation
 

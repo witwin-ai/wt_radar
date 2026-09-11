@@ -181,12 +181,25 @@ class BinaryService:
         self.cleared.append(asset_id)
 
 
+class DataSources:
+    def __init__(self):
+        self.registered = []
+
+    def register(self, descriptor):
+        self.registered.append(descriptor)
+        return descriptor
+
+
 def publish_fixture(saved):
     room, component = replay_scene()
     metadata = {"scene_id": room.scene_id, "motion_fingerprint": replay.motion_fingerprint(room)}
     record, data = replay.build_recording(replace(saved, producer=metadata))
     service = BinaryService()
-    api = SimpleNamespace(server=SimpleNamespace(handlers={"binary_assets": SimpleNamespace(service=service)}))
+    data_sources = DataSources()
+    api = SimpleNamespace(
+        server=SimpleNamespace(handlers={"binary_assets": SimpleNamespace(service=service)}),
+        data_sources=data_sources,
+    )
     return room, component, record, data, service, api
 
 
@@ -205,6 +218,14 @@ def test_publish_uses_binary_asset_and_bound_figure_not_rgb(saved):
     assert figure["type"] == "line"
     assert figure["data"]["recording"]["asset"]["asset_id"] == "new-asset"
     assert figure["data"]["recording"]["motionVerifiedAtPreparation"] is True
+    descriptor = figure["data"]["recording"]["dataSource"]
+    assert descriptor["mode"] == "timeline"
+    assert descriptor["retention"] == "persistent"
+    assert {channel["channelId"] for channel in descriptor["channels"]} == {
+        "range_profile", "range_doppler",
+    }
+    assert component.signal_source["sourceId"] == descriptor["sourceId"]
+    assert api.data_sources.registered == [descriptor]
     assert "recording" in figure["data"] and "image" not in figure["data"]
     assert record == original_record  # metadata supplied by producer is not mutated
 
