@@ -70,12 +70,39 @@ def test_explicit_objectives_rank_all_candidates_and_report_full_trajectory(scen
 
     assert result['placement_objective'] == objective
     assert result['tested_candidates'] == 16
-    assert result['valid_candidate_count'] == 16
+    assert result['valid_candidate_count'] == 1
+    assert result['native_preflight_count'] == 1
     assert result['predicted_metrics']['sampled_frame_count'] == 2
     assert result['predicted_metrics']['sampled_site_count'] == 2
     assert result['metric_semantics']['trajectory_sampling'] == 'every requested baked Radar frame'
     assert isinstance(result['predicted_metrics']['doppler_within_nyquist'], bool)
     assert original.to_dict() == before
+
+
+def test_explicit_objective_continues_when_the_best_kinematic_pose_is_occluded(scene, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    calls = []
+
+    def preflight(*_args):
+        calls.append(1)
+        if len(calls) == 1:
+            raise animation.AnimationTopologyError('occluded', detail={'code': 'occluded'})
+        return {
+            'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
+            'topology': {'visibility_coverage': 1.},
+        }
+
+    monkeypatch.setattr(animation, 'animation_preflight', preflight)
+    result = sensor_placement.choose_sensor_placement(original, {
+        'target_object_id': 'target', 'duration_s': .2, 'fps': 10,
+        'height_m': 1., 'placement_objective': 'maximize_range_span',
+    }, radar_object_id='radar')
+
+    assert result['tested_candidates'] == 16
+    assert result['native_preflight_count'] == 2
+    assert result['valid_candidate_count'] == 1
+    assert result['rejected_candidates'][0]['reason'] == 'occluded'
 
 
 def test_trajectory_metrics_report_radial_sign_fov_and_nyquist():

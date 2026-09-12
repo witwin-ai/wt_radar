@@ -244,7 +244,11 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
             baseline_position = np.asarray(live_transform.position, dtype=np.float64).tolist()
     failures = []
     valid = []
+    ranked = []
+    tested_candidate_count = 0
+    native_preflight_count = 0
     for position in candidate_positions(aim, height, distance):
+        tested_candidate_count += 1
         constraint = _static_candidate_constraint(
             detached,
             position,
@@ -253,41 +257,107 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         if constraint is not None:
             failures.append({'position_m': position, 'reason': constraint['code'], 'detail': constraint})
             continue
-        detached.update_transform(str(sensor.id), position=position,
-                                  rotation=_look_at_euler(np.asarray(position), aim))
-        try:
-            evidence = animation_preflight(detached, animation_request(radar))
-        except AnimationTopologyError as exc:
-            failures.append({'position_m': position, 'reason': str(exc), 'detail': exc.detail})
-            continue
         metrics = _trajectory_metrics(
             position, aim, positions_by_frame, times,
             fov_deg=float(radar.fov), max_doppler_mps=max_doppler_mps,
         )
-        topology = evidence.get('topology') if isinstance(evidence, dict) else None
-        metrics['native_visibility_coverage'] = float(
-            topology.get('visibility_coverage', 1.) if isinstance(topology, dict) else 1.
-        )
-        frame_visibility = topology.get('frames', ()) if isinstance(topology, dict) else ()
-        declared_sites = int(topology.get('declared_site_count', 0) or 0) if isinstance(topology, dict) else 0
-        metrics['occluded_frame_count'] = sum(
-            int(frame.get('reachable_site_count', declared_sites)) < declared_sites
-            for frame in frame_visibility
-        ) if declared_sites else 0
-        valid.append({
+        # Native coverage cannot exceed one.  This optimistic score is therefore
+        # a true upper bound on the final score and lets explicit objectives use
+        # branch-and-bound without changing which candidate is selected.
+        optimistic_metrics = dict(metrics)
+        optimistic_metrics['native_visibility_coverage'] = 1.
+        optimistic_metrics['occluded_frame_count'] = 0
+        candidate = {
             'position_m': position,
             'metrics': metrics,
-            'native_preflight': evidence,
-            'score': _objective_score(
-                objective, metrics, position=position, aim=aim,
+            'optimistic_score': _objective_score(
+                objective, optimistic_metrics, position=position, aim=aim,
                 baseline_position=baseline_position,
             ),
-        })
+        }
+        ranked.append(candidate)
+
         # Preserve the historical deterministic first-valid behavior for the
-        # default objective. Explicit natural-language objectives compare every
-        # bounded candidate across the full authored trajectory.
+        # default objective. Explicit objectives first rank the whole bounded
+        # set cheaply, below, before invoking expensive native visibility.
         if objective == 'balanced':
+            detached.update_transform(
+                str(sensor.id), position=position,
+                rotation=_look_at_euler(np.asarray(position), aim),
+            )
+            native_preflight_count += 1
+            try:
+                evidence = animation_preflight(detached, animation_request(radar))
+            except AnimationTopologyError as exc:
+                failures.append({'position_m': position, 'reason': str(exc), 'detail': exc.detail})
+                continue
+            candidate['native_preflight'] = evidence
+            valid.append(candidate)
             break
+
+    if objective != 'balanced':
+        # Python's stable sort keeps candidate generation order as the
+        # deterministic tie-breaker. Evaluate the strongest optimistic bound
+        # first and stop once no remaining candidate can beat the best proven
+        # native-visible score.
+        ranked.sort(key=lambda item: item['optimistic_score'], reverse=True)
+        best_score = None
+        for candidate in ranked:
+            if best_score is not None and candidate['optimistic_score'] <= best_score:
+                break
+            position = candidate['position_m']
+            detached.update_transform(
+                str(sensor.id), position=position,
+                rotation=_look_at_euler(np.asarray(position), aim),
+            )
+            native_preflight_count += 1
+            try:
+                evidence = animation_preflight(detached, animation_request(radar))
+            except AnimationTopologyError as exc:
+                failures.append({'position_m': position, 'reason': str(exc), 'detail': exc.detail})
+                continue
+            metrics = dict(candidate['metrics'])
+            topology = evidence.get('topology') if isinstance(evidence, dict) else None
+            metrics['native_visibility_coverage'] = float(
+                topology.get('visibility_coverage', 1.) if isinstance(topology, dict) else 1.
+            )
+            frame_visibility = topology.get('frames', ()) if isinstance(topology, dict) else ()
+            declared_sites = int(topology.get('declared_site_count', 0) or 0) if isinstance(topology, dict) else 0
+            metrics['occluded_frame_count'] = sum(
+                int(frame.get('reachable_site_count', declared_sites)) < declared_sites
+                for frame in frame_visibility
+            ) if declared_sites else 0
+            candidate['metrics'] = metrics
+            candidate['native_preflight'] = evidence
+            candidate['score'] = _objective_score(
+                objective, metrics, position=position, aim=aim,
+                baseline_position=baseline_position,
+            )
+            valid.append(candidate)
+            if best_score is None or candidate['score'] > best_score:
+                best_score = candidate['score']
+
+    # Balanced candidates are validated inline and do not need the optimistic
+    # score after their first native-visible pose is found.
+    for candidate in valid:
+        if 'score' not in candidate:
+            metrics = dict(candidate['metrics'])
+            evidence = candidate['native_preflight']
+            topology = evidence.get('topology') if isinstance(evidence, dict) else None
+            metrics['native_visibility_coverage'] = float(
+                topology.get('visibility_coverage', 1.) if isinstance(topology, dict) else 1.
+            )
+            frame_visibility = topology.get('frames', ()) if isinstance(topology, dict) else ()
+            declared_sites = int(topology.get('declared_site_count', 0) or 0) if isinstance(topology, dict) else 0
+            metrics['occluded_frame_count'] = sum(
+                int(frame.get('reachable_site_count', declared_sites)) < declared_sites
+                for frame in frame_visibility
+            ) if declared_sites else 0
+            candidate['metrics'] = metrics
+            candidate['score'] = _objective_score(
+                objective, metrics, position=candidate['position_m'], aim=aim,
+                baseline_position=baseline_position,
+            )
     if valid:
         selected = max(valid, key=lambda item: item['score'])
         selected_metrics = selected['metrics']
@@ -347,8 +417,9 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
                 'placement_objective': objective,
                 'requested_distance_m': distance,
                 'actual_distance_m': float(np.linalg.norm(np.asarray(selected['position_m']) - aim)),
-                'tested_candidates': len(failures) + len(valid),
+                'tested_candidates': tested_candidate_count,
                 'valid_candidate_count': len(valid),
+                'native_preflight_count': native_preflight_count,
                 'predicted_metrics': selected_metrics,
                 'baseline_metrics': baseline_metrics,
                 'predicted_improvement': improvement,
