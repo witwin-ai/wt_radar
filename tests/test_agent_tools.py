@@ -319,6 +319,20 @@ def test_plan_sensor_placement_is_read_only_and_resolves_single_skinned_target(h
     assert result["target_object_id"] == "catstray"
     assert result["placement"]["position_m"] == [3.0, 1.0, 2.0]
     assert result["proposed_ensure_sensor_arguments"]["aim_point_m"] == [0.0, 0.4, 0.0]
+
+
+def test_plan_sensor_placement_preserves_natural_measurement_objective(harness):
+    scene, tools = harness
+    before = scene.to_dict()
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id,
+        "target_object_id": "catstray",
+        "placement_mode": "automatic",
+        "placement_objective": "bidirectional_radial_velocity",
+    })
+    assert result["proposed_ensure_sensor_arguments"]["placement_objective"] == "bidirectional_radial_velocity"
+    assert result["placement"]["mode"] == "automatic"
+    assert scene.to_dict() == before
     assert result["next_step"]["requires_confirmation"] is False
     assert result["mutates_scene"] is False
     assert scene.to_dict() == before
@@ -629,6 +643,44 @@ def test_plan_preflight_is_read_only_and_reports_exact_cube(harness, monkeypatch
     assert scene.to_dict() == before
 
 
+def test_manual_radar_move_preflight_uses_current_pose_without_reconfiguration(harness, monkeypatch):
+    scene, tools = harness
+    ensured = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "manual-move-ensure",
+        "target_object_id": "catstray",
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+        "duration_s": 5.0,
+        "fps": 10.0,
+    })
+    sensor_id = ensured["radar"]["object_id"]
+    scene.update_transform(sensor_id, position=[-2.0, 1.25, 1.5], rotation=[0.1, 0.2, 0.3])
+    before = copy.deepcopy(scene.to_dict())
+    observed = {}
+
+    def preflight(detached, request):
+        observed["position"] = list(
+            detached.get_object(sensor_id).get_component("Transform").position
+        )
+        return native_preflight(moving_object_ids=["catstray", "spine"])
+
+    monkeypatch.setattr("wt_radar.adapter.animation.animation_preflight", preflight)
+    monkeypatch.setattr(radar_tools, "_runtime_evidence", lambda: {
+        "torch": {"cuda_available": True, "device_name": "test-gpu"}
+    })
+    result = run(tools, "plan_animation_measurement", {
+        "scene_id": scene.scene_id,
+        "radar_object_id": sensor_id,
+    })
+
+    np.testing.assert_allclose(observed["position"], [-2.0, 1.25, 1.5])
+    assert result["input_fingerprint"] == radar_tools._measurement_input_fingerprint(
+        scene, scene.get_object(sensor_id),
+    )
+    assert scene.to_dict() == before
+
+
 def test_plan_preserves_structured_native_topology_failure(harness, monkeypatch):
     scene, tools = harness
     ensured = run(tools, "ensure_sensor", {
@@ -763,6 +815,48 @@ def test_submit_requires_matching_plan_preflight_receipt(harness):
     failure = asyncio.run(exercise())
     assert failure.code == "preflight_receipt_missing"
     assert radar_tools._get_operation(scene._radar_test_context, "missing-preflight-job") is None
+
+
+def test_trusted_direct_submit_can_wait_for_completed_operation(harness, monkeypatch):
+    scene, tools = harness
+    ensured = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "wait-ensure",
+        "target_object_id": "catstray",
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+        "duration_s": 5.0,
+        "fps": 10.0,
+    })
+    sensor = scene.get_object(ensured["radar"]["object_id"])
+    fingerprint = radar_tools._measurement_input_fingerprint(scene, sensor)
+    remember_preflight(scene, sensor, fingerprint)
+
+    async def complete(ctx, *, operation_id, **_kwargs):
+        receipt = radar_tools._get_operation(ctx, operation_id)
+        radar_tools._put_operation(ctx, {
+            **receipt,
+            "status": "replay_ready",
+            "run_id": "native-run",
+            "result_handle": "native-result",
+            "next_step": "complete",
+        })
+
+    monkeypatch.setattr(radar_tools, "_run_animation_job", complete)
+
+    async def exercise():
+        return await tools["submit_animation_measurement"].run({
+            "scene_id": scene.scene_id,
+            "radar_object_id": sensor.id,
+            "operation_id": "wait-job",
+            "expected_input_fingerprint": fingerprint,
+            "wait_for_completion": True,
+        })
+
+    result = asyncio.run(exercise())
+    assert result["status"] == "replay_ready"
+    assert result["run_id"] == "native-run"
+    assert result["result_handle"] == "native-result"
 
 
 def test_plan_refuses_interval_beyond_timeline_before_motion_sampling(harness):

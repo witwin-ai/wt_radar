@@ -1373,6 +1373,16 @@ def register(ctx: Any) -> None:
                 "radar_object_id": {"type": "string"},
                 "target_object_id": {"type": "string", "minLength": 1},
                 "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
+                "placement_objective": {
+                    "type": "string",
+                    "enum": [
+                        "balanced", "maximize_range_span", "bidirectional_radial_velocity",
+                        "stronger_doppler", "side_view", "whole_path_visible",
+                        "opposite_side", "closer_with_full_path_visible",
+                    ],
+                    "default": "balanced",
+                    "description": "Physical measurement objective for automatic full-trajectory placement.",
+                },
                 "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
                 "distance_m": {
                     "type": "number", "minimum": 0.25, "maximum": 10,
@@ -1448,6 +1458,7 @@ def register(ctx: Any) -> None:
             "scene_id": str(scene.scene_id),
             "target_object_id": target_id,
             "placement_mode": placement_mode,
+            "placement_objective": str(args.get("placement_objective") or "balanced"),
             "height_m": float(args.get("height_m", 1.0)),
         }
         requested_radar = str(args.get("radar_object_id") or "").strip()
@@ -1510,6 +1521,16 @@ def register(ctx: Any) -> None:
                 "radar_object_id": {"type": "string"},
                 "target_object_id": {"type": "string", "minLength": 1},
                 "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
+                "placement_objective": {
+                    "type": "string",
+                    "enum": [
+                        "balanced", "maximize_range_span", "bidirectional_radial_velocity",
+                        "stronger_doppler", "side_view", "whole_path_visible",
+                        "opposite_side", "closer_with_full_path_visible",
+                    ],
+                    "default": "balanced",
+                    "description": "Physical measurement objective for automatic full-trajectory placement.",
+                },
                 "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
                 "distance_m": {
                     "type": "number", "minimum": 0.25, "maximum": 10,
@@ -1732,7 +1753,11 @@ def register(ctx: Any) -> None:
         description=(
             "Read-only preflight for a real Radar 0.3 CUDA animation measurement. "
             "It validates the exact target, timeline interval, frame/cube shape, host "
-            "memory and current solver settings without changing FPS or duration."
+            "memory and current solver settings without changing FPS or duration. "
+            "For 'use where I moved the radar and run again', select the existing Radar "
+            "and call this directly: its current authored Transform is authoritative. "
+            "Do not call ensure_sensor, create another Radar, or change room, actor, motion, "
+            "Timeline, duration, FPS, or Radar configuration."
         ),
         input_schema={
             "type": "object",
@@ -1852,9 +1877,12 @@ def register(ctx: Any) -> None:
         name="submit_animation_measurement",
         description=(
             "Submit the already-preflighted Studio animation to the existing native "
-            "Radar 0.3 CUDA solver. Returns immediately with an operation receipt; the "
+            "Radar 0.3 CUDA solver. Returns immediately with an operation receipt unless "
+            "wait_for_completion is explicitly requested by the trusted direct-rerun host; the "
             "background job verifies native evidence and publishes Timeline Replay as one "
-            "completion contract. Poll get_simulation; no fallback is allowed."
+            "completion contract. This is the direct write for rerunning at a manually moved "
+            "Radar pose and does not require a separate Run confirmation. Poll get_simulation; "
+            "no static Snapshot fallback is allowed."
         ),
         input_schema={
             "type": "object",
@@ -1864,6 +1892,11 @@ def register(ctx: Any) -> None:
                 "radar_object_id": {"type": "string", "minLength": 1},
                 "operation_id": {"type": "string", "minLength": 1, "maxLength": 160},
                 "expected_input_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "wait_for_completion": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Wait for the verified native result and automatic Replay before returning.",
+                },
             },
             "additionalProperties": False,
         },
@@ -1872,6 +1905,7 @@ def register(ctx: Any) -> None:
         permission_tier="scene_write",
         idempotent=True,
         durable_confirmation=False,
+        timeout=180.0,
         tags=SUBMIT_TAGS,
     )
     async def _submit_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
@@ -1895,6 +1929,11 @@ def register(ctx: Any) -> None:
                 radar_object_id=str(obj.id),
                 input_fingerprint=expected,
             )
+            if bool(args.get("wait_for_completion")) and existing.get("status") in {"queued", "running"}:
+                task = _ACTIVE_JOBS.get(_job_key(ctx, operation_id))
+                if task is not None:
+                    await task
+                    existing = _get_operation(ctx, operation_id) or existing
             return _operation_result(existing, obj)
         radar = obj.get_component("Radar")
         from .adapter.snapshot import validate_options
@@ -1960,6 +1999,10 @@ def register(ctx: Any) -> None:
                 # failure) so asyncio never silently discards orchestration errors.
                 done.exception()
         task.add_done_callback(_finish_job)
+        if bool(args.get("wait_for_completion")):
+            await task
+            completed = _get_operation(ctx, operation_id) or receipt
+            return _operation_result(completed, obj)
         return _operation_result(receipt, obj)
 
     @tool(

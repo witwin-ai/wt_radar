@@ -49,17 +49,25 @@ RESULT_INSPECT_TAGS = INSPECT_TAGS + tuple(f"hint-term:{term}" for term in (
 PLAN_TAGS = hints(
     "plan radar", "radar preflight", "check radar simulation",
     "rerun radar", "measure again", "current radar position", "moved radar",
+    "use where i moved the radar", "keep the room cat and motion unchanged",
     "雷达预检", "重新测量", "当前位置", "移动雷达", boost=18,
 )
 SENSOR_PLAN_TAGS = hints(
     "plan radar position", "plan radar placement", "radar position", "radar placement",
-    "point radar", "雷达位置", "规划雷达位置", "雷达摆位", boost=20,
+    "point radar", "closer radar", "farther radar", "whole path visible",
+    "approaching and receding", "stronger doppler", "side view", "opposite side",
+    "雷达位置", "规划雷达位置", "雷达摆位", "靠近", "远离", "完整路径可见",
+    "接近和远离", "更强多普勒", "侧面", "另一侧", boost=20,
 )
 ENSURE_TAGS = actions(
-    "place radar", "configure radar", "放置雷达", "配置雷达", boost=19,
+    "place radar", "configure radar", "move radar", "closer radar", "farther radar",
+    "whole path visible", "approaching and receding", "stronger doppler", "side view",
+    "opposite side", "放置雷达", "配置雷达", "移动雷达", "靠近", "远离",
+    "完整路径可见", "接近和远离", "更强多普勒", "侧面", "另一侧", boost=19,
 )
 SUBMIT_TAGS = actions(
     "run only radar", "run radar simulation", "start radar simulation",
+    "run the simulation again", "use where i moved the radar",
     "只运行 Radar", "只运行雷达", "开始雷达仿真", boost=20,
 )
 STATUS_TAGS = hints("radar status", "simulation status", "雷达状态", "仿真状态", boost=17)
