@@ -1086,9 +1086,10 @@ def _validate_interval(scene: Any, radar: Any, start_s: float, duration_s: float
             "Animation requires start >= 0, duration (0,30] seconds, and FPS [1,30].",
             code="invalid_measurement_interval",
         )
+    from .adapter.timebase import aligned_frame_count
     frame_count_float = duration_s * fps
-    frame_count = int(round(frame_count_float))
-    if frame_count < 2 or not math.isclose(frame_count_float, frame_count, abs_tol=1e-7):
+    frame_count = aligned_frame_count(duration_s, fps)
+    if frame_count is None:
         raise ToolError(
             "duration_s * fps must be an integer of at least two frames.",
             code="invalid_measurement_interval",
@@ -1129,7 +1130,7 @@ def _validate_interval(scene: Any, radar: Any, start_s: float, duration_s: float
         "start_s": start_s,
         "duration_s": duration_s,
         "fps": fps,
-        "frame_count": frame_count,
+        "frame_count": int(frame_count),
         "cube_shape": [
             frame_count,
             int(radar.num_tx),

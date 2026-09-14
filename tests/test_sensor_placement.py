@@ -30,6 +30,24 @@ def test_trials_are_detached_and_use_unchanged_native_preflight(scene, monkeypat
     assert original.to_dict() == before
 
 
+def test_automatic_placement_accepts_float32_round_trip_full_motion_duration(scene, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    original.timeline_manager.clip.duration = 20.0
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+        'frame_count': 169, 'site_count': 2, 'radar_device': 'cuda',
+    })
+
+    result = sensor_placement.choose_sensor_placement(original, {
+        'target_object_id': 'target',
+        'duration_s': float(np.float32(16.9)),
+        'fps': 10.0,
+        'height_m': 1.0,
+    }, radar_object_id='radar')
+
+    assert result['predicted_metrics']['sampled_frame_count'] == 169
+
+
 def test_requested_automatic_distance_is_preserved_in_world_space(scene, monkeypatch):
     original, component = scene
     make_rig(original, component)

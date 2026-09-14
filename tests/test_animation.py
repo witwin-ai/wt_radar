@@ -29,6 +29,24 @@ def test_hidden_fractional_fps_reports_exact_values_without_rounding():
         frame_times({"time_s": 7., "duration_s": 12., "fps": 29.998998641967773}, None)
 
 
+def test_frame_times_accepts_float32_round_trip_for_frame_aligned_duration():
+    component = SimpleNamespace(
+        num_tx=1,
+        num_rx=1,
+        chirp_per_frame=1,
+        adc_samples=1,
+        scene=SimpleNamespace(
+            timeline_manager=SimpleNamespace(clip=SimpleNamespace(duration=20.0)),
+        ),
+    )
+
+    duration = float(np.float32(16.9))
+    times = frame_times({"time_s": 0.0, "duration_s": duration, "fps": 10.0}, component)
+
+    assert len(times) == 169
+    assert times[-1] == pytest.approx(16.8)
+
+
 def add_track(scene, oid, field, keys):
     track = scene.timeline_manager.clip.get_or_create_track(oid, "Transform", field)
     for time_s, value in keys:

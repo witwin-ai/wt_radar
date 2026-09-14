@@ -15,6 +15,7 @@ from .snapshot import (MODEL as SNAPSHOT_MODEL, SnapshotResult, prepare_snapshot
                        processing_cube, snapshot_request, snapshot_view)
 from .studio_motion import StudioSkinSampler
 from .memory_budget import MAX_RESULT_BYTES, require_result_memory
+from .timebase import aligned_frame_count
 
 MODEL = "studio_visible_skinned_surface_sites_v2"
 
@@ -43,8 +44,8 @@ def frame_times(request, component):
     if (not np.isfinite([start, duration, fps]).all() or start < 0 or duration <= 0
             or not 1 <= fps <= 30 or duration > 30):
         raise ValueError("Animation requires start >= 0, duration (0,30] seconds and FPS [1,30].")
-    count = int(round(duration * fps))
-    if count < 2 or not np.isclose(count, duration * fps, rtol=0, atol=1e-7):
+    count = aligned_frame_count(duration, fps)
+    if count is None:
         raise ValueError(f"Duration × FPS must be an integer of at least two frames. "
                          f"Actual duration={duration:.12g}, FPS={fps:.12g}, frames={duration * fps:.12g}; "
                          "re-enter exact values (the UI may round their display).")

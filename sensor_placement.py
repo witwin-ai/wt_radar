@@ -212,9 +212,9 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     duration_s = float(radar.animation_duration_s)
     fps = float(radar.animation_fps)
     start_s = float(radar.t0)
-    frame_count = int(round(duration_s * fps))
-    if frame_count < 2 or not np.isclose(frame_count, duration_s * fps,
-                                         rtol=0., atol=1e-7):
+    from .adapter.timebase import aligned_frame_count
+    frame_count = aligned_frame_count(duration_s, fps)
+    if frame_count is None:
         raise ToolError('Automatic placement requires duration times FPS to be an integer of at least two frames.',
                         code='invalid_sensor_placement')
     times = start_s + np.arange(frame_count, dtype=np.float64) / fps
