@@ -563,6 +563,27 @@ def _timeline_summary(scene: Any) -> dict[str, Any]:
     }
 
 
+def _default_automatic_placement_interval(scene: Any) -> dict[str, float] | None:
+    """Choose a short, integral-frame interval owned by the baked Timeline.
+
+    Placement requests normally omit measurement timing.  Passing the writer's
+    old 5 s / 10 FPS defaults through unchanged made automatic placement fail
+    whenever the current authored motion was shorter than five seconds.  The
+    model then guessed new decimals, often alternating between a non-integral
+    frame count and a Timeline overrun.  Bind the trusted continuation to one
+    deterministic interval instead.
+    """
+    timeline = _timeline_summary(scene)
+    duration = float(timeline["duration_s"])
+    if not timeline["available"] or duration <= 0 or timeline["playing"] or timeline["recording"]:
+        return None
+    for fps in (10.0, 30.0):
+        frame_count = min(int(math.floor((duration + 1e-7) * fps)), int(5.0 * fps))
+        if frame_count >= 2:
+            return {"start_s": 0.0, "duration_s": frame_count / fps, "fps": fps}
+    return None
+
+
 def _recorded_replay_summary(ctx: Any, obj: Any) -> dict[str, Any]:
     """Inspect the saved Figure separately from transient native worker state."""
     from .adapter.replay import MAX_PREVIEW_BYTES, motion_fingerprint
@@ -1361,9 +1382,10 @@ def register(ctx: Any) -> None:
             "Plan one Radar Settings placement without changing the scene, timeline, "
             "project or native simulation state. Validates explicit fixed coordinates "
             "and resolves an exact skinned target when unambiguous. Automatic placement "
-            "is recorded as deferred to ensure_sensor, whose native preflight verifies "
-            "visibility after authored motion exists. Use this for plan-only placement "
-            "requests and revisions; it never creates or configures Radar."
+            "is bound to a valid integral-frame interval and deferred to ensure_sensor, "
+            "whose native preflight verifies visibility after authored motion exists. "
+            "Use this before every standalone placement write as well as for plan-only "
+            "requests and revisions; it never creates or configures Radar itself."
         ),
         input_schema={
             "type": "object",
@@ -1461,6 +1483,29 @@ def register(ctx: Any) -> None:
             "placement_objective": str(args.get("placement_objective") or "balanced"),
             "height_m": float(args.get("height_m", 1.0)),
         }
+
+        automatic_interval = None
+        if placement_mode == "automatic":
+            automatic_interval = _default_automatic_placement_interval(scene)
+            if automatic_interval is None:
+                timeline = _timeline_summary(scene)
+                return {
+                    "ok": False,
+                    "status": "blocked",
+                    "scene_id": str(scene.scene_id),
+                    "blockers": [{
+                        "code": "timeline_interval_unavailable",
+                        "message": (
+                            "Automatic full-trajectory Radar placement needs a paused baked "
+                            "Timeline with at least two sample frames."
+                        ),
+                        "timeline": timeline,
+                    }],
+                    "mutates_scene": False,
+                    "mutates_timeline": False,
+                    "mutates_project": False,
+                }
+            proposed.update(automatic_interval)
         requested_radar = str(args.get("radar_object_id") or "").strip()
         if requested_radar:
             _select_radar(scene, requested_radar)
@@ -1484,6 +1529,7 @@ def register(ctx: Any) -> None:
                 "mode": "automatic",
                 "height_m": proposed["height_m"],
                 "distance_m": proposed.get("distance_m"),
+                "timeline_interval": automatic_interval,
                 "verification": "deferred_to_native_preflight_after_motion_exists",
             }
         return {
