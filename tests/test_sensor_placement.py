@@ -87,7 +87,7 @@ def test_explicit_objectives_rank_all_candidates_and_report_full_trajectory(scen
     }, radar_object_id='radar')
 
     assert result['placement_objective'] == objective
-    assert result['tested_candidates'] == 40
+    assert result['tested_candidates'] == 80
     assert result['valid_candidate_count'] == 1
     assert result['native_preflight_count'] == 1
     assert result['predicted_metrics']['sampled_frame_count'] == 2
@@ -117,7 +117,7 @@ def test_explicit_objective_continues_when_the_best_kinematic_pose_is_occluded(s
         'height_m': 1., 'placement_objective': 'maximize_range_span',
     }, radar_object_id='radar')
 
-    assert result['tested_candidates'] == 40
+    assert result['tested_candidates'] == 80
     assert result['native_preflight_count'] == 2
     assert result['valid_candidate_count'] == 1
     assert any(item['reason'] == 'occluded' for item in result['rejected_candidates'])
@@ -140,6 +140,48 @@ def test_trajectory_metrics_report_radial_sign_fov_and_nyquist():
     assert metrics['receding_peak_mps'] > 0
     assert metrics['whole_path_in_fov'] is True
     assert metrics['doppler_within_nyquist'] is False
+
+
+def test_whole_path_visibility_requires_target_presence_not_every_skin_site():
+    points = np.asarray([
+        [[2., 0., 0.], [0., 0., 2.]],
+        [[2., 0., 0.], [0., 0., -2.]],
+    ])
+    metrics = sensor_placement._trajectory_metrics(
+        [0., 0., 0.], [2., 0., 0.], points, np.asarray([0., 1.]),
+        fov_deg=60., max_doppler_mps=10.,
+    )
+    assert metrics['fov_site_frame_coverage'] == .5
+    assert metrics['path_frame_coverage'] == 1.
+    assert metrics['minimum_fov_site_fraction'] == .5
+    assert metrics['fov_continuous_site_count'] == 1
+    assert metrics['whole_path_in_fov'] is True
+
+
+def test_whole_path_objective_accepts_a_continuously_visible_native_subset(scene, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+        'frame_count': 2, 'site_count': 1, 'radar_device': 'cuda',
+        'topology': {
+            'declared_site_count': 2, 'active_site_count': 1,
+            'active_site_ranks': [0],
+            'visibility_coverage': .5,
+            'frames': [
+                {'reachable_site_count': 1}, {'reachable_site_count': 1},
+            ],
+        },
+    })
+    result = sensor_placement.choose_sensor_placement(original, {
+        'target_object_id': 'target', 'duration_s': .2, 'fps': 10,
+        'height_m': 1., 'placement_objective': 'whole_path_visible',
+    }, radar_object_id='radar')
+    metrics = result['predicted_metrics']
+    assert metrics['native_whole_path_visible'] is True
+    assert metrics['native_continuous_site_count'] == 1
+    assert metrics['joint_continuous_site_count'] == 1
+    assert metrics['occluded_frame_count'] == 0
+    assert metrics['partially_occluded_frame_count'] == 2
 
 
 def test_impossible_bidirectional_objective_reports_metrics_and_tradeoffs(scene, monkeypatch):
@@ -231,8 +273,8 @@ def test_all_occluded_candidates_stop_at_the_bound_without_mutation(scene, monke
             'target_object_id': 'target', 'duration_s': .2, 'fps': 10,
         }, radar_object_id='radar')
     assert caught.value.code == 'sensor_placement_unavailable'
-    assert len(caught.value.detail['candidates']) == 40
-    assert 0 < len(calls) <= 40
+    assert len(caught.value.detail['candidates']) == 80
+    assert 0 < len(calls) <= 80
     assert original.to_dict() == before
 
 
@@ -255,7 +297,27 @@ def test_automatic_placement_rejects_candidate_inside_furniture_before_native_pr
         'target_object_id': 'target', 'duration_s': .2, 'fps': 10, 'height_m': 1.,
     }, radar_object_id='radar')
 
-    assert result['tested_candidates'] == 2
+    assert result['tested_candidates'] == 3
     assert result['rejected_candidates'][0]['detail']['code'] == 'radar_furniture_collision'
     assert result['rejected_candidates'][0]['detail']['object_id'] == 'blocking-chair'
     assert len(calls) == 1
+
+
+def test_angular_centre_aim_reduces_long_path_off_axis_error():
+    position = np.asarray([0., 1., 0.])
+    points = np.asarray([
+        [[1., 0., -1.], [1., 1., -1.]],
+        [[4., 0., 1.], [4., 1., 1.]],
+    ])
+    cartesian_aim = points.reshape(-1, 3).mean(axis=0)
+    angular_aim = sensor_placement._angular_centre_aim(position, points)
+    times = np.asarray([0., 1.])
+    cartesian = sensor_placement._trajectory_metrics(
+        position, cartesian_aim, points, times,
+        fov_deg=180., max_doppler_mps=10.,
+    )
+    angular = sensor_placement._trajectory_metrics(
+        position, angular_aim, points, times,
+        fov_deg=180., max_doppler_mps=10.,
+    )
+    assert angular['max_off_axis_angle_deg'] < cartesian['max_off_axis_angle_deg']
