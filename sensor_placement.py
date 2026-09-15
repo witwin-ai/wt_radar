@@ -26,7 +26,11 @@ def candidate_positions(aim, height_m, distance_m=None):
     # World Y is up. A bounded ring search around the authored motion avoids
     # inventing a room-origin coordinate before the room has even been built.
     if distance_m is None:
-        radii = (1., 1.5)
+        # A long or laterally wide trajectory may not fit in a 60-degree FOV
+        # from the historical 1-1.5 m rings. Include farther in-room rings so
+        # whole_path_visible can satisfy the hard all-frame/all-site contract
+        # instead of failing at an otherwise fully visible pose.
+        radii = (1., 1.5, 2., 2.5, 3.)
     else:
         vertical = float(height_m) - float(aim[1])
         horizontal_sq = float(distance_m) ** 2 - vertical ** 2

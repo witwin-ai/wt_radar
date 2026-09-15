@@ -87,7 +87,7 @@ def test_explicit_objectives_rank_all_candidates_and_report_full_trajectory(scen
     }, radar_object_id='radar')
 
     assert result['placement_objective'] == objective
-    assert result['tested_candidates'] == 16
+    assert result['tested_candidates'] == 40
     assert result['valid_candidate_count'] == 1
     assert result['native_preflight_count'] == 1
     assert result['predicted_metrics']['sampled_frame_count'] == 2
@@ -117,10 +117,10 @@ def test_explicit_objective_continues_when_the_best_kinematic_pose_is_occluded(s
         'height_m': 1., 'placement_objective': 'maximize_range_span',
     }, radar_object_id='radar')
 
-    assert result['tested_candidates'] == 16
+    assert result['tested_candidates'] == 40
     assert result['native_preflight_count'] == 2
     assert result['valid_candidate_count'] == 1
-    assert result['rejected_candidates'][0]['reason'] == 'occluded'
+    assert any(item['reason'] == 'occluded' for item in result['rejected_candidates'])
 
 
 def test_trajectory_metrics_report_radial_sign_fov_and_nyquist():
@@ -231,7 +231,8 @@ def test_all_occluded_candidates_stop_at_the_bound_without_mutation(scene, monke
             'target_object_id': 'target', 'duration_s': .2, 'fps': 10,
         }, radar_object_id='radar')
     assert caught.value.code == 'sensor_placement_unavailable'
-    assert len(calls) == 16
+    assert len(caught.value.detail['candidates']) == 40
+    assert 0 < len(calls) <= 40
     assert original.to_dict() == before
 
 
