@@ -94,6 +94,9 @@ _MOTION_SOURCE = {"field_name": "timeline_source", "operator": "eq", "value": "m
 class RadarComponent(Component):
     """Unified Radar Settings component — FMCW config + sensor + sub-configs + solve + timeline."""
 
+    scene_dependency_roles = frozenset({"simulation_sensor"})
+    scene_dependency_dataset_kinds = frozenset({"radar.result"})
+
     def to_dict(self):
         return present_radar_controls(super().to_dict())
 
