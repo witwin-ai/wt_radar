@@ -99,10 +99,23 @@ def _remember_preflight(
     fingerprint: str,
     native_preflight: dict[str, Any],
 ) -> None:
+    evidence = copy.deepcopy(native_preflight)
+    # Only the new motion-sample cache needs an explicit in-payload binding.
+    # Older topology-only receipts remain byte-for-byte compatible; their
+    # identity is already enforced by the authoritative cache key.
+    if "sampled_motion" in evidence:
+        evidence["input_fingerprint"] = fingerprint
     _preflight_cache(ctx)[_preflight_cache_key(scene_id, radar_object_id, fingerprint)] = {
         "created_at": _utc_now(),
-        "native_preflight": copy.deepcopy(native_preflight),
+        "native_preflight": evidence,
     }
+
+
+def _public_preflight(native_preflight: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal sampled arrays from Agent-visible tool evidence."""
+    evidence = copy.deepcopy(native_preflight)
+    evidence.pop("sampled_motion", None)
+    return evidence
 
 
 def _consume_preflight(
@@ -1815,6 +1828,13 @@ def register(ctx: Any) -> None:
                     str(obj.id), position=previous["position"], rotation=previous["rotation"],
                 )
             raise
+        public_placement = copy.deepcopy(placement) if placement else {
+            "mode": "fixed", "position_m": position.tolist(), "aim_point_m": aim.tolist(),
+        }
+        if isinstance(public_placement.get("native_preflight"), dict):
+            public_placement["native_preflight"] = _public_preflight(
+                public_placement["native_preflight"]
+            )
         result = {
             "ok": True,
             "status": "ready",
@@ -1822,7 +1842,7 @@ def register(ctx: Any) -> None:
             "operation_id": operation_id,
             "created": created,
             "reused_operation": False,
-            "placement": placement or {"mode": "fixed", "position_m": position.tolist(), "aim_point_m": aim.tolist()},
+            "placement": public_placement,
             "radar": _sensor_summary(obj),
             "scene_input_fingerprint": _scene_input_fingerprint(scene),
         }
@@ -1966,7 +1986,7 @@ def register(ctx: Any) -> None:
                 "moving_object_ids": native_preflight["moving_object_ids"],
             },
             "measurement": measurement,
-            "native_preflight": native_preflight,
+            "native_preflight": _public_preflight(native_preflight),
             "runtime": runtime,
             "input_fingerprint": input_fingerprint,
             "scene_input_fingerprint": _scene_input_fingerprint(scene),

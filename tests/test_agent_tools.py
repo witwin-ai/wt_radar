@@ -693,6 +693,7 @@ def test_plan_preflight_is_read_only_and_reports_exact_cube(harness, monkeypatch
     assert result["target"]["visibility_coverage"] == 1.0
     assert result["target"]["visibility_quality"] == "complete"
     assert result["algorithm_unchanged"] is True
+    assert "sampled_motion" not in result["native_preflight"]
     assert result["completion_requirements"] == {
         "actual_frame_count": 50,
         "all_frames_finite": True,

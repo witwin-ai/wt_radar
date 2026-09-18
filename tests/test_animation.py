@@ -321,10 +321,15 @@ def test_solve_reuses_fingerprint_bound_native_preflight(scene, cuda_ready, monk
     def repeated_preflight(*_args, **_kwargs):
         pytest.fail("solve repeated the already verified native topology preflight")
 
+    def repeated_sampling(*_args, **_kwargs):
+        pytest.fail("solve repeated the already verified authored motion sampling")
+
     monkeypatch.setattr("wt_radar.adapter.animation.visibility_preflight", repeated_preflight)
+    monkeypatch.setattr("wt_radar.adapter.animation.sample_authored_motion", repeated_sampling)
     result = solve_animation(AnimationContext(), copy_for_solver(original), request)
 
     assert result.metadata["native_preflight_reused"] is True
+    assert result.metadata["native_motion_samples_reused"] is True
     assert result.metadata["topology_preflight"] == request["native_preflight"]["topology"]
 
 
@@ -336,6 +341,17 @@ def test_solve_rejects_mismatched_cached_native_preflight(scene, cuda_ready):
     request["native_preflight"]["radar_position_m"][0] += 1.0
 
     with pytest.raises(ValueError, match="preflight pose"):
+        solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+
+def test_solve_rejects_mismatched_cached_motion_shape(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    request = animation_request(component)
+    request["native_preflight"] = animation_preflight(copy_for_solver(original), request)
+    request["native_preflight"]["sampled_motion"]["positions_m"].pop()
+
+    with pytest.raises(ValueError, match="sampled motion"):
         solve_animation(AnimationContext(), copy_for_solver(original), request)
 
 

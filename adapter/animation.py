@@ -254,6 +254,12 @@ def animation_preflight(scene, request):
         "radar_target_m": list(meta["radar_target_m"]),
         "model": MODEL,
         "topology": topology,
+        "input_fingerprint": str(request.get("input_fingerprint") or ""),
+        "sampled_motion": {
+            "times_s": np.asarray(times, dtype=np.float64).tolist(),
+            "positions_m": positions.tolist(),
+            "velocities_mps": velocities.tolist(),
+        },
         **velocity_evidence,
     }
 
@@ -412,6 +418,9 @@ def validated_cached_topology(request, times, sampler, meta):
         return None
     if not isinstance(preflight, dict) or preflight.get("model") != MODEL:
         raise ValueError("Cached Radar preflight model does not match this animation adapter.")
+    expected_fingerprint = str(request.get("input_fingerprint") or "")
+    if expected_fingerprint and str(preflight.get("input_fingerprint") or "") != expected_fingerprint:
+        raise ValueError("Cached Radar preflight fingerprint does not match this solve request.")
     topology = preflight.get("topology")
     if not isinstance(topology, dict) or topology.get("status") != "reachable":
         raise ValueError("Cached Radar preflight does not contain reachable topology evidence.")
@@ -455,14 +464,44 @@ def validated_cached_topology(request, times, sampler, meta):
     return json.loads(json.dumps(topology))
 
 
+def validated_cached_motion(request, times, sampler):
+    """Return structurally valid sampled motion from the bound preflight."""
+    preflight = request.get("native_preflight")
+    if not isinstance(preflight, dict):
+        return None
+    sampled = preflight.get("sampled_motion")
+    if sampled is None:
+        return None
+    if not isinstance(sampled, dict):
+        raise ValueError("Cached Radar preflight sampled motion is malformed.")
+    cached_times = np.asarray(sampled.get("times_s"), dtype=np.float64)
+    positions = np.asarray(sampled.get("positions_m"), dtype=np.float64)
+    velocities = np.asarray(sampled.get("velocities_mps"), dtype=np.float64)
+    expected_shape = (len(times), len(sampler.vertex_ids), 3)
+    if (cached_times.shape != np.asarray(times).shape
+            or not np.array_equal(cached_times, np.asarray(times, dtype=np.float64))
+            or positions.shape != expected_shape
+            or velocities.shape != expected_shape
+            or not np.isfinite(positions).all()
+            or not np.isfinite(velocities).all()):
+        raise ValueError("Cached Radar preflight sampled motion does not match this solve request.")
+    return positions, velocities
+
+
 def solve_animation(ctx, scene, request):
     from witwin.radar import Motion, PointTargets
 
     ctx.progress(0.01, "Preparing Radar scene")
     times, sampler, radar, world, config, meta, authored_motion_fingerprint = prepare_animation(scene, request)
-    with progress_heartbeat(ctx, 0.03, "Sampling authored cat motion"):
-        poses, velocities = sample_authored_motion(times, sampler)
-        velocity_evidence = validate_unambiguous_velocity(radar, velocities)
+    cached_motion = validated_cached_motion(request, times, sampler)
+    motion_samples_reused = cached_motion is not None
+    if cached_motion is None:
+        with progress_heartbeat(ctx, 0.03, "Sampling authored cat motion"):
+            poses, velocities = sample_authored_motion(times, sampler)
+    else:
+        poses, velocities = cached_motion
+        ctx.progress(0.03, "Reusing verified authored motion samples")
+    velocity_evidence = validate_unambiguous_velocity(radar, velocities)
     topology = validated_cached_topology(request, times, sampler, meta)
     preflight_reused = topology is not None
     if topology is None:
@@ -496,6 +535,7 @@ def solve_animation(ctx, scene, request):
                     "coherent_with_target": True,
                 },
                 native_preflight_reused=preflight_reused,
+                native_motion_samples_reused=motion_samples_reused,
                 **velocity_evidence,
                 velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
                 slow_time_model="Radar 0.4 public chirp-time motion sampling per Studio frame",
