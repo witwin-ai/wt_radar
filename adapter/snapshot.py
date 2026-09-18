@@ -1,5 +1,5 @@
-"""Studio snapshot transport to Radar 0.3; no propagation or DSP implementation."""
-from dataclasses import dataclass, replace
+"""Studio snapshot transport to Radar 0.4; no propagation or DSP implementation."""
+from dataclasses import dataclass
 from importlib.metadata import version
 
 import numpy as np
@@ -101,7 +101,6 @@ def _hierarchy(scene):
 
 def prepare_snapshot(scene, request):
     """Read a solver-owned scene copy; never seek the user's live editor scene."""
-    from witwin.radar import RadarConfig
     from .studio_geometry import export_static_mesh_scene
 
     if request.get("adapter") != MODEL or str(scene.scene_id) != request.get("scene_id"):
@@ -147,7 +146,8 @@ def prepare_snapshot(scene, request):
         raise ValueError("Radar pose has degenerate forward/up vectors.")
     config = ConfigMap._core_dict(component)
     config["antenna_pattern"] = SubConfigMap.antenna_build(component)
-    radar_config = RadarConfig.from_dict(config)
+    from .radar04 import flat_config
+    radar_config = flat_config(config)
     if int(component.num_range_bins) != int(component.adc_samples) or int(component.num_doppler_bins) != int(component.chirp_per_frame):
         raise ValueError("Snapshot uses native sample/chirp bins: set Range Bins=ADC Samples and Doppler Bins=Chirps.")
     metadata = {
@@ -170,29 +170,14 @@ def prepare_snapshot(scene, request):
 
 
 def processing_cube(simulation, radar):
-    """Repack published axes into the official processing metadata constructor."""
-    from witwin.radar.processing import ProcessingAxes, ProcessingCube
-    from witwin.radar.synthesis.assembly import SynthesisResult
-
-    spec, array = radar.system_config.waveform_spec(), radar.system_config.sensors.array
+    """Use the 0.4 result's producer-owned processing axes without rebuilding them."""
     expected = ("frame", "tx", "rx", "chirp", "range_bin")
-    if tuple(simulation.axes) != expected or simulation.kind != "fmcw" or spec.output_domain != "spectrum":
+    if (tuple(simulation.axis_names) != expected or simulation.kind != "fmcw"
+            or simulation.output_domain != "spectrum"):
         raise ValueError("Snapshot result is not the requested FMCW spectrum product.")
     if len(simulation.times_s) != 1:
         raise ValueError("Snapshot adapter requires exactly one frame.")
-    frame = simulation.cube[0]
-    # The native synthesis pair rank is RX-major. This is structural packing,
-    # checked by the official inverse below, not a second signal transform.
-    packed = frame.permute(2, 1, 0, 3).reshape(spec.num_chirps, array.sensor_pair_count, spec.num_samples)
-    synthesis = SynthesisResult(
-        cube=packed, kind=simulation.kind, axes=("chirp", "sensor_pair", "range_bin"),
-        phasor=simulation.phasor, time_dependence=simulation.time_dependence,
-        reference_frequency_hz=simulation.reference_frequency_hz, output_domain=spec.output_domain,
-    )
-    axes = ProcessingAxes.from_synthesis(synthesis, spec, array)
-    if not torch.equal(ProcessingCube.from_synthesis(synthesis, axes).data, frame):
-        raise RuntimeError("Simulation/processing array packing mismatch.")
-    return ProcessingCube(frame, axes)
+    return simulation.frame(0).processing_cube()
 
 
 @dataclass
@@ -202,46 +187,51 @@ class SnapshotResult:
 
 
 def solve_snapshot(ctx, scene, request):
-    from witwin.radar import Radar
-    from witwin.radar.scattering import ScalarRcsResponse
-    from witwin.radar.simulation import ScatterSitePolicy
+    from witwin.radar import Motion, PointTargets
+    from .radar04 import build_radar
 
     ctx.progress(0.0, "Exporting frozen Studio scene and explicit point target")
     world, config, metadata = prepare_snapshot(scene, request)
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required; snapshot simulation has no CPU fallback.")
-    radar = Radar(config, device="cuda", position=metadata["radar_position_m"],
-                  target=metadata["radar_target_m"], up=metadata["radar_up"])
-    response = ScalarRcsResponse.from_rcs(metadata["rcs_m2"], reference_frequency_hz=config.fc, device=radar.device)
-    sites = ScatterSitePolicy.explicit(torch.tensor([metadata["target_world_point_m"]], device=radar.device))
-    from .environment_clutter import single_bounce_environment_cube
-    environment = single_bounce_environment_cube(
-        radar, world, polarization=metadata["world_polarization"],
+    radar = build_radar(
+        config,
+        device="cuda",
+        position=metadata["radar_position_m"],
+        look_at=metadata["radar_target_m"],
+        up=metadata["radar_up"],
+        polarization=metadata["world_polarization"],
     )
-    ctx.log(f"Radar 0.3 snapshot: {metadata}")
+    targets = PointTargets(
+        positions=torch.tensor([metadata["target_world_point_m"]], device=radar.device),
+        rcs=metadata["rcs_m2"],
+    )
+    ctx.log(f"Radar 0.4 snapshot: {metadata}")
     ctx.progress(0.3, "Running native GPU propagation and FMCW synthesis")
-    simulation = radar.simulate(world, times=(metadata["snapshot_time_s"],), response=response,
-                                sites=sites, components=frozenset({"los"}), max_depth=0,
-                                polarization=tuple(metadata["world_polarization"]))
-    simulation = replace(
-        simulation,
-        cube=simulation.cube + environment.cube.unsqueeze(0),
+    simulation = radar.simulate(
+        world,
+        targets,
+        times=(metadata["snapshot_time_s"],),
+        los=True,
+        reflections=1,
+        motion=Motion.static(),
     )
     processed = processing_cube(simulation, radar)
     if processed.data.device.type != "cuda" or not bool(torch.isfinite(processed.data).all()):
         raise RuntimeError("Native CUDA result is missing or nonfinite.")
     metadata.update({"cube_shape": list(processed.data.shape), "device": str(processed.data.device),
                      "environment_reflection": {
-                         "model": "native_channel_direct_single_bounce",
-                         "max_depth": environment.max_depth,
-                         "reflected_path_count": environment.reflected_path_count,
-                         "material_slot_count": environment.material_slot_count,
+                         "model": "radar04_native_single_bounce",
+                         "max_depth": 1,
+                         "path_count": int(simulation.last_radar_paths.path_count),
                          "coherent_with_target": True,
                      },
                      "versions": {name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")},
                      "compile_count": simulation.compile_count, "discovery_count": simulation.discovery_count,
                      "tx_positions_m": radar.tx_pos.detach().cpu().tolist(),
-                     "rx_positions_m": radar.rx_pos.detach().cpu().tolist()})
+                     "rx_positions_m": radar.rx_pos.detach().cpu().tolist(),
+                     "path_set_complete": bool(simulation.path_set_complete),
+                     "motion_sampling": simulation.motion_sampling})
     ctx.progress(1.0, "GPU snapshot complete with static single-bounce room reflections")
     return SnapshotResult(processed, metadata)
 
