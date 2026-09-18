@@ -1,5 +1,5 @@
 """Studio snapshot transport to Radar 0.3; no propagation or DSP implementation."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 
 import numpy as np
@@ -158,12 +158,13 @@ def prepare_snapshot(scene, request):
         "radar_position_m": position.tolist(), "radar_target_m": (position + forward).tolist(),
         "radar_up": up.tolist(), "rcs_m2": num(component.snapshot_rcs_m2),
         "world_polarization": vec(component.snapshot_polarization),
-        "velocity_m_per_s": [0.0, 0.0, 0.0], "components": ["los"], "max_depth": 0,
+        "velocity_m_per_s": [0.0, 0.0, 0.0], "components": ["los", "reflection"], "max_depth": 1,
         "room_mesh_count": world.mesh_count, "room_triangle_count": world.face_count,
         "room_object_ids": sorted(world.object_to_structure_id),
         "radar_config": config,
         "limitations": "One explicit RCS point, not skin scattering; frozen pose, no gait Doppler; "
-                       "room occludes paths, no static room clutter or target self-occlusion; RCS is uncalibrated.",
+                       "room geometry contributes native single-bounce specular reflections; no diffuse or "
+                       "multi-bounce clutter or target self-occlusion; RCS is uncalibrated.",
     }
     return world.scene, radar_config, metadata
 
@@ -213,20 +214,35 @@ def solve_snapshot(ctx, scene, request):
                   target=metadata["radar_target_m"], up=metadata["radar_up"])
     response = ScalarRcsResponse.from_rcs(metadata["rcs_m2"], reference_frequency_hz=config.fc, device=radar.device)
     sites = ScatterSitePolicy.explicit(torch.tensor([metadata["target_world_point_m"]], device=radar.device))
+    from .environment_clutter import single_bounce_environment_cube
+    environment = single_bounce_environment_cube(
+        radar, world, polarization=metadata["world_polarization"],
+    )
     ctx.log(f"Radar 0.3 snapshot: {metadata}")
     ctx.progress(0.3, "Running native GPU propagation and FMCW synthesis")
     simulation = radar.simulate(world, times=(metadata["snapshot_time_s"],), response=response,
                                 sites=sites, components=frozenset({"los"}), max_depth=0,
                                 polarization=tuple(metadata["world_polarization"]))
+    simulation = replace(
+        simulation,
+        cube=simulation.cube + environment.cube.unsqueeze(0),
+    )
     processed = processing_cube(simulation, radar)
     if processed.data.device.type != "cuda" or not bool(torch.isfinite(processed.data).all()):
         raise RuntimeError("Native CUDA result is missing or nonfinite.")
     metadata.update({"cube_shape": list(processed.data.shape), "device": str(processed.data.device),
+                     "environment_reflection": {
+                         "model": "native_channel_direct_single_bounce",
+                         "max_depth": environment.max_depth,
+                         "reflected_path_count": environment.reflected_path_count,
+                         "material_slot_count": environment.material_slot_count,
+                         "coherent_with_target": True,
+                     },
                      "versions": {name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")},
                      "compile_count": simulation.compile_count, "discovery_count": simulation.discovery_count,
                      "tx_positions_m": radar.tx_pos.detach().cpu().tolist(),
                      "rx_positions_m": radar.rx_pos.detach().cpu().tolist()})
-    ctx.progress(1.0, "GPU snapshot complete; all velocities frozen to zero")
+    ctx.progress(1.0, "GPU snapshot complete with static single-bounce room reflections")
     return SnapshotResult(processed, metadata)
 
 

@@ -500,6 +500,7 @@ def animation_manifest(ctx, result, params):
         and float(row.get("delay_rate_abs_max") or 0.0) > 0.0
         for row in diagnostics
     )
+    environment = dict(result.metadata.get("environment_reflection") or {})
     return {
         "frame_count": frame_count,
         "cube_shape": [int(value) for value in cube.shape],
@@ -535,6 +536,11 @@ def animation_manifest(ctx, result, params):
         "nonzero_return_frames": nonzero_return_frames,
         "dynamic_delay_rate_frames": dynamic_delay_rate_frames,
         "coupled_dynamic_return_frames": coupled_dynamic_return_frames,
+        "environment_reflection_model": str(environment.get("model") or ""),
+        "environment_reflection_max_depth": int(environment.get("max_depth", -1)),
+        "environment_reflected_path_count": int(environment.get("reflected_path_count", -1)),
+        "environment_material_slot_count": int(environment.get("material_slot_count", -1)),
+        "environment_coherent_with_target": bool(environment.get("coherent_with_target")),
         "solver_completion_contract": "atomic_active_sites_no_zero_fill_v2",
         "device": str(result.metadata.get("device") or ""),
         "input_fingerprint": result.metadata.get("input_fingerprint"),

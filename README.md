@@ -36,8 +36,9 @@ No Radar/Channel propagation or DSP equations are replaced.
    Maximum duration/FPS is 30 seconds/30 Hz and raw result memory is capped at
    1536 MiB, with an additional available-memory preflight. Unsupported settings
    fail; they are never silently reduced.
-5. Leave extra environment reflections at zero, multipath/noise/CFAR/clutter
-   removal off. Click **Simulate Animation**. This is distinct from **Simulate**,
+5. Leave the legacy extra-reflection control at zero and keep multipath/noise/CFAR/clutter
+   removal off. The native adapter always includes exactly one specular reflection from
+   the exported static room geometry. Click **Simulate Animation**. This is distinct from **Simulate**,
    which remains the single-point frozen diagnostic. Legacy Stream/Generate
    Frames are not the Studio animation path.
 6. Choose **range_profile**, **range_spectrum** or **range_doppler** and change
@@ -82,8 +83,9 @@ nonfinite data, oversized results, overlapping CPIs and Doppler aliasing fail.
 Velocities are finite differences of the exact Studio world skin (at most 1 ms,
 right-hand at knots), not a second motion interpolation. Native per-CPI synthesis
 uses frozen weights with first-order carrier rate, not arbitrary within-CPI
-acceleration. Static room occlusion remains enabled; static room clutter,
-additional room bounces and target self-occlusion are not included.
+acceleration. Static room occlusion and one native specular room reflection are
+enabled; diffuse clutter, additional room bounces and target self-occlusion are
+not included.
 
 **Native topology boundary:** Radar 0.3 requires every site submitted for a
 frame to have discovered inbound and outbound legs. Before waveform synthesis,
@@ -107,10 +109,10 @@ and recording first. The solver samples a copy, never the editor scene.
 
 This is deliberately a **single explicit point, frozen-pose diagnosis**, not a
 moving-cat measurement. The target mesh is replaced by that point; no target
-self-occlusion, skin scattering, gait Doppler, static room clutter, or extra
-environment reflections are claimed. Other visible unmodelled SkinnedMeshes are
-refused. Parent transforms and visibility are respected. Existing room meshes
-remain in the native propagation scene as occluders. RCS is an explicit uncalibrated
+self-occlusion, skin scattering or gait Doppler are claimed. Static room meshes
+participate both as occluders and as native one-bounce specular reflectors; diffuse
+and multi-bounce environment clutter are not included. Other visible unmodelled
+SkinnedMeshes are refused. Parent transforms and visibility are respected. RCS is an explicit uncalibrated
 assumption. Legacy tracer/noise/polarization/receiver options are not mapped by this
 milestone and unsupported settings fail instead of being silently ignored.
 

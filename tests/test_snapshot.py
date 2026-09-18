@@ -215,6 +215,10 @@ def test_real_gpu_repeat_and_moved_sensor(scene, cuda_ready):
     repeat = solve_snapshot(Context(), copy_for_solver(original), request)
     assert first.processing.data.device.type == "cuda"
     assert torch.equal(first.processing.data, repeat.processing.data)
+    assert first.metadata["components"] == ["los", "reflection"]
+    assert first.metadata["max_depth"] == 1
+    assert first.metadata["environment_reflection"]["max_depth"] == 1
+    assert first.metadata["environment_reflection"]["coherent_with_target"] is True
     original.get_object("radar").get_component("Transform").position = [0, 1, -1]
     moved = solve_snapshot(Context(), copy_for_solver(original), snapshot_request(component))
     assert not torch.equal(first.processing.data, moved.processing.data)

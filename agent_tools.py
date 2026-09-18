@@ -535,12 +535,12 @@ def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
 
 def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
     payload = {
-        "schema": "witwin.radar.agent-input.v5",
+        "schema": "witwin.radar.agent-input.v6",
         "scene_fingerprint": _scene_input_fingerprint(scene),
         "scene_id": str(scene.scene_id),
         "radar_object_id": str(obj.id),
         "radar_contract": _radar_measurement_contract(obj),
-        "physics": {"components": ["los"], "max_depth": 0, "device": "cuda"},
+        "physics": {"components": ["los", "reflection"], "max_depth": 1, "device": "cuda"},
         "packages": {
             name: _package_version(name)
             for name in ("witwin", "witwin-radar", "witwin-channel", "torch")
@@ -704,10 +704,10 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "replay_status": str(getattr(radar, "replay_status", "") or ""),
         },
         "physics_contract": {
-            "components": ["los"],
-            "max_depth": 0,
+            "components": ["los", "reflection"],
+            "max_depth": 1,
             "device": "cuda",
-            "room_role": "occlusion only; no static clutter or extra bounces",
+            "room_role": "occlusion plus native static single-bounce specular reflection",
             "target_model": (
                 "interval-visible stable skinned surface sites; uncalibrated equal-RCS "
                 "shares are based on all declared sites and are not renormalized"
@@ -889,6 +889,9 @@ def _expected_result_evidence(scene: Any, radar: Any, native_preflight: dict[str
         },
         "device_prefix": "cuda",
         "solver_completion_contract": "atomic_active_sites_no_zero_fill_v2",
+        "environment_reflection_model": "native_channel_direct_single_bounce",
+        "environment_reflection_max_depth": 1,
+        "environment_coherent_with_target": True,
     }
 
 
@@ -1236,6 +1239,24 @@ def _native_manifest_checks(
         "native_motion_coupling_present": int(
             manifest.get("coupled_dynamic_return_frames") or 0
         ) >= required_evidence_frames,
+        "environment_reflection_model_matches": (
+            str(manifest.get("environment_reflection_model") or "")
+            == str(expected.get("environment_reflection_model") or "")
+        ),
+        "environment_reflection_depth_matches": (
+            int(manifest.get("environment_reflection_max_depth", -1))
+            == int(expected.get("environment_reflection_max_depth", -2))
+        ),
+        "environment_reflection_is_coherent": (
+            bool(manifest.get("environment_coherent_with_target"))
+            is bool(expected.get("environment_coherent_with_target"))
+        ),
+        "environment_materials_were_compiled": int(
+            manifest.get("environment_material_slot_count", -1)
+        ) > 0,
+        "environment_reflection_paths_reported": int(
+            manifest.get("environment_reflected_path_count", -1)
+        ) >= 0,
         "solver_completion_contract_matches": (
             str(manifest.get("solver_completion_contract") or "")
             == str(expected.get("solver_completion_contract") or "")
