@@ -221,6 +221,15 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
     declared_ids = tuple(3_000_000 + rank for rank in range(len(positions_by_frame[0])))
     positions_by_frame = np.stack(positions_by_frame)
     timeline = np.asarray(times_s, dtype=np.float64)
+    # Visibility is a propagation question at Studio frame instants, not a
+    # waveform-synthesis question.  A one-chirp immutable Radar preserves the
+    # carrier, arrays, pose, pattern and propagation request while making
+    # Motion.chirp schedule exactly one observation per output frame.  Using
+    # the authored chirp count here would repeat the same topology check up to
+    # 128 times per frame before any synthesis is requested.
+    preflight_radar = radar.replace(
+        waveform=replace(radar.waveform, chirps_per_frame=1),
+    )
 
     def trajectory_for(ranks):
         samples = positions_by_frame[:, ranks]
@@ -236,7 +245,7 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
                 left = right - 1
                 weight = (value - timeline[left]) / (timeline[right] - timeline[left])
                 positions = samples[left] + weight * (samples[right] - samples[left])
-            return torch.as_tensor(positions, dtype=torch.float32, device=radar.device).contiguous()
+            return torch.as_tensor(positions, dtype=torch.float32, device=preflight_radar.device).contiguous()
 
         return trajectory
 
@@ -254,7 +263,7 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
             positions_by_frame[0, active_ranks], dtype=torch.float32, device=radar.device,
         ).contiguous()
         try:
-            trace = radar.trace(
+            trace = preflight_radar.trace(
                 world,
                 PointTargets(
                     positions=initial,
