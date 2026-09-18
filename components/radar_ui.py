@@ -26,7 +26,7 @@ def present_radar_controls(metadata):
         if field.get("group") in _OLD_GROUPS or field["name"] in _OLD_SOLVE_FIELDS:
             field["group"] = COMPATIBILITY_GROUP
         result["fields"].append(field)
-    # The old streaming/frame-generation adapter is not connected to Radar 0.3.
+    # The old streaming/frame-generation adapter is not connected to Radar 0.4.
     # Keep the Python methods for compatibility, without advertising UI actions.
     result["buttons"] = [dict(button) for button in metadata["buttons"] if button["name"] not in _OLD_BUTTONS]
     return result

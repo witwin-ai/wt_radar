@@ -359,7 +359,7 @@ class RadarComponent(Component):
                                   description="Assumed scalar RCS in square metres; not a calibrated cat value.")
     snapshot_polarization = vector3_field([0.0, 1.0, 0.0], group=_SNAPSHOT,
                                           description="World-space polarization for both propagation legs.")
-    snapshot_status = string_field("Not run. Static Snapshot freezes the scene at the measurement start time; LOS only.",
+    snapshot_status = string_field("Not run. Static Snapshot freezes the scene at the measurement start time and includes one reflection.",
                                    readonly=True, transient=True, group=_SNAPSHOT)
     snapshot_figure = figure(title="Static diagnostic snapshot (one frame)", group=_SNAPSHOT)
     animation_duration_s = float_field(5.0, min=0.01, group=_ANIMATION,
@@ -368,7 +368,7 @@ class RadarComponent(Component):
                                 description="Actual independent GPU measurements per second (1..30), not repeated video frames.")
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,
                                       description="Recorded result frame. Does not seek or modify the editor timeline.")
-    animation_status = string_field("Not run. Uses existing baked skin animation; LOS only, no extra room bounces.",
+    animation_status = string_field("Not run. Uses existing baked skin animation with LOS and one reflection.",
                                     readonly=True, transient=True, group=_ANIMATION)
     animation_export_path = string_field("", readonly=True, transient=True, group=_ANIMATION,
                                          description="Exported native complex cube, times, skin positions/velocities and physical axes (.npz).")
@@ -514,12 +514,12 @@ class RadarComponent(Component):
 
     @staticmethod
     def _require_legacy_solver():
-        # The historical live adapter has not been ported to Radar 0.3. This
+        # The historical live adapter has not been ported to Radar 0.4. This
         # is an explicit UI boundary, not a compatibility shim or fallback.
         import importlib.util
         if importlib.util.find_spec("witwin.radar.sigproc") is None:
             raise RuntimeError(
-                "This plugin's legacy Stream/Generate adapter is not connected to Radar 0.3. "
+                "This plugin's legacy Stream/Generate adapter is not connected to Radar 0.4. "
                 "Use Simulate for a frozen-point snapshot or Load Saved Result for replay. No solver or DSP fallback is performed."
             )
 
@@ -758,7 +758,7 @@ class RadarComponent(Component):
                 count = round(request['duration_s'] * request['fps'])
                 self.animation_status = (
                     f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
-                    f"{request['fps']:g} FPS. Uncalibrated skin sites; LOS only."
+                    f"{request['fps']:g} FPS. Uncalibrated skin sites; LOS plus one reflection."
                 )
                 if completion_won_cancel_race:
                     self.animation_status += " Native completion won the cancellation race; result preserved."
@@ -790,7 +790,7 @@ class RadarComponent(Component):
                         self.animation_status = (
                             f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
                             f"{request['fps']:g} FPS. Interval-visible sites {active}/{declared} "
-                            f"({coverage:.1f}%, {quality}); uncalibrated RCS; LOS only."
+                            f"({coverage:.1f}%, {quality}); uncalibrated RCS; LOS plus one reflection."
                         )
                         if completion_won_cancel_race:
                             self.animation_status += (

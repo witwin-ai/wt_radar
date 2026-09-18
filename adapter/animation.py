@@ -5,6 +5,7 @@ import io
 import hashlib
 import json
 from pathlib import Path
+import re
 import uuid
 
 import numpy as np
@@ -218,72 +219,84 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
     if not positions_by_frame or len(positions_by_frame) != len(times_s):
         raise ValueError("Topology preflight requires one site array per requested frame.")
     declared_ids = tuple(3_000_000 + rank for rank in range(len(positions_by_frame[0])))
-    active_ids = set(declared_ids)
-    visible_frame_counts = None
-    frame_diagnostics = []
+    positions_by_frame = np.stack(positions_by_frame)
+    timeline = np.asarray(times_s, dtype=np.float64)
 
-    def trace_reachable(site_positions, site_ids, time_s):
-        """Use only public 0.4 tracing, bisecting when a declared site is occluded."""
-        if not site_ids:
-            return set(), 0, True
+    def trajectory_for(ranks):
+        samples = positions_by_frame[:, ranks]
+
+        def trajectory(sample_time):
+            value = float(sample_time)
+            if value <= timeline[0]:
+                positions = samples[0]
+            elif value >= timeline[-1]:
+                positions = samples[-1]
+            else:
+                right = int(np.searchsorted(timeline, value, side="right"))
+                left = right - 1
+                weight = (value - timeline[left]) / (timeline[right] - timeline[left])
+                positions = samples[left] + weight * (samples[right] - samples[left])
+            return torch.as_tensor(positions, dtype=torch.float32, device=radar.device).contiguous()
+
+        return trajectory
+
+    # Radar 0.4 deliberately refuses a declared target that lacks either leg.
+    # The exception names that stable ID, so remove only that interval-ineligible
+    # site and retry the entire time sequence in one compiled session.  This
+    # preserves the old full-interval intersection semantics without importing
+    # Channel internals or recompiling the room once per frame.
+    active_ranks = list(range(len(declared_ids)))
+    excluded_ids = set()
+    trace = None
+    while active_ranks:
+        active_ids = tuple(declared_ids[rank] for rank in active_ranks)
+        initial = torch.as_tensor(
+            positions_by_frame[0, active_ranks], dtype=torch.float32, device=radar.device,
+        ).contiguous()
         try:
             trace = radar.trace(
                 world,
-                PointTargets(positions=site_positions, rcs=1.0, ids=site_ids),
-                times=(time_s,),
+                PointTargets(
+                    positions=initial,
+                    rcs=1.0,
+                    ids=active_ids,
+                    trajectory=trajectory_for(active_ranks),
+                ),
+                times=times_s,
                 los=True,
                 reflections=1,
-                motion=Motion.static(),
+                motion=Motion.chirp(rediscover_every_frames=1),
             )
+            break
         except ValueError as exc:
-            message = str(exc)
-            if "has no inbound leg row" not in message and "has no outbound leg row" not in message:
+            match = re.search(r"site (\d+) has no (?:inbound|outbound) leg row", str(exc))
+            if match is None:
                 raise
-            if len(site_ids) == 1:
-                return set(), 0, True
-            middle = len(site_ids) // 2
-            left = trace_reachable(site_positions[:middle], site_ids[:middle], time_s)
-            right = trace_reachable(site_positions[middle:], site_ids[middle:], time_s)
-            return left[0] | right[0], left[1] + right[1], left[2] and right[2]
-        rows = trace.last_radar_paths
-        valid = rows.row_valid
-        visible_ids = rows.topology.site_id
-        if valid is not None:
-            visible_ids = visible_ids[valid]
-        return (
-            set(int(value) for value in visible_ids.detach().cpu().tolist()),
-            int(rows.path_count),
-            bool(trace.path_set_complete),
-        )
+            missing_id = int(match.group(1))
+            if missing_id not in active_ids:
+                raise
+            excluded_ids.add(missing_id)
+            active_ranks = [rank for rank in active_ranks if declared_ids[rank] != missing_id]
 
-    for frame_index, (time_s, positions) in enumerate(zip(times_s, positions_by_frame)):
-        site_positions = torch.as_tensor(
-            positions, dtype=torch.float32, device=radar.device,
-        ).contiguous()
-        if visible_frame_counts is None:
-            visible_frame_counts = {site_id: 0 for site_id in declared_ids}
-        reachable, row_count, path_set_complete = trace_reachable(
-            site_positions, declared_ids, time_s,
-        )
-        active_ids &= reachable
-        for site_id in reachable:
-            visible_frame_counts[site_id] += 1
-        frame_diagnostics.append({
-            "frame_index": frame_index,
-            "time_s": time_s,
-            "reachable_site_count": len(reachable),
-            "round_trip_rows": row_count,
-            "path_set_complete": path_set_complete,
-        })
+    frame_diagnostics = []
+    if trace is not None:
+        for frame_index, time_s in enumerate(times_s):
+            frame = trace.frame(frame_index)
+            frame_diagnostics.append({
+                "frame_index": frame_index,
+                "time_s": float(time_s),
+                "reachable_site_count": len(active_ranks),
+                "round_trip_rows": int(frame.last_radar_paths.path_count),
+                "path_set_complete": bool(frame.path_set_complete),
+            })
 
-    active_ranks = [rank for rank, site_id in enumerate(declared_ids) if site_id in active_ids]
-    occluded_ranks = [rank for rank, site_id in enumerate(declared_ids) if site_id not in active_ids]
+    occluded_ranks = [rank for rank, site_id in enumerate(declared_ids) if site_id in excluded_ids]
     occluded_sites = [{
         "site_id": int(declared_ids[rank]),
         "site_rank": rank,
         "bone_name": str(sampler.site_names[rank]),
         "vertex_index": int(sampler.vertex_ids[rank]),
-        "visible_frame_count": int(visible_frame_counts[declared_ids[rank]]),
+        "visible_frame_count": 0,
     } for rank in occluded_ranks]
     if not active_ranks:
         detail = {

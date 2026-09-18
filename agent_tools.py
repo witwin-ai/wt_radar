@@ -1,4 +1,4 @@
-"""Agent-facing Radar tools built on the existing Studio/Radar 0.3 bridge.
+"""Agent-facing Radar tools built on the Studio/Radar 0.4 bridge.
 
 These tools deliberately stop at orchestration and evidence.  They do not
 implement propagation, scattering, waveform generation, or DSP; those remain
@@ -1820,7 +1820,7 @@ def register(ctx: Any) -> None:
     @tool(
         name="plan_animation_measurement",
         description=(
-            "Read-only preflight for a real Radar 0.3 CUDA animation measurement. "
+            "Read-only preflight for a real Radar 0.4 CUDA animation measurement. "
             "It validates the exact target, timeline interval, frame/cube shape, host "
             "memory and current solver settings without changing FPS or duration. "
             "For 'use where I moved the radar and run again', select the existing Radar "
@@ -1946,7 +1946,7 @@ def register(ctx: Any) -> None:
         name="submit_animation_measurement",
         description=(
             "Submit the already-preflighted Studio animation to the existing native "
-            "Radar 0.3 CUDA solver. Returns immediately with an operation receipt unless "
+            "Radar 0.4 CUDA solver. Returns immediately with an operation receipt unless "
             "wait_for_completion is explicitly requested by the trusted direct-rerun host; the "
             "background job verifies native evidence and publishes Timeline Replay as one "
             "completion contract. This is the direct write for rerunning at a manually moved "
