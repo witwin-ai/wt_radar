@@ -368,10 +368,14 @@ def solve_animation(ctx, scene, request):
 
     ctx.progress(0.01, "Preparing Radar scene")
     times, sampler, radar, world, config, meta, authored_motion_fingerprint = prepare_animation(scene, request)
-    with progress_heartbeat(ctx, 0.05, "Checking room reflections and motion visibility"):
+    with progress_heartbeat(ctx, 0.03, "Sampling authored cat motion"):
+        sampled = [sampler.sample(float(time_s)) for time_s in times]
+        poses = np.stack([sample[0] for sample in sampled])
+        velocities = np.stack([sample[1] for sample in sampled])
+    with progress_heartbeat(ctx, 0.08, "Checking room reflections and motion visibility"):
         topology = visibility_preflight(
             radar, world,
-            [sampler.positions(float(time_s)) for time_s in times],
+            poses,
             sampler,
             polarization=meta["world_polarization"],
             times_s=times,
@@ -408,13 +412,8 @@ def solve_animation(ctx, scene, request):
         meta["input_fingerprint"] = str(request["input_fingerprint"])
     ctx.log(f"Studio skin animation model: {meta}")
     cubes = None
-    poses, velocities = [], []
-    for time_s in times:
-        p, v = sampler.sample(float(time_s))
-        poses.append(p[active_ranks])
-        velocities.append(v[active_ranks])
-    poses = np.stack(poses)
-    velocities = np.stack(velocities)
+    poses = poses[:, active_ranks]
+    velocities = velocities[:, active_ranks]
     speed = np.linalg.norm(velocities, axis=2)
     max_speed = float(radar.system_config.waveform_spec().max_unambiguous_speed_mps)
     if speed.size and float(speed.max()) > max_speed:
