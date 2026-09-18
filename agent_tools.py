@@ -1842,6 +1842,7 @@ def register(ctx: Any) -> None:
         },
         permission_tier="read",
         idempotent=True,
+        timeout=90.0,
         tags=PLAN_TAGS,
     )
     def _plan_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
