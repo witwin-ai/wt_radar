@@ -1,11 +1,13 @@
 """Studio baked skin motion -> native Radar 0.4, with no RF/DSP reimplementation."""
 from dataclasses import asdict, dataclass, replace
+from contextlib import contextmanager
 from importlib.metadata import version
 import io
 import hashlib
 import json
 from pathlib import Path
 import re
+import threading
 import uuid
 
 import numpy as np
@@ -18,6 +20,25 @@ from .memory_budget import MAX_RESULT_BYTES, require_result_memory
 from .timebase import aligned_frame_count
 
 MODEL = "studio_visible_skinned_surface_sites_v2"
+
+
+@contextmanager
+def progress_heartbeat(ctx, fraction, message, *, interval_s=20.0):
+    """Keep Studio's solver watchdog informed during one blocking native call."""
+    stopped = threading.Event()
+
+    def publish():
+        while not stopped.wait(interval_s):
+            ctx.progress(fraction, message)
+
+    ctx.progress(fraction, message)
+    thread = threading.Thread(target=publish, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=1.0)
 
 
 class AnimationTopologyError(ValueError):
@@ -345,14 +366,16 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
 def solve_animation(ctx, scene, request):
     from witwin.radar import Motion, PointTargets
 
+    ctx.progress(0.01, "Preparing Radar scene")
     times, sampler, radar, world, config, meta, authored_motion_fingerprint = prepare_animation(scene, request)
-    topology = visibility_preflight(
-        radar, world,
-        [sampler.positions(float(time_s)) for time_s in times],
-        sampler,
-        polarization=meta["world_polarization"],
-        times_s=times,
-    )
+    with progress_heartbeat(ctx, 0.05, "Checking room reflections and motion visibility"):
+        topology = visibility_preflight(
+            radar, world,
+            [sampler.positions(float(time_s)) for time_s in times],
+            sampler,
+            polarization=meta["world_polarization"],
+            times_s=times,
+        )
     active_ranks = np.asarray(topology["active_site_ranks"], dtype=np.int64)
     active_site_ids = tuple(topology["active_site_ids"])
     rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
@@ -431,7 +454,13 @@ def solve_animation(ctx, scene, request):
     for index, time_s in enumerate(times):
         ctx.throw_if_cancelled()
         try:
-            simulation = next(stream)
+            pending_fraction = 0.15 + 0.8 * index / len(times)
+            with progress_heartbeat(
+                ctx,
+                pending_fraction,
+                f"Simulating Radar frame {index + 1}/{len(times)}",
+            ):
+                simulation = next(stream)
             result = processing_cube(simulation, radar)
         except Exception as exc:
             raise RuntimeError(f"Animation failed at frame {index}/{len(times)}, t={time_s:.6f}s: {exc}. "
@@ -458,7 +487,8 @@ def solve_animation(ctx, scene, request):
             cubes = torch.empty((len(times), *result.data.shape), dtype=result.data.dtype, device="cpu")
         cubes[index].copy_(result.data)
         diagnostics.append(stats)
-        ctx.progress((index + 1) / len(times), f"GPU frame {index+1}/{len(times)} | Studio t={time_s:.3f}s")
+        completed_fraction = 0.15 + 0.8 * (index + 1) / len(times)
+        ctx.progress(completed_fraction, f"GPU frame {index+1}/{len(times)} | Studio t={time_s:.3f}s")
     if result is None or cubes is None:
         raise RuntimeError("Radar animation produced no frames.")
     axes = replace(result.axes, range_m=result.axes.range_m.cpu(), velocity_mps=result.axes.velocity_mps.cpu())
