@@ -6,8 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from witwin.radar import RadarConfig
-from witwin.radar.radar import RadarSystemConfig
+from witwin.radar import Radar
 from witwin.radar.processing import ProcessingAxes
 from witwin.radar.synthesis.assembly import SynthesisResult
 from wt_radar.adapter.saved_result import SavedRadarResult
@@ -16,13 +15,13 @@ from wt_radar.components.radar import RadarComponent
 
 @pytest.fixture
 def payload():
-    system = RadarSystemConfig.from_radar_config(RadarConfig.from_dict({
+    radar = Radar.from_dict({
         "num_tx": 1, "num_rx": 1, "tx_loc": [[0, 0, 0]], "rx_loc": [[0, 0, 0]],
-        "adc_samples": 8, "num_range_bins": 8, "chirp_per_frame": 4, "num_doppler_bins": 4,
+        "adc_samples": 8, "chirp_per_frame": 4,
         "fc": 77e9, "slope": 60.012, "adc_start_time": 6, "sample_rate": 4400,
-        "idle_time": 7, "ramp_end_time": 65, "frame_per_second": 10,
-        "num_angle_bins": 8, "power": 15,
-    }))
+        "idle_time": 7, "ramp_end_time": 65, "power": 15,
+    }, device="cpu")
+    system = radar.system_config
     sample = torch.complex(torch.arange(32, dtype=torch.float32).reshape(4, 1, 8), torch.ones(4, 1, 8))
     axes = ProcessingAxes.from_synthesis(
         SynthesisResult.from_fmcw(sample, system.waveform_spec()), system.waveform_spec(), system.sensors.array,

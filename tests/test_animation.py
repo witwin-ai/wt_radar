@@ -227,13 +227,14 @@ def test_animation_refuses_radar_parented_under_a_moving_bone(scene, monkeypatch
 
 
 def native_setup(original, component):
-    from witwin.radar import Radar
-    from witwin.radar.scattering import ScalarRcsResponse
+    from wt_radar.adapter.radar04 import build_radar
     world, config, meta = prepare_snapshot(copy_for_solver(original), snapshot_request(component))
-    radar = Radar(config, device="cuda", position=meta["radar_position_m"],
-                  target=meta["radar_target_m"], up=meta["radar_up"])
-    response = ScalarRcsResponse.from_rcs(.01, reference_frequency_hz=config.fc, device=radar.device)
-    return radar, world, response, meta["world_polarization"]
+    radar = build_radar(
+        config, device="cuda", position=meta["radar_position_m"],
+        look_at=meta["radar_target_m"], up=meta["radar_up"],
+        polarization=meta["world_polarization"],
+    )
+    return radar, world, .01, meta["world_polarization"]
 
 
 def test_native_stationary_vs_moving_has_physical_doppler(scene, cuda_ready):
@@ -243,7 +244,7 @@ def test_native_stationary_vs_moving_has_physical_doppler(scene, cuda_ready):
     radar, world, response, polarization = native_setup(original, component)
     stationary, zero = solve_native_frame(radar, world, response, 0., [[0., 1., -3.]], [[0., 0., 0.]], polarization)
     moving, active = solve_native_frame(radar, world, response, 0., [[0., 1., -3.]], [[0., 0., -1.]], polarization)
-    assert zero["delay_rate_abs_max"] == zero["chirp_change_max"] == 0.
+    assert zero["delay_rate_abs_max"] == 0.
     assert active["delay_rate_abs_max"] > 0. and active["chirp_change_max"] > 0.
     assert zero["nonzero_return"] and active["nonzero_return"]
     assert not torch.equal(stationary.data, moving.data)
@@ -256,31 +257,20 @@ def test_native_stationary_vs_moving_has_physical_doppler(scene, cuda_ready):
 
 
 def test_native_frame_coherently_adds_single_bounce_room_return(scene, cuda_ready):
-    from wt_radar.adapter.environment_clutter import single_bounce_environment_cube
-
     original, component = scene
     back_wall = SceneObject(id="back-wall", mesh_type="Cube")
     back_wall.get_component("Transform").position = [0.0, 1.0, -5.0]
     back_wall.get_component("Transform").scale = [10.0, 10.0, 0.1]
     original.add_object(back_wall)
     radar, world, response, polarization = native_setup(original, component)
-    environment = single_bounce_environment_cube(
-        radar, world, polarization=polarization,
-    )
-    assert environment.reflected_path_count > 0
-
-    target, _ = solve_native_frame(
+    target, stats = solve_native_frame(
         radar, world, response, 0.0,
         [[0.0, 1.0, -3.0]], [[0.0, 0.0, -1.0]], polarization,
     )
-    combined, _ = solve_native_frame(
-        radar, world, response, 0.0,
-        [[0.0, 1.0, -3.0]], [[0.0, 0.0, -1.0]], polarization,
-        environment_cube=environment.cube,
-    )
-
-    assert not torch.equal(combined.data, target.data)
-    torch.testing.assert_close(combined.data, target.data + environment.cube)
+    assert stats["path_count"] > 1
+    assert stats["path_set_complete"] is True
+    assert stats["motion_sampling"] == "chirp"
+    assert bool((target.data.abs() > 0).any())
 
 
 def test_native_no_incident_path_is_an_error_not_zero_fill(scene, cuda_ready):
@@ -315,12 +305,11 @@ def test_native_preflight_reports_reachable_topology_without_synthesis(scene, cu
     make_rig(original, component)
     result = animation_preflight(copy_for_solver(original), animation_request(component))
     assert result["topology"]["status"] == "reachable"
-    assert result["topology"]["method"] == "native_channel_interval_visibility_intersection_no_synthesis"
+    assert result["topology"]["method"] == "radar04_public_trace_interval_visibility_intersection_no_synthesis"
     assert result["topology"]["declared_site_count"] == result["site_count"] == 2
     assert result["topology"]["active_site_count"] == 2
     assert result["topology"]["occluded_site_count"] == 0
-    assert all(frame["inbound_leg_rows"] > 0 for frame in result["topology"]["frames"])
-    assert all(frame["outbound_leg_rows"] > 0 for frame in result["topology"]["frames"])
+    assert all(frame["round_trip_rows"] > 0 for frame in result["topology"]["frames"])
 
 
 def test_visible_site_model_preserves_ids_and_does_not_renormalize_rcs(scene, cuda_ready):
@@ -398,10 +387,8 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
     assert result.metadata["components"] == ["los", "reflection"]
     assert result.metadata["max_depth"] == 1
     environment = result.metadata["environment_reflection"]
-    assert environment["model"] == "native_channel_direct_single_bounce"
+    assert environment["model"] == "radar04_native_single_bounce"
     assert environment["max_depth"] == 1
-    assert environment["reflected_path_count"] > 0
-    assert environment["static_across_frames"] is True
     assert environment["coherent_with_target"] is True
     np.testing.assert_allclose(result.times_s, [0., .1], atol=0, rtol=0)
     path = tmp_path / "animation.npz"

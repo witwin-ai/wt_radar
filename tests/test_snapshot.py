@@ -63,7 +63,7 @@ def test_snapshot_contains_unsaved_changes_and_does_not_mutate_editor(scene):
     assert meta["velocity_m_per_s"] == [0, 0, 0]
     assert meta["room_object_ids"] == ["floor"]
     assert meta["model"] == MODEL
-    assert config.fc == component.fc
+    assert config["fc"] == component.fc
     assert original.to_dict() == before
 
 
@@ -184,24 +184,30 @@ def test_failed_static_snapshot_preserves_existing_replay(scene, monkeypatch):
 
 
 def test_non_square_array_packing_is_identity_and_spectrum_not_fft_again():
-    from witwin.radar import RadarConfig
-    from witwin.radar.radar import RadarSystemConfig
+    from witwin.radar import Radar
+    from witwin.radar.processing import ProcessingAxes
     from witwin.radar.synthesis.assembly import SynthesisResult
-    system = RadarSystemConfig.from_radar_config(RadarConfig.from_dict({
+    radar = Radar.from_dict({
         "num_tx": 2, "num_rx": 3, "tx_loc": [[0, 0, 0], [1, 0, 0]],
         "rx_loc": [[0, 0, 0], [1, 0, 0], [2, 0, 0]], "adc_samples": 8,
-        "chirp_per_frame": 4, "num_range_bins": 8, "num_doppler_bins": 4,
+        "chirp_per_frame": 4,
         "fc": 77e9, "slope": 60.012, "adc_start_time": 6, "sample_rate": 4400,
-        "idle_time": 7, "ramp_end_time": 65, "frame_per_second": 10,
-        "num_angle_bins": 8, "power": 15,
-    }))
-    spec = system.waveform_spec()
+        "idle_time": 7, "ramp_end_time": 65, "power": 15,
+    }, device="cpu")
+    spec = radar.system_config.waveform_spec()
     cube = torch.arange(192).reshape(1, 2, 3, 4, 8).to(torch.complex64)
-    sample = SynthesisResult.from_fmcw(torch.empty(4, 6, 8), spec)
-    sim = SimpleNamespace(cube=cube, axes=("frame", "tx", "rx", "chirp", "range_bin"),
-                          kind=sample.kind, phasor=sample.phasor, time_dependence=sample.time_dependence,
-                          reference_frequency_hz=sample.reference_frequency_hz, times_s=(0.0,))
-    processed = processing_cube(sim, SimpleNamespace(system_config=system))
+    synthesis = SynthesisResult.from_fmcw(
+        cube[0].permute(2, 1, 0, 3).reshape(4, 6, 8), spec,
+    )
+    axes = ProcessingAxes.from_synthesis(synthesis, spec, radar.system_config.sensors.array)
+    frame = SimpleNamespace(processing_cube=lambda: __import__(
+        "witwin.radar.processing", fromlist=["ProcessingCube"]
+    ).ProcessingCube(cube[0], axes))
+    sim = SimpleNamespace(
+        cube=cube, axis_names=("frame", "tx", "rx", "chirp", "range_bin"),
+        kind="fmcw", output_domain="spectrum", times_s=(0.0,), frame=lambda _index: frame,
+    )
+    processed = processing_cube(sim, radar)
     assert torch.equal(processed.data, cube[0])
     result = SnapshotResult(processed, {})
     payload = snapshot_view(result, {"tx": 1, "rx": 2, "view": "range_profile"})
