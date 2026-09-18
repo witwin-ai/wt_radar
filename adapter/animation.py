@@ -1,6 +1,5 @@
-"""Studio baked skin motion -> native Radar 0.3, with no RF/DSP reimplementation."""
+"""Studio baked skin motion -> native Radar 0.4, with no RF/DSP reimplementation."""
 from dataclasses import asdict, dataclass, replace
-import copy
 from importlib.metadata import version
 import io
 import hashlib
@@ -10,7 +9,6 @@ import uuid
 
 import numpy as np
 import torch
-from torch.autograd import forward_ad
 
 from .snapshot import (MODEL as SNAPSHOT_MODEL, SnapshotResult, prepare_snapshot,
                        processing_cube, snapshot_request, snapshot_view)
@@ -59,60 +57,48 @@ def frame_times(request, component):
 
 
 def solve_native_frame(
-    radar, world, response, time_s, positions, velocities, polarization,
+    radar, world, rcs_m2, time_s, positions, velocities, polarization,
     *, stable_site_ids=None, environment_cube=None,
 ):
-    from witwin.radar.propagation import Kinematics, two_way_duals
-    from witwin.radar.simulation import ScatterSitePolicy
+    """Simulate one Studio frame through Radar 0.4's public moving-target API."""
+    from witwin.radar import Motion, PointTargets
 
     p = torch.as_tensor(positions, dtype=torch.float32, device=radar.device).contiguous()
     v = torch.as_tensor(velocities, dtype=torch.float32, device=radar.device).contiguous()
-    with two_way_duals(sites=Kinematics(positions_m=p, velocities_m_per_s=v)) as duals:
-        # A configured receive frontend must see target and environment as one
-        # coherent voltage.  A shallow Radar copy suppresses the frontend only
-        # for native target synthesis; the original Radar applies it once after
-        # the static reflection cube has been added.
-        target_radar = radar
-        if environment_cube is not None and radar.frontend is not None:
-            target_radar = copy.copy(radar)
-            target_radar.frontend = None
-        simulation = target_radar.simulate(
-            world,
-            times=(float(time_s),),
-            response=response,
-            sites=ScatterSitePolicy.explicit(
-                duals.sites,
-                stable_ids=(None if stable_site_ids is None else tuple(stable_site_ids)),
-            ),
-            ad_mode="jvp",
-            components=frozenset({"los"}),
-            max_depth=0,
-            polarization=tuple(polarization),
-        )
-        primal = forward_ad.unpack_dual(simulation.cube).primal.detach().clone()
-        rates = simulation.last_radar_paths.delay_rate
-        if rates is None:
-            raise RuntimeError("Native Radar did not publish motion delay rates.")
-        rates = forward_ad.unpack_dual(rates).primal.detach().clone()
     if environment_cube is not None:
-        expected = tuple(primal.shape[1:])
-        if tuple(environment_cube.shape) != expected:
-            raise ValueError(
-                f"Environment cube shape {tuple(environment_cube.shape)} does not match "
-                f"the target frame shape {expected}."
-            )
-        primal = primal + environment_cube.unsqueeze(0)
-        if radar.frontend is not None:
-            primal = radar._apply_signal_models(primal[0]).unsqueeze(0)
-    if primal.device.type != "cuda" or not torch.isfinite(primal).all() or not torch.isfinite(rates).all():
+        raise ValueError("Radar 0.4 owns coherent reflections; a separate environment cube is not accepted.")
+
+    base_time = float(time_s)
+
+    def trajectory(sample_time):
+        return p + v * (float(sample_time) - base_time)
+
+    targets = PointTargets(
+        positions=p,
+        rcs=float(rcs_m2),
+        trajectory=trajectory,
+        ids=(None if stable_site_ids is None else tuple(int(value) for value in stable_site_ids)),
+    )
+    simulation = radar.simulate(
+        world,
+        targets,
+        times=(base_time,),
+        los=True,
+        reflections=1,
+        motion=Motion.chirp(),
+    )
+    primal = simulation.cube.detach()
+    if primal.device.type != "cuda" or not torch.isfinite(primal).all():
         raise RuntimeError(f"Nonfinite native CUDA frame at t={time_s:.6f}s; no zero-fill or discarded sites.")
-    spec = radar.system_config.waveform_spec()
-    if rates.numel() and float(rates.abs().max()) * spec.carrier_rate_hz >= .5 / (spec.num_tx * spec.chirp_period_s):
-        raise ValueError(f"Doppler exceeds Nyquist at t={time_s:.6f}s; change radar timing explicitly.")
-    processed = processing_cube(replace(simulation, cube=primal), radar)
-    return processed, {"delay_rate_abs_max": float(rates.abs().max()) if rates.numel() else 0.,
-                       "chirp_change_max": float((primal - primal[..., :1, :]).abs().max()),
-                       "nonzero_return": bool((primal.abs() > 0).any())}
+    processed = processing_cube(simulation, radar)
+    return processed, {
+        "path_count": int(simulation.last_radar_paths.path_count),
+        "sample_count": len(simulation.sample_times_s[0]),
+        "path_set_complete": bool(simulation.path_set_complete),
+        "motion_sampling": simulation.motion_sampling,
+        "chirp_change_max": float((primal - primal[..., :1, :]).abs().max()),
+        "nonzero_return": bool((primal.abs() > 0).any()),
+    }
 
 
 @dataclass
@@ -127,7 +113,7 @@ class AnimationResult:
 
 def prepare_animation(scene, request):
     """Run the exact non-simulating checks shared by Agent preflight and solve."""
-    from witwin.radar import Radar
+    from .radar04 import build_radar
 
     if request.get("adapter") != MODEL or str(scene.scene_id) != request.get("scene_id"):
         raise ValueError("Animation request and solver scene identity disagree.")
@@ -156,8 +142,14 @@ def prepare_animation(scene, request):
     world, config, meta = prepare_snapshot(scene, {**request, "adapter": SNAPSHOT_MODEL})
     if not torch.cuda.is_available():
         raise RuntimeError("Animation simulation requires CUDA; no CPU fallback.")
-    radar = Radar(config, device="cuda", position=meta["radar_position_m"],
-                  target=meta["radar_target_m"], up=meta["radar_up"])
+    radar = build_radar(
+        config,
+        device="cuda",
+        position=meta["radar_position_m"],
+        look_at=meta["radar_target_m"],
+        up=meta["radar_up"],
+        polarization=meta["world_polarization"],
+    )
     spec = radar.system_config.waveform_spec()
     # These are output sampling intervals, not playback FPS. Refuse overlapping
     # CPIs in this first interface rather than silently change radar timing.
@@ -206,51 +198,40 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
     requested frame, preserves each original stable ID, and never redistributes
     an occluded site's RCS onto the visible sites.
     """
-    from witwin.radar.channel import ChannelPropagationAdapter, compile_scene
-    from witwin.radar.simulation import ScatterSitePolicy, bind_radar_world
+    from witwin.radar import Motion, PointTargets
 
     positions_by_frame = tuple(np.asarray(value, dtype=np.float64) for value in positions_by_frame)
     times_s = tuple(float(value) for value in times_s)
     if not positions_by_frame or len(positions_by_frame) != len(times_s):
         raise ValueError("Topology preflight requires one site array per requested frame.")
-    solve_config = radar.system_config.with_propagation(
-        components=frozenset({"los"}), max_depth=0,
-    )
-    propagation = solve_config.propagation
-    compiled = compile_scene(
-        world, reference_frequency_hz=propagation.reference_frequency_hz,
-    )
-    adapter = ChannelPropagationAdapter(
-        compiled,
-        reference_frequency_hz=propagation.reference_frequency_hz,
-        components=propagation.components,
-        max_depth=propagation.max_depth,
-    )
-    declared_ids = None
-    active_ids = None
+    declared_ids = tuple(3_000_000 + rank for rank in range(len(positions_by_frame[0])))
+    active_ids = set(declared_ids)
     visible_frame_counts = None
     frame_diagnostics = []
     for frame_index, (time_s, positions) in enumerate(zip(times_s, positions_by_frame)):
         site_positions = torch.as_tensor(
             positions, dtype=torch.float32, device=radar.device,
         ).contiguous()
-        binding = bind_radar_world(
-            radar,
+        trace = radar.trace(
             world,
-            sites=ScatterSitePolicy.explicit(site_positions),
-            polarization=tuple(polarization),
+            PointTargets(
+                positions=site_positions,
+                rcs=1.0,
+                ids=declared_ids,
+            ),
+            times=(time_s,),
+            los=True,
+            reflections=1,
+            motion=Motion.static(),
         )
-        if declared_ids is None:
-            declared_ids = tuple(binding.site_ids)
-            active_ids = set(declared_ids)
+        if visible_frame_counts is None:
             visible_frame_counts = {site_id: 0 for site_id in declared_ids}
-        elif tuple(binding.site_ids) != declared_ids:
-            raise RuntimeError("Native Radar site IDs changed across visibility preflight frames.")
-        inbound = adapter.freeze(binding.transmitters, binding.site_sinks)
-        outbound = adapter.freeze(binding.site_sources, binding.receivers)
-        reachable_in = {int(value) for value in inbound.sink_id.detach().cpu().tolist()}
-        reachable_out = {int(value) for value in outbound.source_id.detach().cpu().tolist()}
-        reachable = set(declared_ids) & reachable_in & reachable_out
+        rows = trace.last_radar_paths
+        valid = rows.row_valid
+        site_ids = rows.topology.site_id
+        if valid is not None:
+            site_ids = site_ids[valid]
+        reachable = set(int(value) for value in site_ids.detach().cpu().tolist())
         active_ids &= reachable
         for site_id in reachable:
             visible_frame_counts[site_id] += 1
@@ -258,8 +239,8 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
             "frame_index": frame_index,
             "time_s": time_s,
             "reachable_site_count": len(reachable),
-            "inbound_leg_rows": int(inbound.row_count),
-            "outbound_leg_rows": int(outbound.row_count),
+            "round_trip_rows": int(rows.path_count),
+            "path_set_complete": bool(trace.path_set_complete),
         })
 
     active_ranks = [rank for rank, site_id in enumerate(declared_ids) if site_id in active_ids]
@@ -288,7 +269,7 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
         )
     return {
         "status": "reachable",
-        "method": "native_channel_interval_visibility_intersection_no_synthesis",
+        "method": "radar04_public_trace_interval_visibility_intersection_no_synthesis",
         "frame_count": len(times_s),
         "declared_site_count": len(declared_ids),
         "active_site_count": len(active_ranks),
@@ -307,8 +288,6 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
 
 
 def solve_animation(ctx, scene, request):
-    from witwin.radar.scattering import ScalarRcsResponse
-
     times, sampler, radar, world, config, meta, authored_motion_fingerprint = prepare_animation(scene, request)
     topology = visibility_preflight(
         radar, world,
@@ -320,11 +299,6 @@ def solve_animation(ctx, scene, request):
     active_ranks = np.asarray(topology["active_site_ranks"], dtype=np.int64)
     active_site_ids = tuple(topology["active_site_ids"])
     rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
-    response = ScalarRcsResponse.from_rcs(rcs_per_site, reference_frequency_hz=config.fc, device=radar.device)
-    from .environment_clutter import single_bounce_environment_cube
-    environment = single_bounce_environment_cube(
-        radar, world, polarization=meta["world_polarization"],
-    )
     for key in ("snapshot_time_s", "target_local_point", "target_world_point_m", "velocity_m_per_s"):
         meta.pop(key, None)
     meta.update(model=MODEL, motion_fingerprint=authored_motion_fingerprint, frame_count=len(times), fps=float(request["fps"]),
@@ -337,15 +311,12 @@ def solve_animation(ctx, scene, request):
                 topology_preflight=topology, rcs_per_site_m2=rcs_per_site,
                 components=["los", "reflection"], max_depth=1,
                 environment_reflection={
-                    "model": "native_channel_direct_single_bounce",
-                    "max_depth": environment.max_depth,
-                    "reflected_path_count": environment.reflected_path_count,
-                    "material_slot_count": environment.material_slot_count,
-                    "static_across_frames": True,
+                    "model": "radar04_native_single_bounce",
+                    "max_depth": 1,
                     "coherent_with_target": True,
                 },
                 velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
-                slow_time_model="native frozen-weight first-order carrier-rate per frame",
+                slow_time_model="Radar 0.4 public chirp-time motion sampling per Studio frame",
                 limitations="Uncalibrated equal-RCS surface samples, not full electromagnetic skin. "
                             "Only sites with native inbound+outbound paths throughout the interval are active; "
                             "occluded sites keep their original RCS share and are not renormalized. "
@@ -364,9 +335,8 @@ def solve_animation(ctx, scene, request):
         p, v = p[active_ranks], v[active_ranks]
         try:
             result, stats = solve_native_frame(
-                radar, world, response, time_s, p, v,
+                radar, world, rcs_per_site, time_s, p, v,
                 meta["world_polarization"], stable_site_ids=active_site_ids,
-                environment_cube=environment.cube,
             )
         except Exception as exc:
             raise RuntimeError(f"Animation failed at frame {index}/{len(times)}, t={time_s:.6f}s: {exc}. "
