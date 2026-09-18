@@ -67,6 +67,13 @@ def solve_native_frame(
     v = torch.as_tensor(velocities, dtype=torch.float32, device=radar.device).contiguous()
     if environment_cube is not None:
         raise ValueError("Radar 0.4 owns coherent reflections; a separate environment cube is not accepted.")
+    speed = torch.linalg.vector_norm(v, dim=1)
+    max_speed = float(radar.system_config.waveform_spec().max_unambiguous_speed_mps)
+    if speed.numel() and float(speed.max()) > max_speed:
+        raise ValueError(
+            f"Target speed exceeds Radar's {max_speed:.6g} m/s unambiguous velocity; "
+            "lower the motion speed or change radar timing explicitly."
+        )
 
     base_time = float(time_s)
 
@@ -91,7 +98,13 @@ def solve_native_frame(
     if primal.device.type != "cuda" or not torch.isfinite(primal).all():
         raise RuntimeError(f"Nonfinite native CUDA frame at t={time_s:.6f}s; no zero-fill or discarded sites.")
     processed = processing_cube(simulation, radar)
+    radar_position = torch.as_tensor(radar.position, dtype=p.dtype, device=p.device)
+    displacement = p - radar_position
+    distance = torch.linalg.vector_norm(displacement, dim=1).clamp_min(1e-12)
+    radial_speed = (v * displacement).sum(dim=1) / distance
+    delay_rate_abs_max = float((2.0 * radial_speed.abs() / 299_792_458.0).max()) if p.numel() else 0.0
     return processed, {
+        "delay_rate_abs_max": delay_rate_abs_max,
         "path_count": int(simulation.last_radar_paths.path_count),
         "sample_count": len(simulation.sample_times_s[0]),
         "path_set_complete": bool(simulation.path_set_complete),
@@ -208,30 +221,50 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
     active_ids = set(declared_ids)
     visible_frame_counts = None
     frame_diagnostics = []
+
+    def trace_reachable(site_positions, site_ids, time_s):
+        """Use only public 0.4 tracing, bisecting when a declared site is occluded."""
+        if not site_ids:
+            return set(), 0, True
+        try:
+            trace = radar.trace(
+                world,
+                PointTargets(positions=site_positions, rcs=1.0, ids=site_ids),
+                times=(time_s,),
+                los=True,
+                reflections=1,
+                motion=Motion.static(),
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if "has no inbound leg row" not in message and "has no outbound leg row" not in message:
+                raise
+            if len(site_ids) == 1:
+                return set(), 0, True
+            middle = len(site_ids) // 2
+            left = trace_reachable(site_positions[:middle], site_ids[:middle], time_s)
+            right = trace_reachable(site_positions[middle:], site_ids[middle:], time_s)
+            return left[0] | right[0], left[1] + right[1], left[2] and right[2]
+        rows = trace.last_radar_paths
+        valid = rows.row_valid
+        visible_ids = rows.topology.site_id
+        if valid is not None:
+            visible_ids = visible_ids[valid]
+        return (
+            set(int(value) for value in visible_ids.detach().cpu().tolist()),
+            int(rows.path_count),
+            bool(trace.path_set_complete),
+        )
+
     for frame_index, (time_s, positions) in enumerate(zip(times_s, positions_by_frame)):
         site_positions = torch.as_tensor(
             positions, dtype=torch.float32, device=radar.device,
         ).contiguous()
-        trace = radar.trace(
-            world,
-            PointTargets(
-                positions=site_positions,
-                rcs=1.0,
-                ids=declared_ids,
-            ),
-            times=(time_s,),
-            los=True,
-            reflections=1,
-            motion=Motion.static(),
-        )
         if visible_frame_counts is None:
             visible_frame_counts = {site_id: 0 for site_id in declared_ids}
-        rows = trace.last_radar_paths
-        valid = rows.row_valid
-        site_ids = rows.topology.site_id
-        if valid is not None:
-            site_ids = site_ids[valid]
-        reachable = set(int(value) for value in site_ids.detach().cpu().tolist())
+        reachable, row_count, path_set_complete = trace_reachable(
+            site_positions, declared_ids, time_s,
+        )
         active_ids &= reachable
         for site_id in reachable:
             visible_frame_counts[site_id] += 1
@@ -239,8 +272,8 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
             "frame_index": frame_index,
             "time_s": time_s,
             "reachable_site_count": len(reachable),
-            "round_trip_rows": int(rows.path_count),
-            "path_set_complete": bool(trace.path_set_complete),
+            "round_trip_rows": row_count,
+            "path_set_complete": path_set_complete,
         })
 
     active_ranks = [rank for rank, site_id in enumerate(declared_ids) if site_id in active_ids]
