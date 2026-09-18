@@ -343,6 +343,8 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
 
 
 def solve_animation(ctx, scene, request):
+    from witwin.radar import Motion, PointTargets
+
     times, sampler, radar, world, config, meta, authored_motion_fingerprint = prepare_animation(scene, request)
     topology = visibility_preflight(
         radar, world,
@@ -383,32 +385,88 @@ def solve_animation(ctx, scene, request):
         meta["input_fingerprint"] = str(request["input_fingerprint"])
     ctx.log(f"Studio skin animation model: {meta}")
     cubes = None
-    poses, velocities, diagnostics = [], [], []
+    poses, velocities = [], []
+    for time_s in times:
+        p, v = sampler.sample(float(time_s))
+        poses.append(p[active_ranks])
+        velocities.append(v[active_ranks])
+    poses = np.stack(poses)
+    velocities = np.stack(velocities)
+    speed = np.linalg.norm(velocities, axis=2)
+    max_speed = float(radar.system_config.waveform_spec().max_unambiguous_speed_mps)
+    if speed.size and float(speed.max()) > max_speed:
+        raise ValueError(
+            f"Target speed exceeds Radar's {max_speed:.6g} m/s unambiguous velocity; "
+            "lower the motion speed or change radar timing explicitly."
+        )
+    timeline = np.asarray(times, dtype=np.float64)
+
+    def trajectory(sample_time):
+        value = float(sample_time)
+        if value <= timeline[0]:
+            index = 0
+        elif value >= timeline[-1]:
+            index = len(timeline) - 1
+        else:
+            index = int(np.searchsorted(timeline, value, side="right")) - 1
+        position = poses[index] + velocities[index] * (value - timeline[index])
+        return torch.as_tensor(position, dtype=torch.float32, device=radar.device).contiguous()
+
+    targets = PointTargets(
+        positions=torch.as_tensor(poses[0], dtype=torch.float32, device=radar.device).contiguous(),
+        rcs=float(rcs_per_site),
+        trajectory=trajectory,
+        ids=active_site_ids,
+    )
+    stream = iter(radar.stream(
+        world,
+        targets,
+        times=times,
+        los=True,
+        reflections=1,
+        motion=Motion.chirp(rediscover_every_frames=1),
+    ))
+    diagnostics = []
+    result = None
     for index, time_s in enumerate(times):
         ctx.throw_if_cancelled()
-        p, v = sampler.sample(float(time_s))
-        p, v = p[active_ranks], v[active_ranks]
         try:
-            result, stats = solve_native_frame(
-                radar, world, rcs_per_site, time_s, p, v,
-                meta["world_polarization"], stable_site_ids=active_site_ids,
-            )
+            simulation = next(stream)
+            result = processing_cube(simulation, radar)
         except Exception as exc:
             raise RuntimeError(f"Animation failed at frame {index}/{len(times)}, t={time_s:.6f}s: {exc}. "
                                "No completed result published; native error retained.") from exc
+        p, v = poses[index], velocities[index]
+        radar_position = np.asarray(radar.position, dtype=np.float64)
+        displacement = p - radar_position
+        distance = np.linalg.norm(displacement, axis=1)
+        radial_speed = np.sum(v * displacement, axis=1) / np.maximum(distance, 1e-12)
+        stats = {
+            "delay_rate_abs_max": float(np.max(2.0 * np.abs(radial_speed) / 299_792_458.0)),
+            "path_count": int(simulation.last_radar_paths.path_count),
+            "sample_count": len(simulation.sample_times_s[0]),
+            "path_set_complete": bool(simulation.path_set_complete),
+            "motion_sampling": simulation.motion_sampling,
+            "chirp_change_max": float(
+                (simulation.cube - simulation.cube[..., :1, :]).abs().max()
+            ),
+            "nonzero_return": bool((simulation.cube.abs() > 0).any()),
+            "compile_count": int(simulation.compile_count),
+            "discovery_count": int(simulation.discovery_count),
+        }
         if cubes is None:
             cubes = torch.empty((len(times), *result.data.shape), dtype=result.data.dtype, device="cpu")
         cubes[index].copy_(result.data)
-        poses.append(p)
-        velocities.append(v)
         diagnostics.append(stats)
         ctx.progress((index + 1) / len(times), f"GPU frame {index+1}/{len(times)} | Studio t={time_s:.3f}s")
+    if result is None or cubes is None:
+        raise RuntimeError("Radar animation produced no frames.")
     axes = replace(result.axes, range_m=result.axes.range_m.cpu(), velocity_mps=result.axes.velocity_mps.cpu())
     meta["frame_diagnostics"] = diagnostics
     meta["tx_positions_m"] = radar.tx_pos.detach().cpu().tolist()
     meta["rx_positions_m"] = radar.rx_pos.detach().cpu().tolist()
     meta["device"] = str(radar.device)
-    return AnimationResult(cubes, axes, times, np.stack(poses), np.stack(velocities), meta)
+    return AnimationResult(cubes, axes, times, poses, velocities, meta)
 
 
 def animation_view(result, params):
