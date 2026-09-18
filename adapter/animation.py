@@ -62,6 +62,13 @@ def animation_request(component):
         fingerprint = _measurement_input_fingerprint(component.scene, component.owner)
     if fingerprint:
         request["input_fingerprint"] = fingerprint
+    native_preflight = getattr(component, "_agent_native_preflight", None)
+    if isinstance(native_preflight, dict):
+        # The Agent binds this evidence to the same authored-input fingerprint
+        # immediately before submission. JSON-normalize it so the immutable
+        # solver request owns its copy after the transient component field is
+        # removed.
+        request["native_preflight"] = json.loads(json.dumps(native_preflight))
     frame_times(request, component)
     return request
 
@@ -369,6 +376,56 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
     }
 
 
+def validated_cached_topology(request, times, sampler, meta):
+    """Validate topology evidence bound to this immutable solve request."""
+    preflight = request.get("native_preflight")
+    if preflight is None:
+        return None
+    if not isinstance(preflight, dict) or preflight.get("model") != MODEL:
+        raise ValueError("Cached Radar preflight model does not match this animation adapter.")
+    topology = preflight.get("topology")
+    if not isinstance(topology, dict) or topology.get("status") != "reachable":
+        raise ValueError("Cached Radar preflight does not contain reachable topology evidence.")
+    declared_count = int(topology.get("declared_site_count", -1))
+    if declared_count != len(sampler.vertex_ids):
+        raise ValueError("Cached Radar preflight site count does not match the selected skin.")
+    if int(preflight.get("frame_count", -1)) != len(times):
+        raise ValueError("Cached Radar preflight frame count does not match the requested interval.")
+    if sorted(str(value) for value in preflight.get("moving_object_ids", ())) != sorted(
+        str(value) for value in sampler.moving_ids
+    ):
+        raise ValueError("Cached Radar preflight moving-object set does not match the solver scene.")
+    try:
+        pose_matches = np.allclose(
+            np.asarray(preflight.get("radar_position_m"), dtype=np.float64),
+            np.asarray(meta["radar_position_m"], dtype=np.float64),
+            rtol=0.0,
+            atol=1e-6,
+        ) and np.allclose(
+            np.asarray(preflight.get("radar_target_m"), dtype=np.float64),
+            np.asarray(meta["radar_target_m"], dtype=np.float64),
+            rtol=0.0,
+            atol=1e-6,
+        )
+    except (TypeError, ValueError):
+        pose_matches = False
+    if not pose_matches:
+        raise ValueError("Cached Radar preflight pose does not match the solver scene.")
+    active_ranks = [int(value) for value in topology.get("active_site_ranks", ())]
+    if not active_ranks or len(active_ranks) != len(set(active_ranks)) or any(
+        rank < 0 or rank >= declared_count for rank in active_ranks
+    ):
+        raise ValueError("Cached Radar preflight contains invalid active site ranks.")
+    expected_ids = [3_000_000 + rank for rank in active_ranks]
+    if [int(value) for value in topology.get("active_site_ids", ())] != expected_ids:
+        raise ValueError("Cached Radar preflight stable site IDs do not match active ranks.")
+    if int(topology.get("active_site_count", -1)) != len(active_ranks):
+        raise ValueError("Cached Radar preflight active site count is inconsistent.")
+    if int(topology.get("occluded_site_count", -1)) != declared_count - len(active_ranks):
+        raise ValueError("Cached Radar preflight occluded site count is inconsistent.")
+    return json.loads(json.dumps(topology))
+
+
 def solve_animation(ctx, scene, request):
     from witwin.radar import Motion, PointTargets
 
@@ -378,14 +435,19 @@ def solve_animation(ctx, scene, request):
         sampled = [sampler.sample(float(time_s)) for time_s in times]
         poses = np.stack([sample[0] for sample in sampled])
         velocities = np.stack([sample[1] for sample in sampled])
-    with progress_heartbeat(ctx, 0.08, "Checking room reflections and motion visibility"):
-        topology = visibility_preflight(
-            radar, world,
-            poses,
-            sampler,
-            polarization=meta["world_polarization"],
-            times_s=times,
-        )
+    topology = validated_cached_topology(request, times, sampler, meta)
+    preflight_reused = topology is not None
+    if topology is None:
+        with progress_heartbeat(ctx, 0.08, "Checking room reflections and motion visibility"):
+            topology = visibility_preflight(
+                radar, world,
+                poses,
+                sampler,
+                polarization=meta["world_polarization"],
+                times_s=times,
+            )
+    else:
+        ctx.progress(0.08, "Reusing verified room-reflection visibility")
     active_ranks = np.asarray(topology["active_site_ranks"], dtype=np.int64)
     active_site_ids = tuple(topology["active_site_ids"])
     rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
@@ -405,6 +467,7 @@ def solve_animation(ctx, scene, request):
                     "max_depth": 1,
                     "coherent_with_target": True,
                 },
+                native_preflight_reused=preflight_reused,
                 velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
                 slow_time_model="Radar 0.4 public chirp-time motion sampling per Studio frame",
                 limitations="Uncalibrated equal-RCS surface samples, not full electromagnetic skin. "

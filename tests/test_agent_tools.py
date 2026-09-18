@@ -1004,6 +1004,7 @@ def test_submit_observe_and_verify_requires_native_evidence(harness, monkeypatch
 
     async def fake_simulate(*, animation=False, on_submitted=None):
         assert animation is True
+        assert radar._agent_native_preflight == native_preflight()
         if on_submitted is not None:
             on_submitted("native-run")
         await asyncio.sleep(0)
@@ -1069,6 +1070,7 @@ def test_submit_observe_and_verify_requires_native_evidence(harness, monkeypatch
         "scene_id": scene.scene_id, "radar_object_id": sensor_id, "operation_id": "job-1",
     })
     assert observed["status"] == "replay_ready"
+    assert not hasattr(radar, "_agent_native_preflight")
     assert observed["verification"]["passed"] is True
     assert observed["can_claim_success"] is True
     verified = asyncio.run(tools["verify_result"].run({

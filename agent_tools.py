@@ -952,12 +952,14 @@ async def _run_animation_job(
     scene: Any,
     obj: Any,
     input_fingerprint: str,
+    native_preflight: dict[str, Any],
 ) -> None:
     receipt = _get_operation(ctx, operation_id) or {}
     receipt.update(status="running", next_step="wait_for_simulation")
     _put_operation(ctx, receipt)
     radar = obj.get_component("Radar")
     setattr(radar, "_agent_input_fingerprint", input_fingerprint)
+    setattr(radar, "_agent_native_preflight", copy.deepcopy(native_preflight))
     def _on_submitted(run_id: str) -> None:
         latest = _get_operation(ctx, operation_id) or receipt
         _put_operation(ctx, {
@@ -1099,6 +1101,8 @@ async def _run_animation_job(
     finally:
         if getattr(radar, "_agent_input_fingerprint", None) == input_fingerprint:
             delattr(radar, "_agent_input_fingerprint")
+        if hasattr(radar, "_agent_native_preflight"):
+            delattr(radar, "_agent_native_preflight")
 
 
 def _validate_interval(scene: Any, radar: Any, start_s: float, duration_s: float, fps: float) -> dict[str, Any]:
@@ -2095,6 +2099,7 @@ def register(ctx: Any) -> None:
             scene=scene,
             obj=obj,
             input_fingerprint=expected,
+            native_preflight=native_preflight,
         ))
         _ACTIVE_JOBS[key] = task
         owned_job_keys.add(key)

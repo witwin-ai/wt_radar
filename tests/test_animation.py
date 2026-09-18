@@ -312,6 +312,33 @@ def test_native_preflight_reports_reachable_topology_without_synthesis(scene, cu
     assert all(frame["round_trip_rows"] > 0 for frame in result["topology"]["frames"])
 
 
+def test_solve_reuses_fingerprint_bound_native_preflight(scene, cuda_ready, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    request = animation_request(component)
+    request["native_preflight"] = animation_preflight(copy_for_solver(original), request)
+
+    def repeated_preflight(*_args, **_kwargs):
+        pytest.fail("solve repeated the already verified native topology preflight")
+
+    monkeypatch.setattr("wt_radar.adapter.animation.visibility_preflight", repeated_preflight)
+    result = solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+    assert result.metadata["native_preflight_reused"] is True
+    assert result.metadata["topology_preflight"] == request["native_preflight"]["topology"]
+
+
+def test_solve_rejects_mismatched_cached_native_preflight(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    request = animation_request(component)
+    request["native_preflight"] = animation_preflight(copy_for_solver(original), request)
+    request["native_preflight"]["radar_position_m"][0] += 1.0
+
+    with pytest.raises(ValueError, match="preflight pose"):
+        solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+
 def test_visible_site_model_preserves_ids_and_does_not_renormalize_rcs(scene, cuda_ready):
     original, component = scene
     make_rig(original, component)
