@@ -4,6 +4,8 @@ Velocities are numerical derivatives of the same rendered world vertices.
 Differences stay inside a LINEAR key interval, with a right-hand derivative at
 knots. The step (at most 1 ms) and approximation are reported, not RF algorithms.
 """
+import inspect
+
 import numpy as np
 
 from .snapshot import _hierarchy
@@ -83,6 +85,14 @@ class StudioSkinSampler:
         if not 1 <= len(chosen) <= 64:
             raise ValueError("Animation supports 1..64 influenced-bone surface sites.")
         self.vertex_ids, self.site_names = np.asarray(chosen), names
+        try:
+            self._sparse_skinning = (
+                "vertex_indices" in inspect.signature(
+                    self.skin.compute_skinned_vertices
+                ).parameters
+            )
+        except (TypeError, ValueError):
+            self._sparse_skinning = False
 
     def positions(self, time_s):
         if not np.isfinite(time_s) or not 0 <= time_s <= self.duration:
@@ -96,10 +106,19 @@ class StudioSkinSampler:
             actual = getattr(component, track.field_name).detach().cpu().numpy()
             if expected is not None and not np.allclose(actual, expected, atol=2e-6, rtol=1e-6):
                 raise ValueError(f"Timeline did not apply {track.path} at {time_s}")
-        world = self.skin.compute_skinned_vertices(in_local_space=False).detach().cpu().numpy()
+        if self._sparse_skinning:
+            world = self.skin.compute_skinned_vertices(
+                in_local_space=False,
+                vertex_indices=self.vertex_ids,
+            ).detach().cpu().numpy()
+        else:
+            # Backward compatibility with Studio builds predating sparse skinning.
+            world = self.skin.compute_skinned_vertices(
+                in_local_space=False,
+            ).detach().cpu().numpy()[self.vertex_ids]
         if not np.isfinite(world).all():
             raise ValueError("Nonfinite Studio skin geometry")
-        return world[self.vertex_ids].astype(np.float64)
+        return world.astype(np.float64)
 
     def sample(self, time_s, step_s=.001):
         positions = self.positions(time_s)

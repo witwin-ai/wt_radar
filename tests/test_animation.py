@@ -128,6 +128,26 @@ def test_bone_rotation_velocity_is_not_rigid_root_translation(scene):
     np.testing.assert_allclose(v[1], 0., atol=3e-4)
 
 
+def test_sampler_uses_sparse_studio_skinning_when_available(scene):
+    original, component = scene
+    skin, _ = make_rig(original, component)
+    full_skinning = skin.compute_skinned_vertices
+    calls = []
+
+    def sparse_skinning(in_local_space=True, vertex_indices=None):
+        calls.append(None if vertex_indices is None else np.asarray(vertex_indices).copy())
+        result = full_skinning(in_local_space=in_local_space)
+        return result if vertex_indices is None else result[vertex_indices]
+
+    skin.compute_skinned_vertices = sparse_skinning
+    sampler = StudioSkinSampler(original, "target")
+    sampled = sampler.positions(.5)
+
+    assert len(calls) == 1
+    np.testing.assert_array_equal(calls[0], sampler.vertex_ids)
+    assert sampled.shape == (len(sampler.vertex_ids), 3)
+
+
 @pytest.mark.parametrize("time_s", [1., 1. - 1e-13, 1. + 1e-13])
 def test_knot_uses_right_hand_velocity_and_restores_pose(scene, time_s):
     original, component = scene
