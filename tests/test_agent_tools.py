@@ -706,6 +706,43 @@ def test_plan_preflight_is_read_only_and_reports_exact_cube(harness, monkeypatch
     assert scene.to_dict() == before
 
 
+def test_plan_reuses_automatic_placement_native_preflight(harness, monkeypatch):
+    scene, tools = harness
+    evidence = native_preflight(moving_object_ids=["catstray", "spine"])
+    monkeypatch.setattr(
+        "wt_radar.sensor_placement.choose_sensor_placement",
+        lambda *_args, **_kwargs: {
+            "mode": "automatic",
+            "position_m": [1.0, 1.0, 2.0],
+            "aim_point_m": [0.0, 0.4, 0.0],
+            "native_preflight": copy.deepcopy(evidence),
+        },
+    )
+    ensured = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "cached-placement-ensure",
+        "target_object_id": "catstray",
+        "placement_mode": "automatic",
+        "duration_s": 5.0,
+        "fps": 10.0,
+    })
+    monkeypatch.setattr(
+        "wt_radar.adapter.animation.animation_preflight",
+        lambda *_: pytest.fail("planning repeated automatic placement preflight"),
+    )
+    monkeypatch.setattr(radar_tools, "_runtime_evidence", lambda: {
+        "torch": {"cuda_available": True, "device_name": "test-gpu"}
+    })
+
+    planned = run(tools, "plan_animation_measurement", {
+        "scene_id": scene.scene_id,
+        "radar_object_id": ensured["radar"]["object_id"],
+    })
+
+    assert planned["status"] == "ready"
+    assert planned["native_preflight"] == evidence
+
+
 def test_manual_radar_move_preflight_uses_current_pose_without_reconfiguration(harness, monkeypatch):
     scene, tools = harness
     ensured = run(tools, "ensure_sensor", {

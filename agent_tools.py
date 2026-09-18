@@ -118,6 +118,24 @@ def _consume_preflight(
     return copy.deepcopy(cached["native_preflight"]) if cached is not None else None
 
 
+def _read_preflight(
+    ctx: Any,
+    *,
+    scene_id: str,
+    radar_object_id: str,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    """Read a matching immutable preflight without transferring ownership.
+
+    Planning is repeatable and may inspect the same evidence more than once;
+    submission remains the only operation that consumes the cached receipt.
+    """
+    cached = _preflight_cache(ctx).get(
+        _preflight_cache_key(scene_id, radar_object_id, fingerprint),
+    )
+    return copy.deepcopy(cached["native_preflight"]) if cached is not None else None
+
+
 def _workspace_state(ctx: Any) -> Any:
     state = getattr(ctx, "workspaceState", None) or getattr(ctx, "workspace_state", None)
     if state is None:
@@ -1804,6 +1822,18 @@ def register(ctx: Any) -> None:
             "radar": _sensor_summary(obj),
             "scene_input_fingerprint": _scene_input_fingerprint(scene),
         }
+        if placement and isinstance(placement.get("native_preflight"), dict):
+            # Automatic placement has already validated this exact authored
+            # pose, target and interval on a detached scene. Bind that evidence
+            # to the post-write fingerprint so planning does not repeat the
+            # same full-room native trace.
+            _remember_preflight(
+                ctx,
+                scene_id=str(scene.scene_id),
+                radar_object_id=str(obj.id),
+                fingerprint=_measurement_input_fingerprint(scene, obj),
+                native_preflight=placement["native_preflight"],
+            )
         _put_operation(ctx, {
             "operation_id": operation_id,
             "kind": "ensure_sensor",
@@ -1883,16 +1913,24 @@ def register(ctx: Any) -> None:
                 detail={"configured": configured, "requested": requested},
             )
         measurement = _validate_interval(scene, radar, start_s, duration_s, fps)
-        try:
-            from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
-            from .adapter.animation import animation_preflight, animation_request
-            request = animation_request(radar)
-            solver_scene = load_scene_ref(copy.deepcopy(make_scene_ref(scene)))
-            native_preflight = animation_preflight(solver_scene, request)
-        except Exception as exc:
-            detail = getattr(exc, "detail", None)
-            code = "radar_topology_unreachable" if detail else "target_motion_unavailable"
-            raise ToolError(str(exc), code=code, detail=detail) from exc
+        input_fingerprint = _measurement_input_fingerprint(scene, obj)
+        native_preflight = _read_preflight(
+            ctx,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+            fingerprint=input_fingerprint,
+        )
+        if native_preflight is None:
+            try:
+                from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
+                from .adapter.animation import animation_preflight, animation_request
+                request = animation_request(radar)
+                solver_scene = load_scene_ref(copy.deepcopy(make_scene_ref(scene)))
+                native_preflight = animation_preflight(solver_scene, request)
+            except Exception as exc:
+                detail = getattr(exc, "detail", None)
+                code = "radar_topology_unreachable" if detail else "target_motion_unavailable"
+                raise ToolError(str(exc), code=code, detail=detail) from exc
         runtime = _runtime_evidence()
         cuda_ready = bool((runtime.get("torch") or {}).get("cuda_available"))
         if not cuda_ready:
@@ -1901,7 +1939,6 @@ def register(ctx: Any) -> None:
                 code="cuda_unavailable",
                 detail={"runtime": runtime},
             )
-        input_fingerprint = _measurement_input_fingerprint(scene, obj)
         _remember_preflight(
             ctx,
             scene_id=str(scene.scene_id),
