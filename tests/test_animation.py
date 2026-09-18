@@ -255,6 +255,34 @@ def test_native_stationary_vs_moving_has_physical_doppler(scene, cuda_ready):
         assert abs(measured_speed - expected_speed) <= product.axes.velocity_bin_mps
 
 
+def test_native_frame_coherently_adds_single_bounce_room_return(scene, cuda_ready):
+    from wt_radar.adapter.environment_clutter import single_bounce_environment_cube
+
+    original, component = scene
+    back_wall = SceneObject(id="back-wall", mesh_type="Cube")
+    back_wall.get_component("Transform").position = [0.0, 1.0, -5.0]
+    back_wall.get_component("Transform").scale = [10.0, 10.0, 0.1]
+    original.add_object(back_wall)
+    radar, world, response, polarization = native_setup(original, component)
+    environment = single_bounce_environment_cube(
+        radar, world, polarization=polarization,
+    )
+    assert environment.reflected_path_count > 0
+
+    target, _ = solve_native_frame(
+        radar, world, response, 0.0,
+        [[0.0, 1.0, -3.0]], [[0.0, 0.0, -1.0]], polarization,
+    )
+    combined, _ = solve_native_frame(
+        radar, world, response, 0.0,
+        [[0.0, 1.0, -3.0]], [[0.0, 0.0, -1.0]], polarization,
+        environment_cube=environment.cube,
+    )
+
+    assert not torch.equal(combined.data, target.data)
+    torch.testing.assert_close(combined.data, target.data + environment.cube)
+
+
 def test_native_no_incident_path_is_an_error_not_zero_fill(scene, cuda_ready):
     original, component = scene
     # Closed large slab cuts every LOS from radar to the target.
@@ -367,7 +395,14 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
     assert result.cube.shape == (2, 1, 1, 64, 128)
     assert result.positions_m.shape == result.velocities_mps.shape == (2, 2, 3)
     assert all(row["delay_rate_abs_max"] > 0 for row in result.metadata["frame_diagnostics"])
-    assert result.metadata["components"] == ["los"] and result.metadata["max_depth"] == 0
+    assert result.metadata["components"] == ["los", "reflection"]
+    assert result.metadata["max_depth"] == 1
+    environment = result.metadata["environment_reflection"]
+    assert environment["model"] == "native_channel_direct_single_bounce"
+    assert environment["max_depth"] == 1
+    assert environment["reflected_path_count"] > 0
+    assert environment["static_across_frames"] is True
+    assert environment["coherent_with_target"] is True
     np.testing.assert_allclose(result.times_s, [0., .1], atol=0, rtol=0)
     path = tmp_path / "animation.npz"
 

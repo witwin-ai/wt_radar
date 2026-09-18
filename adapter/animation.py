@@ -1,5 +1,6 @@
 """Studio baked skin motion -> native Radar 0.3, with no RF/DSP reimplementation."""
 from dataclasses import asdict, dataclass, replace
+import copy
 from importlib.metadata import version
 import io
 import hashlib
@@ -59,7 +60,7 @@ def frame_times(request, component):
 
 def solve_native_frame(
     radar, world, response, time_s, positions, velocities, polarization,
-    *, stable_site_ids=None,
+    *, stable_site_ids=None, environment_cube=None,
 ):
     from witwin.radar.propagation import Kinematics, two_way_duals
     from witwin.radar.simulation import ScatterSitePolicy
@@ -67,18 +68,42 @@ def solve_native_frame(
     p = torch.as_tensor(positions, dtype=torch.float32, device=radar.device).contiguous()
     v = torch.as_tensor(velocities, dtype=torch.float32, device=radar.device).contiguous()
     with two_way_duals(sites=Kinematics(positions_m=p, velocities_m_per_s=v)) as duals:
-        simulation = radar.simulate(world, times=(float(time_s),), response=response,
-                                    sites=ScatterSitePolicy.explicit(
-                                        duals.sites,
-                                        stable_ids=(None if stable_site_ids is None else tuple(stable_site_ids)),
-                                    ), ad_mode="jvp",
-                                    components=frozenset({"los"}), max_depth=0,
-                                    polarization=tuple(polarization))
+        # A configured receive frontend must see target and environment as one
+        # coherent voltage.  A shallow Radar copy suppresses the frontend only
+        # for native target synthesis; the original Radar applies it once after
+        # the static reflection cube has been added.
+        target_radar = radar
+        if environment_cube is not None and radar.frontend is not None:
+            target_radar = copy.copy(radar)
+            target_radar.frontend = None
+        simulation = target_radar.simulate(
+            world,
+            times=(float(time_s),),
+            response=response,
+            sites=ScatterSitePolicy.explicit(
+                duals.sites,
+                stable_ids=(None if stable_site_ids is None else tuple(stable_site_ids)),
+            ),
+            ad_mode="jvp",
+            components=frozenset({"los"}),
+            max_depth=0,
+            polarization=tuple(polarization),
+        )
         primal = forward_ad.unpack_dual(simulation.cube).primal.detach().clone()
-        rates = radar.last_radar_paths.delay_rate
+        rates = simulation.last_radar_paths.delay_rate
         if rates is None:
             raise RuntimeError("Native Radar did not publish motion delay rates.")
         rates = forward_ad.unpack_dual(rates).primal.detach().clone()
+    if environment_cube is not None:
+        expected = tuple(primal.shape[1:])
+        if tuple(environment_cube.shape) != expected:
+            raise ValueError(
+                f"Environment cube shape {tuple(environment_cube.shape)} does not match "
+                f"the target frame shape {expected}."
+            )
+        primal = primal + environment_cube.unsqueeze(0)
+        if radar.frontend is not None:
+            primal = radar._apply_signal_models(primal[0]).unsqueeze(0)
     if primal.device.type != "cuda" or not torch.isfinite(primal).all() or not torch.isfinite(rates).all():
         raise RuntimeError(f"Nonfinite native CUDA frame at t={time_s:.6f}s; no zero-fill or discarded sites.")
     spec = radar.system_config.waveform_spec()
@@ -296,6 +321,10 @@ def solve_animation(ctx, scene, request):
     active_site_ids = tuple(topology["active_site_ids"])
     rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
     response = ScalarRcsResponse.from_rcs(rcs_per_site, reference_frequency_hz=config.fc, device=radar.device)
+    from .environment_clutter import single_bounce_environment_cube
+    environment = single_bounce_environment_cube(
+        radar, world, polarization=meta["world_polarization"],
+    )
     for key in ("snapshot_time_s", "target_local_point", "target_world_point_m", "velocity_m_per_s"):
         meta.pop(key, None)
     meta.update(model=MODEL, motion_fingerprint=authored_motion_fingerprint, frame_count=len(times), fps=float(request["fps"]),
@@ -306,12 +335,22 @@ def solve_animation(ctx, scene, request):
                 site_bone_names=[sampler.site_names[rank] for rank in active_ranks],
                 active_site_ids=list(active_site_ids),
                 topology_preflight=topology, rcs_per_site_m2=rcs_per_site,
+                components=["los", "reflection"], max_depth=1,
+                environment_reflection={
+                    "model": "native_channel_direct_single_bounce",
+                    "max_depth": environment.max_depth,
+                    "reflected_path_count": environment.reflected_path_count,
+                    "material_slot_count": environment.material_slot_count,
+                    "static_across_frames": True,
+                    "coherent_with_target": True,
+                },
                 velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
                 slow_time_model="native frozen-weight first-order carrier-rate per frame",
                 limitations="Uncalibrated equal-RCS surface samples, not full electromagnetic skin. "
                             "Only sites with native inbound+outbound paths throughout the interval are active; "
                             "occluded sites keep their original RCS share and are not renormalized. "
-                            "Static room occlusion; no room clutter, extra bounces or cat self-occlusion. "
+                            "Static room geometry contributes native single-bounce specular reflections; "
+                            "no diffuse or multi-bounce room clutter and no cat self-occlusion. "
                             "Frozen weights within each CPI; no acceleration/range migration within CPI.",
                 versions={name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")})
     if request.get("input_fingerprint"):
@@ -327,6 +366,7 @@ def solve_animation(ctx, scene, request):
             result, stats = solve_native_frame(
                 radar, world, response, time_s, p, v,
                 meta["world_polarization"], stable_site_ids=active_site_ids,
+                environment_cube=environment.cube,
             )
         except Exception as exc:
             raise RuntimeError(f"Animation failed at frame {index}/{len(times)}, t={time_s:.6f}s: {exc}. "
