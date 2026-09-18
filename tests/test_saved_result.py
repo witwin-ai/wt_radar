@@ -116,7 +116,7 @@ def test_saved_mode_refuses_legacy_dsp(tmp_path, payload):
 def test_live_commands_fail_explicitly_on_current_api():
     component = RadarComponent()
     for command in (component.start_stream, component.generate_timeline):
-        with pytest.raises(RuntimeError, match="not connected to Radar 0.3"):
+        with pytest.raises(RuntimeError, match="not connected to Radar 0.4"):
             command()
 
 
