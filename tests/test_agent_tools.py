@@ -333,16 +333,16 @@ def test_plan_sensor_placement_preserves_natural_measurement_objective(harness):
     assert result["proposed_ensure_sensor_arguments"]["placement_objective"] == "bidirectional_radial_velocity"
     assert result["placement"]["mode"] == "automatic"
     assert result["proposed_ensure_sensor_arguments"]["start_s"] == 0.0
-    assert result["proposed_ensure_sensor_arguments"]["duration_s"] == 5.0
-    assert result["proposed_ensure_sensor_arguments"]["fps"] == 10.0
+    assert result["proposed_ensure_sensor_arguments"]["duration_s"] == 10.0
+    assert result["proposed_ensure_sensor_arguments"]["fps"] == 30.0
     assert scene.to_dict() == before
     assert result["next_step"]["requires_confirmation"] is False
     assert result["mutates_scene"] is False
 
 
-def test_plan_sensor_placement_clamps_default_interval_to_short_timeline(harness):
+def test_plan_sensor_placement_covers_a_long_frame_aligned_timeline(harness):
     scene, tools = harness
-    scene.timeline_manager.clip.duration = 3.47
+    scene.timeline_manager.clip.duration = 217 / 30
     before = scene.to_dict()
 
     result = run(tools, "plan_sensor_placement", {
@@ -353,13 +353,31 @@ def test_plan_sensor_placement_clamps_default_interval_to_short_timeline(harness
 
     proposed = result["proposed_ensure_sensor_arguments"]
     assert proposed["start_s"] == 0.0
-    assert proposed["duration_s"] == 3.4
-    assert proposed["fps"] == 10.0
-    assert proposed["duration_s"] * proposed["fps"] == 34
-    assert proposed["start_s"] + proposed["duration_s"] <= scene.timeline_manager.clip.duration
-    assert result["placement"]["timeline_interval"] == {
-        "start_s": 0.0, "duration_s": 3.4, "fps": 10.0,
-    }
+    assert proposed["duration_s"] == pytest.approx(217 / 30)
+    assert proposed["fps"] == 30.0
+    assert proposed["duration_s"] * proposed["fps"] == pytest.approx(217)
+    assert proposed["start_s"] + proposed["duration_s"] == pytest.approx(
+        scene.timeline_manager.clip.duration
+    )
+    assert result["placement"]["timeline_interval"]["start_s"] == 0.0
+    assert result["placement"]["timeline_interval"]["duration_s"] == pytest.approx(217 / 30)
+    assert result["placement"]["timeline_interval"]["fps"] == 30.0
+    assert scene.to_dict() == before
+
+
+def test_plan_sensor_placement_blocks_instead_of_truncating_unaligned_timeline(harness):
+    scene, tools = harness
+    scene.timeline_manager.clip.duration = 3.47
+    before = scene.to_dict()
+
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id,
+        "placement_mode": "automatic",
+        "placement_objective": "whole_path_visible",
+    })
+
+    assert result["status"] == "blocked"
+    assert result["blockers"][0]["code"] == "timeline_interval_unavailable"
     assert scene.to_dict() == before
 
 

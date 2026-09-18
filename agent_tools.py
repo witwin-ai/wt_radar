@@ -564,22 +564,23 @@ def _timeline_summary(scene: Any) -> dict[str, Any]:
 
 
 def _default_automatic_placement_interval(scene: Any) -> dict[str, float] | None:
-    """Choose a short, integral-frame interval owned by the baked Timeline.
+    """Choose an integral-frame interval covering the complete baked Timeline.
 
-    Placement requests normally omit measurement timing.  Passing the writer's
-    old 5 s / 10 FPS defaults through unchanged made automatic placement fail
-    whenever the current authored motion was shorter than five seconds.  The
-    model then guessed new decimals, often alternating between a non-integral
-    frame count and a Timeline overrun.  Bind the trusted continuation to one
-    deterministic interval instead.
+    A placement that is validated against only the historical five-second
+    default cannot truthfully claim whole-path coverage for longer motion. Use
+    the complete authored interval at the highest supported aligned frame rate;
+    fail closed when the Timeline cannot be represented by the Radar timebase.
     """
     timeline = _timeline_summary(scene)
     duration = float(timeline["duration_s"])
-    if not timeline["available"] or duration <= 0 or timeline["playing"] or timeline["recording"]:
+    if (not timeline["available"] or duration <= 0 or duration > 30
+            or timeline["playing"] or timeline["recording"]):
         return None
-    for fps in (10.0, 30.0):
-        frame_count = min(int(math.floor((duration + 1e-7) * fps)), int(5.0 * fps))
-        if frame_count >= 2:
+    from .adapter.timebase import aligned_frame_count
+    for fps_value in range(30, 0, -1):
+        fps = float(fps_value)
+        frame_count = aligned_frame_count(duration, fps)
+        if frame_count is not None:
             return {"start_s": 0.0, "duration_s": frame_count / fps, "fps": fps}
     return None
 
