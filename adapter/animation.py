@@ -54,6 +54,12 @@ def animation_request(component):
     request.update(adapter=MODEL, duration_s=float(component.animation_duration_s),
                    fps=float(component.animation_fps))
     fingerprint = str(getattr(component, "_agent_input_fingerprint", "") or "")
+    if not fingerprint and getattr(component, "scene", None) is not None:
+        # Component-button and Agent execution must publish the same immutable
+        # result identity.  Import lazily to keep adapter/module registration
+        # acyclic while reusing the one canonical authored-input contract.
+        from ..agent_tools import _measurement_input_fingerprint
+        fingerprint = _measurement_input_fingerprint(component.scene, component.owner)
     if fingerprint:
         request["input_fingerprint"] = fingerprint
     frame_times(request, component)

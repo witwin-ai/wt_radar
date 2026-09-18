@@ -755,6 +755,8 @@ class RadarComponent(Component):
                 self._solver_pending_run_id = ""
                 self._snapshot_result = False
                 self._animation_result = True
+                if request.get("input_fingerprint"):
+                    self._last_result_input_fingerprint = str(request["input_fingerprint"])
                 count = round(request['duration_s'] * request['fps'])
                 self.animation_status = (
                     f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "

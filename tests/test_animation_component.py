@@ -548,6 +548,25 @@ def attached_component(monkeypatch):
     return scene, owner, value, server
 
 
+def test_component_button_request_uses_canonical_measurement_identity(monkeypatch):
+    from witwin_server.features.timeline import TimelineManager
+    from wt_radar import agent_tools
+    from wt_radar.adapter.animation import animation_request
+
+    scene, owner, value, _ = attached_component(monkeypatch)
+    scene.timeline_manager = TimelineManager(scene)
+    scene.timeline_manager.clip.duration = 10.0
+    value.snapshot_target_id = "cat"
+    expected = "a" * 64
+    monkeypatch.setattr(
+        agent_tools,
+        "_measurement_input_fingerprint",
+        lambda scene, radar_object: expected if radar_object is owner else "",
+    )
+
+    assert animation_request(value)["input_fingerprint"] == expected
+
+
 def test_live_identity_rejects_closed_reopened_or_removed_owner(monkeypatch):
     from witwin_server import Scene
 
