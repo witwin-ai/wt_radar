@@ -207,10 +207,38 @@ def prepare_animation(scene, request):
     return times, sampler, radar, world, config, meta, authored_motion_fingerprint
 
 
+def sample_authored_motion(times, sampler):
+    """Sample positions and velocities once at the authored output frames."""
+    sampled = [sampler.sample(float(time_s)) for time_s in times]
+    return (
+        np.stack([sample[0] for sample in sampled]),
+        np.stack([sample[1] for sample in sampled]),
+    )
+
+
+def validate_unambiguous_velocity(radar, velocities):
+    """Fail before topology discovery when authored motion must Doppler-alias."""
+    speed = np.linalg.norm(np.asarray(velocities, dtype=np.float64), axis=2)
+    if not np.isfinite(speed).all():
+        raise ValueError("Authored target motion contains non-finite velocity samples.")
+    observed_max = float(speed.max()) if speed.size else 0.0
+    supported_max = float(radar.system_config.waveform_spec().max_unambiguous_speed_mps)
+    if observed_max > supported_max:
+        raise ValueError(
+            f"Target speed {observed_max:.6g} m/s exceeds Radar's {supported_max:.6g} m/s "
+            "unambiguous velocity; lower the motion speed or change radar timing explicitly."
+        )
+    return {
+        "motion_speed_max_mps": observed_max,
+        "max_unambiguous_speed_mps": supported_max,
+    }
+
+
 def animation_preflight(scene, request):
     """Return solve evidence after native topology discovery, before synthesis."""
     times, sampler, radar, world, _config, meta, _motion = prepare_animation(scene, request)
-    positions = [sampler.positions(float(time_s)) for time_s in times]
+    positions, velocities = sample_authored_motion(times, sampler)
+    velocity_evidence = validate_unambiguous_velocity(radar, velocities)
     topology = visibility_preflight(
         radar, world, positions, sampler,
         polarization=meta["world_polarization"],
@@ -226,6 +254,7 @@ def animation_preflight(scene, request):
         "radar_target_m": list(meta["radar_target_m"]),
         "model": MODEL,
         "topology": topology,
+        **velocity_evidence,
     }
 
 
@@ -432,9 +461,8 @@ def solve_animation(ctx, scene, request):
     ctx.progress(0.01, "Preparing Radar scene")
     times, sampler, radar, world, config, meta, authored_motion_fingerprint = prepare_animation(scene, request)
     with progress_heartbeat(ctx, 0.03, "Sampling authored cat motion"):
-        sampled = [sampler.sample(float(time_s)) for time_s in times]
-        poses = np.stack([sample[0] for sample in sampled])
-        velocities = np.stack([sample[1] for sample in sampled])
+        poses, velocities = sample_authored_motion(times, sampler)
+        velocity_evidence = validate_unambiguous_velocity(radar, velocities)
     topology = validated_cached_topology(request, times, sampler, meta)
     preflight_reused = topology is not None
     if topology is None:
@@ -468,6 +496,7 @@ def solve_animation(ctx, scene, request):
                     "coherent_with_target": True,
                 },
                 native_preflight_reused=preflight_reused,
+                **velocity_evidence,
                 velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
                 slow_time_model="Radar 0.4 public chirp-time motion sampling per Studio frame",
                 limitations="Uncalibrated equal-RCS surface samples, not full electromagnetic skin. "
@@ -483,13 +512,6 @@ def solve_animation(ctx, scene, request):
     cubes = None
     poses = poses[:, active_ranks]
     velocities = velocities[:, active_ranks]
-    speed = np.linalg.norm(velocities, axis=2)
-    max_speed = float(radar.system_config.waveform_spec().max_unambiguous_speed_mps)
-    if speed.size and float(speed.max()) > max_speed:
-        raise ValueError(
-            f"Target speed exceeds Radar's {max_speed:.6g} m/s unambiguous velocity; "
-            "lower the motion speed or change radar timing explicitly."
-        )
     timeline = np.asarray(times, dtype=np.float64)
 
     def trajectory(sample_time):

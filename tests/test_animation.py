@@ -399,6 +399,20 @@ def test_native_animation_refuses_slow_time_velocity_alias(scene, cuda_ready):
         solve_animation(AnimationContext(), copy_for_solver(original), animation_request(component))
 
 
+def test_preflight_rejects_velocity_alias_before_topology_discovery(scene, cuda_ready, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    original.timeline_manager.clip.tracks.clear()
+    add_track(original, "bone0", "position", [(0., [0., 0., 0.]), (2., [0., 0., -200.])])
+
+    def topology_started(*_args, **_kwargs):
+        pytest.fail("expensive topology discovery started before velocity validation")
+
+    monkeypatch.setattr("wt_radar.adapter.animation.visibility_preflight", topology_started)
+    with pytest.raises(ValueError, match="unambiguous velocity"):
+        animation_preflight(copy_for_solver(original), animation_request(component))
+
+
 def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene, cuda_ready, tmp_path):
     original, component = scene
     make_rig(original, component)
