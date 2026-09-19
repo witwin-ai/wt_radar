@@ -224,6 +224,8 @@ def test_real_gpu_repeat_and_moved_sensor(scene, cuda_ready):
     assert first.metadata["components"] == ["los", "reflection"]
     assert first.metadata["max_depth"] == 1
     assert first.metadata["environment_reflection"]["max_depth"] == 1
+    assert first.metadata["environment_reflection"]["reflected_path_count"] >= 0
+    assert first.metadata["environment_reflection"]["material_slot_count"] > 0
     assert first.metadata["environment_reflection"]["coherent_with_target"] is True
     original.get_object("radar").get_component("Transform").position = [0, 1, -1]
     moved = solve_snapshot(Context(), copy_for_solver(original), snapshot_request(component))

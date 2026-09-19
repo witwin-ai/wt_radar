@@ -490,6 +490,10 @@ def validated_cached_motion(request, times, sampler):
 
 def solve_animation(ctx, scene, request):
     from witwin.radar import Motion, PointTargets
+    from .environment_clutter import (
+        add_environment_to_fmcw_result,
+        single_bounce_environment_cube,
+    )
 
     ctx.progress(0.01, "Preparing Radar scene")
     times, sampler, radar, world, config, meta, authored_motion_fingerprint = prepare_animation(scene, request)
@@ -515,6 +519,10 @@ def solve_animation(ctx, scene, request):
             )
     else:
         ctx.progress(0.08, "Reusing verified room-reflection visibility")
+    with progress_heartbeat(ctx, 0.1, "Compiling single-bounce room reflections"):
+        environment = single_bounce_environment_cube(
+            radar, world, polarization=meta["world_polarization"],
+        )
     active_ranks = np.asarray(topology["active_site_ranks"], dtype=np.int64)
     active_site_ids = tuple(topology["active_site_ids"])
     rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
@@ -532,6 +540,8 @@ def solve_animation(ctx, scene, request):
                 environment_reflection={
                     "model": "radar04_native_single_bounce",
                     "max_depth": 1,
+                    "reflected_path_count": environment.reflected_path_count,
+                    "material_slot_count": environment.material_slot_count,
                     "coherent_with_target": True,
                 },
                 native_preflight_reused=preflight_reused,
@@ -592,6 +602,10 @@ def solve_animation(ctx, scene, request):
             ):
                 simulation = next(stream)
             result = processing_cube(simulation, radar)
+            result = replace(
+                result,
+                data=add_environment_to_fmcw_result(radar, result.data, environment),
+            )
         except Exception as exc:
             raise RuntimeError(f"Animation failed at frame {index}/{len(times)}, t={time_s:.6f}s: {exc}. "
                                "No completed result published; native error retained.") from exc

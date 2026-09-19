@@ -22,6 +22,33 @@ class EnvironmentClutterResult:
     max_depth: int = 1
 
 
+def add_environment_to_fmcw_result(radar, target_cube, environment):
+    """Coherently add one static environment return in the result domain.
+
+    ``single_bounce_environment_cube`` returns the native synthesis product in
+    the instrument's declared FMCW domain, but before the receive chain.
+    Studio's Radar 0.4 adapter currently refuses every legacy frontend option,
+    so the configured instrument has no nonlinear receive stage. Refuse a
+    future frontend here rather than silently combining two products after a
+    nonlinear AGC or ADC.
+    """
+    if radar.frontend is not None:
+        raise NotImplementedError(
+            "Static environment returns must be combined before a configured "
+            "Radar receive frontend; the Studio Radar 0.4 adapter does not "
+            "support that frontend yet."
+        )
+    if radar.waveform.output not in ("spectrum", "beat"):
+        raise ValueError(f"Unsupported FMCW output domain: {radar.waveform.output!r}")
+    clutter_cube = environment.cube
+    if clutter_cube.shape != target_cube.shape:
+        raise ValueError(
+            "Environment and target Radar cubes disagree: "
+            f"{tuple(clutter_cube.shape)} != {tuple(target_cube.shape)}"
+        )
+    return target_cube + clutter_cube
+
+
 def single_bounce_environment_cube(radar, world, *, polarization):
     """Synthesize the static scene's native one-reflection Radar return.
 
@@ -38,9 +65,15 @@ def single_bounce_environment_cube(radar, world, *, polarization):
         DirectComposer,
         RadarComponentIndex,
     )
+    from witwin.radar.sensors import RoundTripPatternStage
     from witwin.radar.simulation import ScatterSitePolicy, bind_radar_world
-    from witwin.radar.synthesis import SlowTimeMode, SynthesisPathBatch, select_component
+    from witwin.radar.synthesis import (
+        SlowTimeMode,
+        SynthesisPathBatch,
+        select_component,
+    )
     from witwin.radar.synthesis.assembly import assemble_frame_cube
+    from witwin.radar.synthesis.fmcw import synthesize_fmcw
 
     propagation = radar.system_config.propagation
     reference_frequency_hz = propagation.reference_frequency_hz
@@ -70,7 +103,13 @@ def single_bounce_environment_cube(radar, world, *, polarization):
         radar_sink_ids=binding.receiver_ids,
         reference_frequency_hz=reference_frequency_hz,
     )
-    leg = adapter.reevaluate(frozen, binding.transmitters, binding.receivers, ad_mode="none")
+    leg = adapter.reevaluate_slots(
+        frozen,
+        binding.transmitters,
+        binding.receivers,
+        slot_count=1,
+        ad_mode="none",
+    )
     paths = composer.compose(leg)
 
     material_slot_count = len(compiled.materials.material_keys)
@@ -80,19 +119,36 @@ def single_bounce_environment_cube(radar, world, *, polarization):
     )
     index = RadarComponentIndex.from_direct(composer, frozen, declaration)
     reflected_path_count = index.count(ENVIRONMENT_CLUTTER)
-    if reflected_path_count != paths.path_count:
+    stage = RoundTripPatternStage.freeze(
+        radar,
+        composer,
+        site_ids=(),
+        pattern=radar.pattern,
+    )
+    if leg.departure_target_m is None or leg.arrival_origin_m is None:
         raise RuntimeError(
-            "Single-bounce environment discovery returned a path that was not "
-            "classified as reflected scene clutter."
+            "Channel did not publish the interaction points required for the "
+            "Radar antenna pattern on direct environment paths."
         )
+    rows = composer.row_index
+    paths = stage.apply(
+        paths,
+        tx_pos=radar.tx_pos,
+        rx_pos=radar.rx_pos,
+        tx_targets_m=leg.departure_target_m.index_select(0, rows).contiguous(),
+        rx_targets_m=leg.arrival_origin_m.index_select(0, rows).contiguous(),
+    )
 
     mode = SlowTimeMode.FROZEN_WEIGHT_WITH_CARRIER_RATE
     synthesis_paths = SynthesisPathBatch.from_radar_paths(paths, slow_time_mode=mode)
     clutter_paths = select_component(synthesis_paths, index, ENVIRONMENT_CLUTTER)
-    synthesis = radar._synthesize(clutter_paths, slow_time_mode=mode)
+    synthesis_cube = synthesize_fmcw(
+        clutter_paths,
+        radar.system_config.waveform_spec(),
+    )
     array = radar.system_config.sensors.array
     cube = assemble_frame_cube(
-        synthesis.cube,
+        synthesis_cube,
         num_tx=array.num_tx,
         num_rx=array.num_rx,
     )
@@ -106,6 +162,7 @@ def single_bounce_environment_cube(radar, world, *, polarization):
 
 
 __all__ = [
+    "add_environment_to_fmcw_result",
     "EnvironmentClutterResult",
     "SINGLE_BOUNCE_COMPONENTS",
     "single_bounce_environment_cube",

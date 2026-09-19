@@ -32,9 +32,9 @@ def _wall_scene():
 
 
 def _radar():
-    from witwin.radar import Radar, RadarConfig
+    from witwin.radar import Radar
 
-    config = RadarConfig.from_dict({
+    config = {
         "num_tx": 1,
         "num_rx": 1,
         "fc": 77.0e9,
@@ -45,15 +45,18 @@ def _radar():
         "idle_time": 7,
         "ramp_end_time": 58,
         "chirp_per_frame": 8,
-        "frame_per_second": 10,
-        "num_doppler_bins": 8,
-        "num_range_bins": 64,
-        "num_angle_bins": 16,
         "power": 12,
         "tx_loc": [[0, 0, 0]],
         "rx_loc": [[0, 0, 0]],
-    })
-    return Radar(config, device="cuda", position=(0, 0, 0), target=(1, 0, 0), up=(0, 0, 1))
+    }
+    return Radar.from_dict(
+        config,
+        device="cuda",
+        position=(0, 0, 0),
+        look_at=(1, 0, 0),
+        up=(0, 0, 1),
+        polarization=(0, 0, 1),
+    )
 
 
 def test_single_bounce_environment_uses_native_reflection_and_no_leakage(cuda_ready):
@@ -78,3 +81,19 @@ def test_single_bounce_policy_is_reflection_only():
     assert SINGLE_BOUNCE_COMPONENTS == frozenset({"reflection"})
     assert "los" not in SINGLE_BOUNCE_COMPONENTS
 
+
+def test_environment_cube_is_added_in_native_fmcw_result_domain(cuda_ready):
+    from wt_radar.adapter.environment_clutter import (
+        add_environment_to_fmcw_result,
+        single_bounce_environment_cube,
+    )
+    radar = _radar()
+    environment = single_bounce_environment_cube(
+        radar, _wall_scene(), polarization=(0.0, 0.0, 1.0),
+    )
+    target = torch.zeros_like(environment.cube)
+
+    combined = add_environment_to_fmcw_result(radar, target, environment)
+
+    torch.testing.assert_close(combined, environment.cube)
+    assert torch.count_nonzero(combined) > 0

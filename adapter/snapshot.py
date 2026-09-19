@@ -1,5 +1,5 @@
 """Studio snapshot transport to Radar 0.4; no propagation or DSP implementation."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.metadata import version
 
 import numpy as np
@@ -188,6 +188,10 @@ class SnapshotResult:
 
 def solve_snapshot(ctx, scene, request):
     from witwin.radar import Motion, PointTargets
+    from .environment_clutter import (
+        add_environment_to_fmcw_result,
+        single_bounce_environment_cube,
+    )
     from .radar04 import build_radar
 
     ctx.progress(0.0, "Exporting frozen Studio scene and explicit point target")
@@ -206,6 +210,9 @@ def solve_snapshot(ctx, scene, request):
         positions=torch.tensor([metadata["target_world_point_m"]], device=radar.device),
         rcs=metadata["rcs_m2"],
     )
+    environment = single_bounce_environment_cube(
+        radar, world, polarization=metadata["world_polarization"],
+    )
     ctx.log(f"Radar 0.4 snapshot: {metadata}")
     ctx.progress(0.3, "Running native GPU propagation and FMCW synthesis")
     simulation = radar.simulate(
@@ -217,13 +224,18 @@ def solve_snapshot(ctx, scene, request):
         motion=Motion.static(),
     )
     processed = processing_cube(simulation, radar)
+    processed = replace(
+        processed,
+        data=add_environment_to_fmcw_result(radar, processed.data, environment),
+    )
     if processed.data.device.type != "cuda" or not bool(torch.isfinite(processed.data).all()):
         raise RuntimeError("Native CUDA result is missing or nonfinite.")
     metadata.update({"cube_shape": list(processed.data.shape), "device": str(processed.data.device),
                      "environment_reflection": {
                          "model": "radar04_native_single_bounce",
                          "max_depth": 1,
-                         "path_count": int(simulation.last_radar_paths.path_count),
+                         "reflected_path_count": environment.reflected_path_count,
+                         "material_slot_count": environment.material_slot_count,
                          "coherent_with_target": True,
                      },
                      "versions": {name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")},

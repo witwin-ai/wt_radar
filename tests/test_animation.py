@@ -466,6 +466,8 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
     environment = result.metadata["environment_reflection"]
     assert environment["model"] == "radar04_native_single_bounce"
     assert environment["max_depth"] == 1
+    assert environment["reflected_path_count"] >= 0
+    assert environment["material_slot_count"] > 0
     assert environment["coherent_with_target"] is True
     np.testing.assert_allclose(result.times_s, [0., .1], atol=0, rtol=0)
     path = tmp_path / "animation.npz"

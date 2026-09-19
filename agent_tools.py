@@ -920,7 +920,7 @@ def _expected_result_evidence(scene: Any, radar: Any, native_preflight: dict[str
         },
         "device_prefix": "cuda",
         "solver_completion_contract": "atomic_active_sites_no_zero_fill_v2",
-        "environment_reflection_model": "native_channel_direct_single_bounce",
+        "environment_reflection_model": "radar04_native_single_bounce",
         "environment_reflection_max_depth": 1,
         "environment_coherent_with_target": True,
     }

@@ -174,7 +174,7 @@ def topology_manifest(*, site_count=4):
         "visibility_coverage": 1.0,
         "visibility_quality": "complete",
         "no_zero_fill_or_dropped_active_sites": True,
-        "environment_reflection_model": "native_channel_direct_single_bounce",
+        "environment_reflection_model": "radar04_native_single_bounce",
         "environment_reflection_max_depth": 1,
         "environment_reflected_path_count": 3,
         "environment_material_slot_count": 7,
