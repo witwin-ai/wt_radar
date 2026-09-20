@@ -82,6 +82,7 @@ def main() -> int:
     cube = result.cube.numpy()
     frame_nonzero = np.any(np.abs(cube) > 0, axis=tuple(range(1, cube.ndim)))
     environment = dict(result.metadata.get("environment_reflection") or {})
+    target = dict(result.metadata.get("target_propagation") or {})
     topology = dict(result.metadata.get("topology_preflight") or {})
     summary = {
         "scene_id": scene.scene_id,
@@ -93,6 +94,8 @@ def main() -> int:
         "nonzero_frames": int(np.count_nonzero(frame_nonzero)),
         "frame_count": int(cube.shape[0]),
         "active_site_count": int(topology.get("active_site_count", 0)),
+        "target_multipath_enabled": bool(target.get("multipath_enabled")),
+        "target_max_depth": int(target.get("max_depth", -1)),
         "reflected_path_count": int(environment.get("reflected_path_count", 0)),
         "material_slot_count": int(environment.get("material_slot_count", 0)),
         "environment_model": environment.get("model"),
@@ -103,6 +106,8 @@ def main() -> int:
         summary["all_finite"]
         and summary["nonzero_frames"] == summary["frame_count"]
         and summary["active_site_count"] > 0
+        and not summary["target_multipath_enabled"]
+        and summary["target_max_depth"] == 0
         and summary["reflected_path_count"] > 0
         and summary["material_slot_count"] > 0
         and summary["max_depth"] == 1

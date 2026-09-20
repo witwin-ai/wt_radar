@@ -9,13 +9,16 @@ Last run: 2026-09-19
 - Frames: 40/40 finite and nonzero, Studio time `0.0..3.9 s`
 - Cube shape: `[40, 3, 4, 128, 256]`
 - Dynamic target sites: 44 active
+- Dynamic target propagation: LOS-only, target multipath disabled, `max_depth=0`
 - Static room: 37 meshes/material slots, 1890 triangles
 - Environment reflection paths: 60
 - Environment model: `radar04_native_single_bounce`, `max_depth=1`
-- Export: `C:\WiTwin\projects\witwin-scratch\results\radar-animation\official-radar-0.4-cleanup-20260919.npz`
-- SHA-256: `747927FB2F7354294B86C69ACD1F049AED87D24498AB5DC16D657FBA9E1EEBBD`
+- Solve + compressed export: 75.64 s (previous target-multipath run: 164.73 s; 54.1% lower)
+- Target path rows: 528/frame (previous target-multipath mean: 14,080.8/frame)
+- Export: `C:\WiTwin\projects\witwin-scratch\results\radar-animation\official-radar-0.4-los-default-20260919.npz`
+- SHA-256: `A90D98B10B535415E2E7DCDA4B428C25DE620E3BD6B2357BC611685A6D33853E`
 - Saved-result reload: passed with matching shape, times, versions, and environment metadata
-- Repository tests: 275 passed
+- Repository tests: 276 passed
 
 Reproduction command from this repository:
 
