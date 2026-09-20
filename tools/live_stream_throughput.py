@@ -368,7 +368,7 @@ def install_timing_hooks(solver_host) -> tuple[Dict[str, Any], Callable[[], None
 def run_benchmark(args: argparse.Namespace) -> Dict[str, Any]:
     bootstrap_paths(args.platform_root)
     import wt_radar.solver_host as solver_host
-    from wt_radar.adapter.solve import SensorSpec
+    from wt_radar.adapter.specs import SensorSpec
 
     scene, radar = build_studio_scene(args)
     signature = radar._live_scene_signature()

@@ -18,7 +18,8 @@ if str(PLUGIN_PARENT) not in sys.path:
 import wt_radar  # noqa: E402,F401  (registers Radar components before Scene.from_dict)
 from witwin_server.features.solvers.scene_ref import load_scene_ref  # noqa: E402
 from witwin_server.features.solvers.sdk import method, query, serve  # noqa: E402
-from wt_radar.adapter.solve import SensorSpec, SigProc, SolveRunner, TracerSpec  # noqa: E402
+from wt_radar.adapter.solve import SigProc, SolveRunner  # noqa: E402
+from wt_radar.adapter.specs import SensorSpec, TracerSpec  # noqa: E402
 
 _LIVE_CACHES: Dict[str, Dict[str, Any]] = {}
 _MAX_LIVE_CACHES = 8

@@ -14,7 +14,7 @@ from witwin_server.features.timeline import TimelineManager
 from witwin_server.tools.base import ToolError
 
 from wt_radar import agent_tools as radar_tools
-from wt_radar.adapter.solve import SensorSpec
+from wt_radar.adapter.specs import SensorSpec
 
 
 class ToolCollector:

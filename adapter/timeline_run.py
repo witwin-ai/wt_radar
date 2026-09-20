@@ -15,7 +15,8 @@ from typing import Any, Optional, Tuple
 import numpy as np
 
 from .common import num
-from .solve import SensorSpec, SolveRunner, TracerSpec
+from .solve import SolveRunner
+from .specs import SensorSpec, TracerSpec
 
 
 class TimelineRunner:

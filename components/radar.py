@@ -59,7 +59,8 @@ from ..adapter.common import (
     Derived,
     num,
 )
-from ..adapter.solve import SensorSpec, SigProc, TracerSpec
+from ..adapter.solve import SigProc
+from ..adapter.specs import SensorSpec, TracerSpec
 from .radar_ui import present_radar_controls
 
 logger = get_logger("Radar")

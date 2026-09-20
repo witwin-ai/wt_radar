@@ -25,7 +25,7 @@ from scipy.spatial.transform import Rotation
 from witwin_server.tools.base import ToolError, tool
 
 from .adapter.memory_budget import MAX_RESULT_BYTES, available_memory_bytes
-from .adapter.solve import SensorSpec
+from .adapter.specs import SensorSpec
 from .library_items import _settings_object
 from .retrieval_tags import (
     CANCEL_TAGS,
@@ -537,7 +537,7 @@ def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
     """Durable authored Radar inputs actually consumed by the native adapter."""
     from dataclasses import asdict
     from .adapter.config_map import ConfigMap
-    from .adapter.solve import SensorSpec, TracerSpec
+    from .adapter.specs import SensorSpec, TracerSpec
 
     radar = obj.get_component("Radar")
     sensor = asdict(SensorSpec.from_component(radar))
