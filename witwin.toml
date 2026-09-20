@@ -39,4 +39,4 @@ python = "${backend:python}"
 [contributes.solvers.capabilities]
 cancel = true
 partials = true
-query = ["raw_signal", "range_doppler", "point_cloud", "music", "snapshot_view", "animation_view", "animation_export", "animation_replay", "animation_manifest"]
+query = ["snapshot_view", "animation_view", "animation_export", "animation_replay", "animation_manifest"]
