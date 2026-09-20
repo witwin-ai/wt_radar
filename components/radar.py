@@ -307,9 +307,17 @@ class RadarComponent(Component):
                                        description="Exact baked timeline duration (0..30 seconds), starting at t0.")
     animation_fps = float_field(10.0, min=1.0, group=_ANIMATION,
                                 description="Actual independent GPU measurements per second (1..30), not repeated video frames.")
+    target_multipath = bool_field(
+        False,
+        group=_ANIMATION,
+        description=(
+            "High-cost target-related room multipath (wall-to-target or target-to-wall). "
+            "Off matches the original WT Radar default; static one-bounce room background remains enabled."
+        ),
+    )
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,
                                       description="Recorded result frame. Does not seek or modify the editor timeline.")
-    animation_status = string_field("Not run. Uses existing baked skin animation with LOS and one reflection.",
+    animation_status = string_field("Not run. Uses LOS target returns plus static one-bounce room background.",
                                     readonly=True, transient=True, group=_ANIMATION)
     animation_export_path = string_field("", readonly=True, transient=True, group=_ANIMATION,
                                          description="Exported native complex cube, times, skin positions/velocities and physical axes (.npz).")
@@ -671,9 +679,14 @@ class RadarComponent(Component):
                 if request.get("input_fingerprint"):
                     self._last_result_input_fingerprint = str(request["input_fingerprint"])
                 count = round(request['duration_s'] * request['fps'])
+                target_path_label = (
+                    "LOS plus target multipath" if request.get("target_multipath", False)
+                    else "LOS-only target"
+                )
                 self.animation_status = (
                     f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
-                    f"{request['fps']:g} FPS. Uncalibrated skin sites; LOS plus one reflection."
+                    f"{request['fps']:g} FPS. Uncalibrated skin sites; {target_path_label}; "
+                    "static one-bounce room background."
                 )
                 if completion_won_cancel_race:
                     self.animation_status += " Native completion won the cancellation race; result preserved."
@@ -705,7 +718,8 @@ class RadarComponent(Component):
                         self.animation_status = (
                             f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
                             f"{request['fps']:g} FPS. Interval-visible sites {active}/{declared} "
-                            f"({coverage:.1f}%, {quality}); uncalibrated RCS; LOS plus one reflection."
+                            f"({coverage:.1f}%, {quality}); uncalibrated RCS; {target_path_label}; "
+                            "static one-bounce room background."
                         )
                         if completion_won_cancel_race:
                             self.animation_status += (

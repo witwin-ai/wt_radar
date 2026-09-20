@@ -47,6 +47,15 @@ def test_frame_times_accepts_float32_round_trip_for_frame_aligned_duration():
     assert times[-1] == pytest.approx(16.8)
 
 
+def test_animation_request_carries_explicit_target_multipath(scene):
+    original, component = scene
+    make_rig(original, component)
+
+    assert animation_request(component)["target_multipath"] is False
+    component.target_multipath = True
+    assert animation_request(component)["target_multipath"] is True
+
+
 def add_track(scene, oid, field, keys):
     track = scene.timeline_manager.clip.get_or_create_track(oid, "Transform", field)
     for time_s, value in keys:
@@ -286,6 +295,7 @@ def test_native_frame_coherently_adds_single_bounce_room_return(scene, cuda_read
     target, stats = solve_native_frame(
         radar, world, response, 0.0,
         [[0.0, 1.0, -3.0]], [[0.0, 0.0, -1.0]], polarization,
+        target_reflections=1,
     )
     assert stats["path_count"] > 1
     assert stats["path_set_complete"] is True
@@ -463,6 +473,9 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
     assert all(row["delay_rate_abs_max"] > 0 for row in result.metadata["frame_diagnostics"])
     assert result.metadata["components"] == ["los", "reflection"]
     assert result.metadata["max_depth"] == 1
+    assert result.metadata["target_propagation"] == {
+        "components": ["los"], "max_depth": 0, "multipath_enabled": False,
+    }
     environment = result.metadata["environment_reflection"]
     assert environment["model"] == "radar04_native_single_bounce"
     assert environment["max_depth"] == 1

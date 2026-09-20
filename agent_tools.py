@@ -555,6 +555,7 @@ def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
             "duration_s": float(radar.animation_duration_s),
             "fps": float(radar.animation_fps),
             "motion_sampling": str(radar.motion_sampling),
+            "target_multipath": bool(radar.target_multipath),
         },
     })
     # SensorSpec is derived from the exact float32 world matrix consumed by
@@ -565,13 +566,23 @@ def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
 
 
 def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
+    radar = obj.get_component("Radar")
+    if radar is None:
+        raise ValueError("Radar measurement fingerprint requires a Radar component.")
     payload = {
-        "schema": "witwin.radar.agent-input.v6",
+        "schema": "witwin.radar.agent-input.v7",
         "scene_fingerprint": _scene_input_fingerprint(scene),
         "scene_id": str(scene.scene_id),
         "radar_object_id": str(obj.id),
         "radar_contract": _radar_measurement_contract(obj),
-        "physics": {"components": ["los", "reflection"], "max_depth": 1, "device": "cuda"},
+        "physics": {
+            "target": {
+                "components": ["los"] + (["reflection"] if radar.target_multipath else []),
+                "max_depth": 1 if radar.target_multipath else 0,
+            },
+            "environment": {"components": ["reflection"], "max_depth": 1},
+            "device": "cuda",
+        },
         "packages": {
             name: _package_version(name)
             for name in ("witwin", "witwin-radar", "witwin-channel", "torch")
@@ -722,6 +733,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "duration_s": float(radar.animation_duration_s),
             "fps": float(radar.animation_fps),
             "view": str(radar.view),
+            "target_multipath": bool(radar.target_multipath),
         },
         "result": {
             "running": bool(getattr(radar, "_snapshot_running", False)),
@@ -739,6 +751,8 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "max_depth": 1,
             "device": "cuda",
             "room_role": "occlusion plus native static single-bounce specular reflection",
+            "target_multipath": bool(radar.target_multipath),
+            "target_max_depth": 1 if radar.target_multipath else 0,
             "target_model": (
                 "interval-visible stable skinned surface sites; uncalibrated equal-RCS "
                 "shares are based on all declared sites and are not renormalized"
@@ -790,6 +804,7 @@ def _sensor_configuration_state(obj: Any) -> dict[str, Any]:
         "start_s": float(radar.t0),
         "duration_s": float(radar.animation_duration_s),
         "fps": float(radar.animation_fps),
+        "target_multipath": bool(radar.target_multipath),
         "fov_deg": float(radar.fov),
         "position_m": _jsonable(transform.position),
         "rotation_rad": _jsonable(transform.rotation),
@@ -798,6 +813,8 @@ def _sensor_configuration_state(obj: Any) -> dict[str, Any]:
 
 def _configuration_matches(current: dict[str, Any], expected: dict[str, Any]) -> bool:
     if str(current.get("target_object_id") or "") != str(expected.get("target_object_id") or ""):
+        return False
+    if bool(current.get("target_multipath", False)) != bool(expected.get("target_multipath", False)):
         return False
     for key in ("start_s", "duration_s", "fps", "fov_deg"):
         if not math.isclose(float(current.get(key, math.nan)), float(expected.get(key, math.nan)), abs_tol=1e-9):
@@ -1464,6 +1481,11 @@ def register(ctx: Any) -> None:
                     "description": "Physical measurement objective for automatic full-trajectory placement.",
                 },
                 "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
+                "target_multipath": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Plan high-cost moving-target room multipath; static room background is always retained.",
+                },
                 "distance_m": {
                     "type": "number", "minimum": 0.25, "maximum": 10,
                     "description": "Requested world-space distance from the animated target, for automatic placement only.",
@@ -1540,6 +1562,7 @@ def register(ctx: Any) -> None:
             "placement_mode": placement_mode,
             "placement_objective": str(args.get("placement_objective") or "balanced"),
             "height_m": float(args.get("height_m", 1.0)),
+            "target_multipath": bool(args.get("target_multipath", False)),
         }
 
         automatic_interval = None
@@ -1649,6 +1672,11 @@ def register(ctx: Any) -> None:
                 "start_s": {"type": "number", "minimum": 0, "default": 0},
                 "duration_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 30, "default": 5},
                 "fps": {"type": "number", "minimum": 1, "maximum": 30, "default": 10},
+                "target_multipath": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Enable high-cost room multipath through the moving target; static room background is always retained.",
+                },
                 "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
                 "reuse_existing": {"type": "boolean", "default": True},
             },
@@ -1796,6 +1824,7 @@ def register(ctx: Any) -> None:
             "t0": radar.t0,
             "animation_duration_s": radar.animation_duration_s,
             "animation_fps": radar.animation_fps,
+            "target_multipath": radar.target_multipath,
             "fov": radar.fov,
             "view": radar.view,
             "static_clutter_removal": radar.static_clutter_removal,
@@ -1808,6 +1837,7 @@ def register(ctx: Any) -> None:
             radar.t0 = float(args.get("start_s", 0.0))
             radar.animation_duration_s = float(args.get("duration_s", 5.0))
             radar.animation_fps = float(args.get("fps", 10.0))
+            radar.target_multipath = bool(args.get("target_multipath", False))
             radar.fov = float(args.get("fov_deg", 60.0))
             # The existing animation adapter requires these review controls.
             radar.view = "range_doppler"
@@ -1820,7 +1850,7 @@ def register(ctx: Any) -> None:
                 scene.remove_object(str(obj.id))
             else:
                 for key in (
-                    "snapshot_target_id", "t0", "animation_duration_s", "animation_fps",
+                    "snapshot_target_id", "t0", "animation_duration_s", "animation_fps", "target_multipath",
                     "fov", "view", "static_clutter_removal", "show_cfar",
                 ):
                     setattr(radar, key, previous[key])

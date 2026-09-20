@@ -52,7 +52,8 @@ class AnimationTopologyError(ValueError):
 def animation_request(component):
     request = snapshot_request(component)
     request.update(adapter=MODEL, duration_s=float(component.animation_duration_s),
-                   fps=float(component.animation_fps))
+                   fps=float(component.animation_fps),
+                   target_multipath=bool(component.target_multipath))
     fingerprint = str(getattr(component, "_agent_input_fingerprint", "") or "")
     if not fingerprint and getattr(component, "scene", None) is not None:
         # Component-button and Agent execution must publish the same immutable
@@ -71,6 +72,14 @@ def animation_request(component):
         request["native_preflight"] = json.loads(json.dumps(native_preflight))
     frame_times(request, component)
     return request
+
+
+def target_reflection_depth(request):
+    """Return the explicitly authored dynamic-target multipath depth."""
+    value = request.get("target_multipath", False)
+    if not isinstance(value, bool):
+        raise ValueError("target_multipath must be a boolean.")
+    return 1 if value else 0
 
 
 def frame_times(request, component):
@@ -93,7 +102,7 @@ def frame_times(request, component):
 
 def solve_native_frame(
     radar, world, rcs_m2, time_s, positions, velocities, polarization,
-    *, stable_site_ids=None, environment_cube=None,
+    *, stable_site_ids=None, environment_cube=None, target_reflections=0,
 ):
     """Simulate one Studio frame through Radar 0.4's public moving-target API."""
     from witwin.radar import Motion, PointTargets
@@ -126,7 +135,7 @@ def solve_native_frame(
         targets,
         times=(base_time,),
         los=True,
-        reflections=1,
+        reflections=int(target_reflections),
         motion=Motion.chirp(),
     )
     primal = simulation.cube.detach()
@@ -243,6 +252,7 @@ def animation_preflight(scene, request):
         radar, world, positions, sampler,
         polarization=meta["world_polarization"],
         times_s=times,
+        target_reflections=target_reflection_depth(request),
     )
     return {
         "frame_count": int(len(times)),
@@ -264,15 +274,20 @@ def animation_preflight(scene, request):
     }
 
 
-def topology_preflight(radar, world, positions, sampler, *, polarization, time_s):
+def topology_preflight(
+    radar, world, positions, sampler, *, polarization, time_s, target_reflections=0,
+):
     """Single-frame compatibility wrapper around interval visibility preflight."""
     return visibility_preflight(
         radar, world, [positions], sampler,
-        polarization=polarization, times_s=[time_s],
+        polarization=polarization, times_s=[time_s], target_reflections=target_reflections,
     )
 
 
-def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarization, times_s):
+def visibility_preflight(
+    radar, world, positions_by_frame, sampler, *, polarization, times_s,
+    target_reflections=0,
+):
     """Select sites reachable for the whole interval using native discovery.
 
     This deliberately does not ray-cast or approximate visibility in the
@@ -342,7 +357,7 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
                 ),
                 times=times_s,
                 los=True,
-                reflections=1,
+                reflections=int(target_reflections),
                 motion=Motion.chirp(rediscover_every_frames=1),
             )
             break
@@ -408,6 +423,7 @@ def visibility_preflight(radar, world, positions_by_frame, sampler, *, polarizat
             "complete" if len(active_ranks) == len(declared_ids)
             else "degraded_interval_global_subset"
         ),
+        "target_reflections": int(target_reflections),
     }
 
 
@@ -459,6 +475,8 @@ def validated_cached_topology(request, times, sampler, meta):
         raise ValueError("Cached Radar preflight stable site IDs do not match active ranks.")
     if int(topology.get("active_site_count", -1)) != len(active_ranks):
         raise ValueError("Cached Radar preflight active site count is inconsistent.")
+    if int(topology.get("target_reflections", -1)) != target_reflection_depth(request):
+        raise ValueError("Cached Radar preflight target multipath setting does not match this solve request.")
     if int(topology.get("occluded_site_count", -1)) != declared_count - len(active_ranks):
         raise ValueError("Cached Radar preflight occluded site count is inconsistent.")
     return json.loads(json.dumps(topology))
@@ -516,6 +534,7 @@ def solve_animation(ctx, scene, request):
                 sampler,
                 polarization=meta["world_polarization"],
                 times_s=times,
+                target_reflections=target_reflection_depth(request),
             )
     else:
         ctx.progress(0.08, "Reusing verified room-reflection visibility")
@@ -528,6 +547,8 @@ def solve_animation(ctx, scene, request):
     rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
     for key in ("snapshot_time_s", "target_local_point", "target_world_point_m", "velocity_m_per_s"):
         meta.pop(key, None)
+    target_reflections = target_reflection_depth(request)
+    target_components = ["los"] + (["reflection"] if target_reflections else [])
     meta.update(model=MODEL, motion_fingerprint=authored_motion_fingerprint, frame_count=len(times), fps=float(request["fps"]),
                 duration_s=float(request["duration_s"]),
                 declared_site_vertex_indices=sampler.vertex_ids.tolist(),
@@ -537,6 +558,11 @@ def solve_animation(ctx, scene, request):
                 active_site_ids=list(active_site_ids),
                 topology_preflight=topology, rcs_per_site_m2=rcs_per_site,
                 components=["los", "reflection"], max_depth=1,
+                target_propagation={
+                    "components": target_components,
+                    "max_depth": target_reflections,
+                    "multipath_enabled": bool(target_reflections),
+                },
                 environment_reflection={
                     "model": "radar04_native_single_bounce",
                     "max_depth": 1,
@@ -553,7 +579,9 @@ def solve_animation(ctx, scene, request):
                             "Only sites with native inbound+outbound paths throughout the interval are active; "
                             "occluded sites keep their original RCS share and are not renormalized. "
                             "Static room geometry contributes native single-bounce specular reflections; "
-                            "no diffuse or multi-bounce room clutter and no cat self-occlusion. "
+                            + ("dynamic target-related single-bounce multipath is enabled; "
+                               if target_reflections else "dynamic target-related multipath is disabled; ")
+                            + "no diffuse or multi-bounce room clutter and no cat self-occlusion. "
                             "Frozen weights within each CPI; no acceleration/range migration within CPI.",
                 versions={name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")})
     if request.get("input_fingerprint"):
@@ -586,7 +614,7 @@ def solve_animation(ctx, scene, request):
         targets,
         times=times,
         los=True,
-        reflections=1,
+        reflections=target_reflections,
         motion=Motion.chirp(rediscover_every_frames=1),
     ))
     diagnostics = []

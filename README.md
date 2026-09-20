@@ -9,6 +9,12 @@ combines the supported direct environment return, calls official Radar waveform
 synthesis, and publishes results for Studio replay and export. It does not modify
 or replace Radar, Channel, or Maxwell physics code.
 
+The default animation policy matches the original WT Radar behavior: moving
+skin sites use line-of-sight target returns, while static room geometry still
+contributes a native one-bounce background. **Target Multipath** is an explicit
+high-cost option for wall-to-target and target-to-wall paths; it is off by
+default.
+
 ## Supported physical model
 
 The multi-frame animation path combines two coherent contributions:
