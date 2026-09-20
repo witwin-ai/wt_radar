@@ -1,4 +1,1 @@
-"""Radar adapter package — the ``"radar"`` domain ``SceneAdapter`` and its maps."""
-from .radar_adapter import RadarAdapter
-
-__all__ = ["RadarAdapter"]
+"""Studio-to-Radar 0.4 request, simulation, result, and replay adapters."""
