@@ -108,10 +108,12 @@ def main() -> int:
         "max_depth": environment.get("max_depth"),
     }
     print(json.dumps(summary, indent=2), flush=True)
+    expected_site_budget = int(args.target_site_budget if args.target_site_budget is not None else 24)
     accepted = (
         summary["all_finite"]
         and summary["nonzero_frames"] == summary["frame_count"]
-        and summary["active_site_count"] > 0
+        and summary["active_site_count"] == min(expected_site_budget, summary["available_bone_site_count"])
+        and summary["target_site_budget"] == expected_site_budget
         and not summary["target_multipath_enabled"]
         and summary["target_max_depth"] == 0
         and summary["target_motion_sampling"] == "chirp"
