@@ -10,10 +10,13 @@ Last run: 2026-09-19
 - Cube shape: `[40, 3, 4, 128, 256]`
 - Dynamic target sites: 44 active
 - Dynamic target propagation: LOS-only, target multipath disabled, `max_depth=0`
+- Dynamic target motion sampling: `chirp` (measured default)
 - Static room: 37 meshes/material slots, 1890 triangles
 - Environment reflection paths: 60
 - Environment model: `radar04_native_single_bounce`, `max_depth=1`
 - Solve + compressed export: 75.64 s (previous target-multipath run: 164.73 s; 54.1% lower)
+- Adaptive comparison: 123.547 s, 63.3% slower than chirp on this scene
+- Adaptive/chirp difference: complex relative L2 0.0903%, magnitude relative L2 0.0631%, complex correlation 0.9999996, power ratio 0.9999995
 - Target path rows: 528/frame (previous target-multipath mean: 14,080.8/frame)
 - Export: `C:\WiTwin\projects\witwin-scratch\results\radar-animation\official-radar-0.4-los-default-20260919.npz`
 - SHA-256: `A90D98B10B535415E2E7DCDA4B428C25DE620E3BD6B2357BC611685A6D33853E`
@@ -34,4 +37,5 @@ The command uses Studio's normal project-mesh and SkinnedMesh hydration paths,
 then invokes the same `animation_request`, `solve_animation`, and
 `export_animation` functions used by the component workflow. It returns nonzero
 if any frame is nonfinite/zero, no target site remains active, no environment
-reflection/material is present, or the reflection depth is not exactly one.
+reflection/material is present, target multipath is enabled, target motion is
+not chirp-sampled, or the reflection depth is not exactly one.

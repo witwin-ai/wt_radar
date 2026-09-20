@@ -96,6 +96,7 @@ def main() -> int:
         "active_site_count": int(topology.get("active_site_count", 0)),
         "target_multipath_enabled": bool(target.get("multipath_enabled")),
         "target_max_depth": int(target.get("max_depth", -1)),
+        "target_motion_sampling": target.get("motion_sampling"),
         "reflected_path_count": int(environment.get("reflected_path_count", 0)),
         "material_slot_count": int(environment.get("material_slot_count", 0)),
         "environment_model": environment.get("model"),
@@ -108,6 +109,7 @@ def main() -> int:
         and summary["active_site_count"] > 0
         and not summary["target_multipath_enabled"]
         and summary["target_max_depth"] == 0
+        and summary["target_motion_sampling"] == "chirp"
         and summary["reflected_path_count"] > 0
         and summary["material_slot_count"] > 0
         and summary["max_depth"] == 1
