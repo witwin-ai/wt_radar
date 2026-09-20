@@ -4,10 +4,10 @@ Velocities are numerical derivatives of the same rendered world vertices.
 Differences stay inside a LINEAR key interval, with a right-hand derivative at
 knots. The step (at most 1 ms) and approximation are reported, not RF algorithms.
 """
-import inspect
 import re
 
 import numpy as np
+import torch
 
 from .snapshot import _hierarchy
 
@@ -157,14 +157,50 @@ class StudioSkinSampler:
         chosen = [chosen[rank] for rank in ranks]
         names = [names[rank] for rank in ranks]
         self.vertex_ids, self.site_names = np.asarray(chosen), names
+        selected = self.vertex_ids
+        self._base_vertices = torch.as_tensor(vertices[selected], dtype=torch.float32).contiguous()
+        self._bone_indices = torch.as_tensor(indices[selected], dtype=torch.int64).contiguous()
+        self._bone_weights = torch.as_tensor(weights[selected], dtype=torch.float32).contiguous()
+        self._inverse_bind_matrices = torch.as_tensor(ibm, dtype=torch.float32).contiguous()
+
+    def _bone_world_transforms_once(self):
+        """Use Studio's exact transform math while memoizing each hierarchy node."""
+        compute = getattr(self.skin, "_compute_world_matrix_torch", None)
+        collect = getattr(self.skin, "_get_bone_world_transforms", None)
+        if compute is None or collect is None:
+            raise ValueError("Studio SkinnedMesh lacks the required world-transform contract.")
+        cache = {}
+
+        def memoized(obj, scene):
+            key = str(obj.id)
+            if key not in cache:
+                cache[key] = compute(obj, scene)
+            return cache[key]
+
+        had_override = "_compute_world_matrix_torch" in vars(self.skin)
+        previous_override = vars(self.skin).get("_compute_world_matrix_torch")
+        self.skin._compute_world_matrix_torch = memoized
         try:
-            self._sparse_skinning = (
-                "vertex_indices" in inspect.signature(
-                    self.skin.compute_skinned_vertices
-                ).parameters
-            )
-        except (TypeError, ValueError):
-            self._sparse_skinning = False
+            return collect()
+        finally:
+            if had_override:
+                self.skin._compute_world_matrix_torch = previous_override
+            else:
+                del self.skin._compute_world_matrix_torch
+
+    def _sparse_world_vertices(self):
+        """Apply Studio-equivalent linear blend skinning only to selected sites."""
+        skinning = self._bone_world_transforms_once() @ self._inverse_bind_matrices
+        vertices = torch.cat(
+            (self._base_vertices, torch.ones((len(self._base_vertices), 1), dtype=torch.float32)),
+            dim=1,
+        )
+        output = torch.zeros((len(vertices), 4), dtype=torch.float32)
+        for influence in range(4):
+            matrices = skinning[self._bone_indices[:, influence]]
+            transformed = torch.bmm(matrices, vertices.unsqueeze(-1)).squeeze(-1)
+            output += self._bone_weights[:, influence:influence + 1] * transformed
+        return output[:, :3]
 
     def positions(self, time_s):
         if not np.isfinite(time_s) or not 0 <= time_s <= self.duration:
@@ -178,16 +214,7 @@ class StudioSkinSampler:
             actual = getattr(component, track.field_name).detach().cpu().numpy()
             if expected is not None and not np.allclose(actual, expected, atol=2e-6, rtol=1e-6):
                 raise ValueError(f"Timeline did not apply {track.path} at {time_s}")
-        if self._sparse_skinning:
-            world = self.skin.compute_skinned_vertices(
-                in_local_space=False,
-                vertex_indices=self.vertex_ids,
-            ).detach().cpu().numpy()
-        else:
-            # Backward compatibility with Studio builds predating sparse skinning.
-            world = self.skin.compute_skinned_vertices(
-                in_local_space=False,
-            ).detach().cpu().numpy()[self.vertex_ids]
+        world = self._sparse_world_vertices().detach().cpu().numpy()
         if not np.isfinite(world).all():
             raise ValueError("Nonfinite Studio skin geometry")
         return world.astype(np.float64)

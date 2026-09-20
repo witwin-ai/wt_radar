@@ -171,23 +171,20 @@ def test_bone_rotation_velocity_is_not_rigid_root_translation(scene):
     np.testing.assert_allclose(v[1], 0., atol=3e-4)
 
 
-def test_sampler_uses_sparse_studio_skinning_when_available(scene):
+def test_sampler_sparse_skinning_matches_full_studio_result_without_full_mesh_call(scene):
     original, component = scene
     skin, _ = make_rig(original, component)
-    full_skinning = skin.compute_skinned_vertices
-    calls = []
-
-    def sparse_skinning(in_local_space=True, vertex_indices=None):
-        calls.append(None if vertex_indices is None else np.asarray(vertex_indices).copy())
-        result = full_skinning(in_local_space=in_local_space)
-        return result if vertex_indices is None else result[vertex_indices]
-
-    skin.compute_skinned_vertices = sparse_skinning
     sampler = StudioSkinSampler(original, "target")
+    original.timeline_manager.set_time(.5, apply_to_scene=True)
+    expected = skin.compute_skinned_vertices(in_local_space=False).detach().cpu().numpy()[sampler.vertex_ids]
+
+    def full_mesh_forbidden(*_args, **_kwargs):
+        raise AssertionError("WT Radar sparse sampling must not skin the full mesh")
+
+    skin.compute_skinned_vertices = full_mesh_forbidden
     sampled = sampler.positions(.5)
 
-    assert len(calls) == 1
-    np.testing.assert_array_equal(calls[0], sampler.vertex_ids)
+    np.testing.assert_allclose(sampled, expected, atol=1e-7, rtol=0)
     assert sampled.shape == (len(sampler.vertex_ids), 3)
 
 
