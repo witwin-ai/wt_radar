@@ -36,6 +36,7 @@ def main() -> int:
     parser.add_argument("project", type=Path)
     parser.add_argument("scene_id")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--target-site-budget", type=int)
     args = parser.parse_args()
 
     project = args.project.resolve()
@@ -68,6 +69,8 @@ def main() -> int:
     if len(radar_objects) != 1:
         raise RuntimeError(f"Expected exactly one Radar object, found {len(radar_objects)}")
     component = radar_objects[0].get_component("Radar")
+    if args.target_site_budget is not None:
+        component.target_site_budget = args.target_site_budget
     request = animation_request(component)
 
     started = time.monotonic()
@@ -94,6 +97,8 @@ def main() -> int:
         "nonzero_frames": int(np.count_nonzero(frame_nonzero)),
         "frame_count": int(cube.shape[0]),
         "active_site_count": int(topology.get("active_site_count", 0)),
+        "available_bone_site_count": int(result.metadata.get("available_bone_site_count", 0)),
+        "target_site_budget": int(result.metadata.get("target_site_budget", 0)),
         "target_multipath_enabled": bool(target.get("multipath_enabled")),
         "target_max_depth": int(target.get("max_depth", -1)),
         "target_motion_sampling": target.get("motion_sampling"),

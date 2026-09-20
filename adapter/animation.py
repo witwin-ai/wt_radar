@@ -55,7 +55,8 @@ def animation_request(component):
     request.update(adapter=MODEL, duration_s=float(component.animation_duration_s),
                    fps=float(component.animation_fps),
                    target_multipath=bool(component.target_multipath),
-                   target_motion_sampling=str(component.target_motion_sampling))
+                   target_motion_sampling=str(component.target_motion_sampling),
+                   target_site_budget=int(component.target_site_budget))
     fingerprint = str(getattr(component, "_agent_input_fingerprint", "") or "")
     if not fingerprint and getattr(component, "scene", None) is not None:
         # Component-button and Agent execution must publish the same immutable
@@ -97,6 +98,13 @@ def target_motion_sampling(request):
 def target_motion_policy(Motion, request):
     mode = target_motion_sampling(request)
     return Motion.adaptive() if mode == "adaptive" else Motion.chirp(rediscover_every_frames=1)
+
+
+def target_site_budget(request):
+    value = request.get("target_site_budget", 64)
+    if isinstance(value, (bool, np.bool_)) or int(value) != value or not 1 <= int(value) <= 64:
+        raise ValueError("target_site_budget must be an integer from 1 to 64.")
+    return int(value)
 
 
 def frame_times(request, component):
@@ -197,7 +205,11 @@ def prepare_animation(scene, request):
     if component is None:
         raise ValueError("Radar object no longer exists.")
     times = frame_times(request, component)
-    sampler = StudioSkinSampler(scene, str(component.snapshot_target_id).strip())
+    sampler = StudioSkinSampler(
+        scene,
+        str(component.snapshot_target_id).strip(),
+        site_budget=target_site_budget(request),
+    )
     from .replay import motion_fingerprint
     authored_motion_fingerprint = motion_fingerprint(scene)
     if str(sensor.id) in sampler.moving_ids:
@@ -572,6 +584,9 @@ def solve_animation(ctx, scene, request):
                 duration_s=float(request["duration_s"]),
                 declared_site_vertex_indices=sampler.vertex_ids.tolist(),
                 declared_site_bone_names=sampler.site_names,
+                available_bone_site_count=sampler.available_site_count,
+                target_site_budget=sampler.site_budget,
+                site_selection="bind_pose_farthest_point_coverage",
                 site_vertex_indices=sampler.vertex_ids[active_ranks].tolist(),
                 site_bone_names=[sampler.site_names[rank] for rank in active_ranks],
                 active_site_ids=list(active_site_ids),

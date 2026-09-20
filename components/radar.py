@@ -326,6 +326,16 @@ class RadarComponent(Component):
             "path topology is still rediscovered per Studio frame."
         ),
     )
+    target_site_budget = int_field(
+        64,
+        min=1,
+        max=64,
+        group=_ANIMATION,
+        description=(
+            "Maximum moving-target surface sites. Values below the available bone count "
+            "use deterministic bind-pose spatial coverage; 64 preserves all available sites."
+        ),
+    )
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,
                                       description="Recorded result frame. Does not seek or modify the editor timeline.")
     animation_status = string_field("Not run. Uses LOS target returns plus static one-bounce room background.",

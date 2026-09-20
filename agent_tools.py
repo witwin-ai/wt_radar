@@ -557,6 +557,7 @@ def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
             "motion_sampling": str(radar.motion_sampling),
             "target_multipath": bool(radar.target_multipath),
             "target_motion_sampling": str(radar.target_motion_sampling),
+            "target_site_budget": int(radar.target_site_budget),
         },
     })
     # SensorSpec is derived from the exact float32 world matrix consumed by
@@ -571,7 +572,7 @@ def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
     if radar is None:
         raise ValueError("Radar measurement fingerprint requires a Radar component.")
     payload = {
-        "schema": "witwin.radar.agent-input.v8",
+        "schema": "witwin.radar.agent-input.v9",
         "scene_fingerprint": _scene_input_fingerprint(scene),
         "scene_id": str(scene.scene_id),
         "radar_object_id": str(obj.id),
@@ -581,6 +582,7 @@ def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
                 "components": ["los"] + (["reflection"] if radar.target_multipath else []),
                 "max_depth": 1 if radar.target_multipath else 0,
                 "motion_sampling": str(radar.target_motion_sampling),
+                "site_budget": int(radar.target_site_budget),
             },
             "environment": {"components": ["reflection"], "max_depth": 1},
             "device": "cuda",
@@ -737,6 +739,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "view": str(radar.view),
             "target_multipath": bool(radar.target_multipath),
             "target_motion_sampling": str(radar.target_motion_sampling),
+            "target_site_budget": int(radar.target_site_budget),
         },
         "result": {
             "running": bool(getattr(radar, "_snapshot_running", False)),
@@ -757,6 +760,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "target_multipath": bool(radar.target_multipath),
             "target_max_depth": 1 if radar.target_multipath else 0,
             "target_motion_sampling": str(radar.target_motion_sampling),
+            "target_site_budget": int(radar.target_site_budget),
             "target_model": (
                 "interval-visible stable skinned surface sites; uncalibrated equal-RCS "
                 "shares are based on all declared sites and are not renormalized"
@@ -810,6 +814,7 @@ def _sensor_configuration_state(obj: Any) -> dict[str, Any]:
         "fps": float(radar.animation_fps),
         "target_multipath": bool(radar.target_multipath),
         "target_motion_sampling": str(radar.target_motion_sampling),
+        "target_site_budget": int(radar.target_site_budget),
         "fov_deg": float(radar.fov),
         "position_m": _jsonable(transform.position),
         "rotation_rad": _jsonable(transform.rotation),
@@ -824,6 +829,8 @@ def _configuration_matches(current: dict[str, Any], expected: dict[str, Any]) ->
     if str(current.get("target_motion_sampling") or "chirp") != str(
         expected.get("target_motion_sampling") or "chirp"
     ):
+        return False
+    if int(current.get("target_site_budget", 64)) != int(expected.get("target_site_budget", 64)):
         return False
     for key in ("start_s", "duration_s", "fps", "fov_deg"):
         if not math.isclose(float(current.get(key, math.nan)), float(expected.get(key, math.nan)), abs_tol=1e-9):
@@ -1501,6 +1508,13 @@ def register(ctx: Any) -> None:
                     "default": "chirp",
                     "description": "Use measured-default chirp sampling, or official error-controlled adaptive probes for comparison.",
                 },
+                "target_site_budget": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 64,
+                    "default": 64,
+                    "description": "Maximum moving-target surface sites; lower values trade spatial detail for speed.",
+                },
                 "distance_m": {
                     "type": "number", "minimum": 0.25, "maximum": 10,
                     "description": "Requested world-space distance from the animated target, for automatic placement only.",
@@ -1579,6 +1593,7 @@ def register(ctx: Any) -> None:
             "height_m": float(args.get("height_m", 1.0)),
             "target_multipath": bool(args.get("target_multipath", False)),
             "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
+            "target_site_budget": int(args.get("target_site_budget", 64)),
         }
 
         automatic_interval = None
@@ -1698,6 +1713,13 @@ def register(ctx: Any) -> None:
                     "enum": ["chirp", "adaptive"],
                     "default": "chirp",
                     "description": "Chirp-by-chirp target motion by default, or official Radar 0.4 adaptive probes.",
+                },
+                "target_site_budget": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 64,
+                    "default": 64,
+                    "description": "Maximum moving-target surface sites selected with spatial coverage.",
                 },
                 "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
                 "reuse_existing": {"type": "boolean", "default": True},
@@ -1848,6 +1870,7 @@ def register(ctx: Any) -> None:
             "animation_fps": radar.animation_fps,
             "target_multipath": radar.target_multipath,
             "target_motion_sampling": radar.target_motion_sampling,
+            "target_site_budget": radar.target_site_budget,
             "fov": radar.fov,
             "view": radar.view,
             "static_clutter_removal": radar.static_clutter_removal,
@@ -1862,6 +1885,7 @@ def register(ctx: Any) -> None:
             radar.animation_fps = float(args.get("fps", 10.0))
             radar.target_multipath = bool(args.get("target_multipath", False))
             radar.target_motion_sampling = str(args.get("target_motion_sampling") or "chirp")
+            radar.target_site_budget = int(args.get("target_site_budget", 64))
             radar.fov = float(args.get("fov_deg", 60.0))
             # The existing animation adapter requires these review controls.
             radar.view = "range_doppler"
@@ -1875,7 +1899,7 @@ def register(ctx: Any) -> None:
             else:
                 for key in (
                     "snapshot_target_id", "t0", "animation_duration_s", "animation_fps",
-                    "target_multipath", "target_motion_sampling",
+                    "target_multipath", "target_motion_sampling", "target_site_budget",
                     "fov", "view", "static_clutter_removal", "show_cfar",
                 ):
                     setattr(radar, key, previous[key])

@@ -20,6 +20,11 @@ official Radar 0.4 error-controlled **Adaptive** policy remains available for
 comparison, but is not assumed to outperform chirp sampling. Path topology is
 still rediscovered at Studio-frame boundaries.
 
+**Target Site Budget** caps the one-surface-site-per-influenced-bone model at
+1..64 sites. The default 64 preserves every available site (44 for the current
+cat); lower budgets use deterministic bind-pose spatial coverage and keep the
+declared total target RCS constant.
+
 ## Supported physical model
 
 The multi-frame animation path combines two coherent contributions:

@@ -53,11 +53,23 @@ def test_animation_request_carries_explicit_target_physics(scene):
 
     assert animation_request(component)["target_multipath"] is False
     assert animation_request(component)["target_motion_sampling"] == "chirp"
+    assert animation_request(component)["target_site_budget"] == 64
     component.target_multipath = True
     component.target_motion_sampling = "chirp"
     request = animation_request(component)
     assert request["target_multipath"] is True
     assert request["target_motion_sampling"] == "chirp"
+
+
+def test_sampler_site_budget_uses_stable_spatial_coverage(scene):
+    original, component = scene
+    make_rig(original, component)
+
+    sampler = StudioSkinSampler(original, "target", site_budget=1)
+
+    assert sampler.available_site_count == 2
+    assert sampler.site_budget == 1
+    assert len(sampler.vertex_ids) == len(sampler.site_names) == 1
 
 
 def add_track(scene, oid, field, keys):

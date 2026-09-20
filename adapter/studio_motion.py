@@ -11,8 +11,33 @@ import numpy as np
 from .snapshot import _hierarchy
 
 
+def spatially_spread_ranks(points, count):
+    """Select a deterministic, spatially spread subset of bind-pose sites."""
+    points = np.asarray(points, dtype=np.float64)
+    count = int(count)
+    if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():
+        raise ValueError("Site selection requires finite Nx3 bind-pose points.")
+    if not 1 <= count <= len(points):
+        raise ValueError("Site selection count must be within the available point count.")
+    if count == len(points):
+        return np.arange(len(points), dtype=np.int64)
+    center = points.mean(axis=0)
+    selected = [int(np.argmin(np.sum((points - center) ** 2, axis=1)))]
+    nearest_distance = np.sum((points - points[selected[0]]) ** 2, axis=1)
+    while len(selected) < count:
+        candidates = nearest_distance.copy()
+        candidates[selected] = -np.inf
+        rank = int(np.argmax(candidates))
+        selected.append(rank)
+        nearest_distance = np.minimum(
+            nearest_distance,
+            np.sum((points - points[rank]) ** 2, axis=1),
+        )
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
 class StudioSkinSampler:
-    def __init__(self, scene, target_id):
+    def __init__(self, scene, target_id, *, site_budget=64):
         self.scene = scene
         self.target = scene.get_object(target_id)
         self.skin = self.target.get_component("SkinnedMesh") if self.target else None
@@ -84,6 +109,13 @@ class StudioSkinSampler:
                 names.append(str(scene.get_object(oid).name))
         if not 1 <= len(chosen) <= 64:
             raise ValueError("Animation supports 1..64 influenced-bone surface sites.")
+        if isinstance(site_budget, (bool, np.bool_)) or not 1 <= int(site_budget) <= 64:
+            raise ValueError("Target site budget must be an integer from 1 to 64.")
+        self.available_site_count = len(chosen)
+        self.site_budget = int(site_budget)
+        ranks = spatially_spread_ranks(vertices[np.asarray(chosen)], min(self.site_budget, len(chosen)))
+        chosen = [chosen[rank] for rank in ranks]
+        names = [names[rank] for rank in ranks]
         self.vertex_ids, self.site_names = np.asarray(chosen), names
         try:
             self._sparse_skinning = (
