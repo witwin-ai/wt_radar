@@ -1,5 +1,9 @@
 """Current UI hides unavailable actions without changing old project data."""
+from types import SimpleNamespace
+
+from witwin_server import Scene
 from wt_radar.components.radar import RadarComponent
+from wt_radar.library_items import _make_demo
 
 
 def test_current_controls_keep_simulation_replay_and_export():
@@ -42,3 +46,10 @@ def test_old_stream_and_timeline_settings_round_trip_without_ui_controls():
     assert restored.frame_rate == 24.0
     # Presentation does not mutate the class metadata used by other instances.
     assert RadarComponent._fields_meta["enable_thermal"].group == "Noise"
+
+
+def test_library_demo_selects_its_radar04_snapshot_target():
+    scene = Scene(scene_id="radar-demo", name="Radar demo")
+    settings = _make_demo(SimpleNamespace(scene=scene, name="Radar Settings"))
+    target_id = settings.get_component("Radar").snapshot_target_id
+    assert scene.get_object(target_id).name == "Radar Target"
