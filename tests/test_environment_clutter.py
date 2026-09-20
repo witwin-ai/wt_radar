@@ -1,5 +1,54 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
+
+
+def test_direct_environment_composer_is_owned_by_wt_radar():
+    from wt_radar.adapter.direct_environment import DirectEnvironmentComposer
+
+    assert DirectEnvironmentComposer.__module__ == "wt_radar.adapter.direct_environment"
+
+
+def test_environment_adapter_does_not_require_radar_direct_composer():
+    import inspect
+    from wt_radar.adapter import environment_clutter
+
+    source = inspect.getsource(environment_clutter)
+    assert "witwin.radar.paths import DirectComposer" not in source
+    assert "RadarComponentIndex.from_direct" not in source
+
+
+def test_local_composer_orders_channel_rows_by_radar_sensor_pair():
+    from wt_radar.adapter.direct_environment import DirectEnvironmentComposer
+
+    frozen = SimpleNamespace(
+        source_id=torch.tensor([11, 10, 11, 10], dtype=torch.int64),
+        sink_id=torch.tensor([21, 20, 20, 21], dtype=torch.int64),
+        component_id=torch.tensor([1, 1, 1, 1], dtype=torch.int64),
+        depth=torch.tensor([1, 1, 1, 1], dtype=torch.int64),
+        primitive_sequence=torch.tensor([[4], [1], [2], [3]], dtype=torch.int64),
+        material_sequence=torch.tensor([[0], [0], [0], [0]], dtype=torch.int64),
+    )
+    live = SimpleNamespace(
+        delay_s=torch.tensor([4.0, 1.0, 2.0, 3.0], dtype=torch.float32),
+        coefficient=torch.tensor([4j, 1j, 2j, 3j], dtype=torch.complex64),
+        row_valid=torch.tensor([True, True, False, True]),
+    )
+    composer = DirectEnvironmentComposer.freeze(
+        frozen,
+        radar_source_ids=(10, 11),
+        radar_sink_ids=(20, 21),
+        reference_frequency_hz=77e9,
+    )
+    paths = composer.compose(live)
+
+    assert composer.site_count == 0
+    assert composer.row_index.tolist() == [1, 2, 3, 0]
+    assert paths.sensor_pair_index.tolist() == [0, 1, 2, 3]
+    assert paths.pair_offsets.tolist() == [0, 1, 2, 3, 4]
+    assert paths.total_delay_s.tolist() == [1.0, 2.0, 3.0, 4.0]
+    assert paths.row_valid.tolist() == [True, False, True, True]
 
 
 def _wall_scene():

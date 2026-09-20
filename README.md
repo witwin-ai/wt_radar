@@ -85,9 +85,11 @@ right-hand at knots), not a second motion interpolation. Native per-CPI synthesi
 uses frozen weights with first-order carrier rate, not arbitrary within-CPI
 acceleration. Static room occlusion and one native specular room reflection are
 enabled; diffuse clutter, additional room bounces and target self-occlusion are
-not included.
+not included. The direct environment-path composer is owned by this Studio
+plugin; unmodified official `witwin-radar` 0.4 and `witwin-channel` packages own
+waveform synthesis and propagation respectively.
 
-**Native topology boundary:** Radar 0.3 requires every site submitted for a
+**Native topology boundary:** Radar 0.4 requires every site submitted for a
 frame to have discovered inbound and outbound legs. Before waveform synthesis,
 this interface therefore uses native Channel discovery over the exact requested
 frame grid and takes the intersection of reachable stable site IDs. It never
@@ -100,10 +102,10 @@ measurement-interface policy, not a change to Channel propagation or Radar DSP.
 Focused tests:
 `python -m pytest -q tests/test_snapshot.py tests/test_saved_result.py tests/test_animation.py tests/test_animation_component.py`
 
-## Radar 0.3 Studio snapshot milestone
+## Radar 0.4 Studio snapshot milestone
 
 **Simulate** now submits the current Studio scene through the existing solver
-worker to native Radar 0.3 / Channel 0.5. Select an existing **Snapshot Target ID**,
+worker to native Radar 0.4 / Channel. Select an existing **Snapshot Target ID**,
 explicit local point, assumed scalar RCS, and snapshot timeline time. Pause playback
 and recording first. The solver samples a copy, never the editor scene.
 

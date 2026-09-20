@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import torch
 
+from .direct_environment import DirectEnvironmentComposer
+
 
 SINGLE_BOUNCE_COMPONENTS = frozenset({"reflection"})
 
@@ -59,19 +61,9 @@ def single_bounce_environment_cube(radar, world, *, polarization):
     exported material.
     """
     from witwin.radar.channel import ChannelPropagationAdapter, compile_scene
-    from witwin.radar.paths import (
-        ENVIRONMENT_CLUTTER,
-        ComponentDeclaration,
-        DirectComposer,
-        RadarComponentIndex,
-    )
     from witwin.radar.sensors import RoundTripPatternStage
     from witwin.radar.simulation import ScatterSitePolicy, bind_radar_world
-    from witwin.radar.synthesis import (
-        SlowTimeMode,
-        SynthesisPathBatch,
-        select_component,
-    )
+    from witwin.radar.synthesis import SlowTimeMode, SynthesisPathBatch
     from witwin.radar.synthesis.assembly import assemble_frame_cube
     from witwin.radar.synthesis.fmcw import synthesize_fmcw
 
@@ -97,7 +89,7 @@ def single_bounce_environment_cube(radar, world, *, polarization):
         max_depth=1,
     )
     frozen = adapter.freeze(binding.transmitters, binding.receivers)
-    composer = DirectComposer.freeze(
+    composer = DirectEnvironmentComposer.freeze(
         frozen,
         radar_source_ids=binding.transmitter_ids,
         radar_sink_ids=binding.receiver_ids,
@@ -113,12 +105,9 @@ def single_bounce_environment_cube(radar, world, *, polarization):
     paths = composer.compose(leg)
 
     material_slot_count = len(compiled.materials.material_keys)
-    declaration = ComponentDeclaration(
-        clutter_material_slots=frozenset(range(material_slot_count)),
-        multi_interaction_depth=1,
-    )
-    index = RadarComponentIndex.from_direct(composer, frozen, declaration)
-    reflected_path_count = index.count(ENVIRONMENT_CLUTTER)
+    # The Channel query is reflection-only and depth-one, so every returned row
+    # is an environment reflection. No Radar-side component classifier is needed.
+    reflected_path_count = paths.path_count
     stage = RoundTripPatternStage.freeze(
         radar,
         composer,
@@ -140,8 +129,7 @@ def single_bounce_environment_cube(radar, world, *, polarization):
     )
 
     mode = SlowTimeMode.FROZEN_WEIGHT_WITH_CARRIER_RATE
-    synthesis_paths = SynthesisPathBatch.from_radar_paths(paths, slow_time_mode=mode)
-    clutter_paths = select_component(synthesis_paths, index, ENVIRONMENT_CLUTTER)
+    clutter_paths = SynthesisPathBatch.from_radar_paths(paths, slow_time_mode=mode)
     synthesis_cube = synthesize_fmcw(
         clutter_paths,
         radar.system_config.waveform_spec(),
