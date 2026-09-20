@@ -375,38 +375,12 @@ def solve(ctx, scene, config):
     from wt_radar.adapter.snapshot import MODEL, solve_snapshot
     if config.get("adapter") == MODEL:
         return solve_snapshot(ctx, scene, config)
-    sensor = _sensor(config)
-    tracer = _tracer(config)
-    t0 = float(config.get("t0") or 0.0)
-    live = dict(config.get("live") or {})
-    live_session_id = str(live.get("session_id") or "")
-    live_signature = str(live.get("signature") or "")
-    scene_payload_signature = str(live.get("scene_payload_signature") or "")
-    live_cache = None
-    if live_session_id and live_signature:
-        live_cache = _LIVE_CACHES.setdefault(live_session_id, {})
-        if len(_LIVE_CACHES) > _MAX_LIVE_CACHES:
-            for session_id in list(_LIVE_CACHES)[:-_MAX_LIVE_CACHES]:
-                _LIVE_CACHES.pop(session_id, None)
-    ctx.log(
-        "Radar solver: solve received "
-        f"backend={sensor.backend} device={sensor.device} t0={t0:.6f} "
-        f"live_cache={'on' if live_cache is not None else 'off'}"
+    adapter = str(config.get("adapter") or "<missing>")
+    raise RuntimeError(
+        f"Unsupported Radar solver adapter {adapter!r}. "
+        "The legacy Radar 0.3 Scene/RadarConfig/trace path has been removed; "
+        "submit an explicit Radar 0.4 snapshot or animation request."
     )
-    ctx.progress(0.0, "building Radar scene")
-    result = SolveRunner.run(
-        scene,
-        sensor=sensor,
-        tracer=tracer,
-        motion_sampling=str(config.get("motion_sampling") or "per_chirp"),
-        t0=t0,
-        live_cache=live_cache,
-        cache_key=live_signature or None,
-        platform_cache_key=scene_payload_signature or None,
-    )
-    ctx.log(f"Radar solver: solve complete signal_shape={tuple(result.signal.shape)}")
-    ctx.progress(1.0, "Radar solve complete")
-    return result
 
 
 @query("raw_signal")
