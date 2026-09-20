@@ -22,7 +22,7 @@ def available_memory_bytes():
 def require_result_memory(size):
     if size > MAX_RESULT_BYTES:
         raise ValueError("Animation exceeds 1536 MiB raw-cube budget; no settings changed.")
-    # Leave room for native scratch, processing and compressed export. The cube
+    # Leave room for native scratch, processing and the in-memory NPZ export. The cube
     # is preallocated once, not retained as a list plus a second stacked copy.
     needed = max(512 * 1024**2, 3 * size)
     if available_memory_bytes() < needed:

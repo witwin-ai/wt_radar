@@ -724,10 +724,10 @@ def export_animation(ctx, result):
     for key in ("range_m", "velocity_mps"):
         axes[key] = axes[key].tolist()
     stream = io.BytesIO()
-    np.savez_compressed(stream, cube=result.cube.numpy(), times_s=result.times_s,
-                        positions_m=result.positions_m, velocities_mps=result.velocities_mps,
-                        result_schema_version=np.asarray(1), processing_axes_json=json.dumps(axes),
-                        producer_metadata_json=json.dumps(result.metadata, allow_nan=False))
+    np.savez(stream, cube=result.cube.numpy(), times_s=result.times_s,
+             positions_m=result.positions_m, velocities_mps=result.velocities_mps,
+             result_schema_version=np.asarray(1), processing_axes_json=json.dumps(axes),
+             producer_metadata_json=json.dumps(result.metadata, allow_nan=False))
     return ctx.result_ref(stream.getvalue(), kind="radar.animation", extension=".npz",
                           metadata={"frameCount": len(result.times_s), "model": MODEL})
 

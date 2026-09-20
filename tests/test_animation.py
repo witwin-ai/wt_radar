@@ -1,5 +1,6 @@
 """Small real-Studio/native-Radar contracts; no offline experiment dependency."""
 from types import SimpleNamespace
+import zipfile
 
 import numpy as np
 import pytest
@@ -524,6 +525,8 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
         return str(path)
 
     assert export_animation(SimpleNamespace(result_ref=save_result), result) == str(path)
+    with zipfile.ZipFile(path) as archive:
+        assert {entry.compress_type for entry in archive.infolist()} == {zipfile.ZIP_STORED}
     loaded = SavedRadarResult.load(path)
     assert torch.equal(loaded.cube, result.cube)
     np.testing.assert_array_equal(loaded.times_s, result.times_s)
