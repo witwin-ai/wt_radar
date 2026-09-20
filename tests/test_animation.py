@@ -52,7 +52,7 @@ def test_animation_request_carries_explicit_target_physics(scene):
     make_rig(original, component)
 
     assert animation_request(component)["target_multipath"] is False
-    assert animation_request(component)["target_motion_sampling"] == "adaptive"
+    assert animation_request(component)["target_motion_sampling"] == "chirp"
     component.target_multipath = True
     component.target_motion_sampling = "chirp"
     request = animation_request(component)
@@ -480,7 +480,7 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
     assert result.metadata["max_depth"] == 1
     assert result.metadata["target_propagation"] == {
         "components": ["los"], "max_depth": 0, "multipath_enabled": False,
-        "motion_sampling": "adaptive",
+        "motion_sampling": "chirp",
     }
     environment = result.metadata["environment_reflection"]
     assert environment["model"] == "radar04_native_single_bounce"

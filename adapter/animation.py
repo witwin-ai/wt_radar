@@ -86,7 +86,7 @@ def target_reflection_depth(request):
 
 def target_motion_sampling(request):
     """Return the explicit Radar 0.4 intra-frame target motion policy."""
-    value = str(request.get("target_motion_sampling", "adaptive"))
+    value = str(request.get("target_motion_sampling", "chirp"))
     if value not in TARGET_MOTION_SAMPLING:
         raise ValueError(
             f"target_motion_sampling must be one of {sorted(TARGET_MOTION_SAMPLING)}, got {value!r}."
@@ -120,7 +120,7 @@ def frame_times(request, component):
 def solve_native_frame(
     radar, world, rcs_m2, time_s, positions, velocities, polarization,
     *, stable_site_ids=None, environment_cube=None, target_reflections=0,
-    target_motion_sampling_mode="adaptive",
+    target_motion_sampling_mode="chirp",
 ):
     """Simulate one Studio frame through Radar 0.4's public moving-target API."""
     from witwin.radar import Motion, PointTargets

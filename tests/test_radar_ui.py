@@ -26,7 +26,7 @@ def test_current_controls_keep_simulation_replay_and_export():
         assert fields["target_multipath"]["group"] == "StudioAnimation"
         assert RadarComponent().target_multipath is False
         assert fields["target_motion_sampling"]["group"] == "StudioAnimation"
-        assert RadarComponent().target_motion_sampling == "adaptive"
+        assert RadarComponent().target_motion_sampling == "chirp"
 
 
 def test_old_stream_and_timeline_settings_round_trip_without_ui_controls():

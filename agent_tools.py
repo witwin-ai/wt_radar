@@ -821,8 +821,8 @@ def _configuration_matches(current: dict[str, Any], expected: dict[str, Any]) ->
         return False
     if bool(current.get("target_multipath", False)) != bool(expected.get("target_multipath", False)):
         return False
-    if str(current.get("target_motion_sampling") or "adaptive") != str(
-        expected.get("target_motion_sampling") or "adaptive"
+    if str(current.get("target_motion_sampling") or "chirp") != str(
+        expected.get("target_motion_sampling") or "chirp"
     ):
         return False
     for key in ("start_s", "duration_s", "fps", "fov_deg"):
@@ -1497,9 +1497,9 @@ def register(ctx: Any) -> None:
                 },
                 "target_motion_sampling": {
                     "type": "string",
-                    "enum": ["adaptive", "chirp"],
-                    "default": "adaptive",
-                    "description": "Use official adaptive probes normally, or every TX chirp for the motion-sampling reference.",
+                    "enum": ["chirp", "adaptive"],
+                    "default": "chirp",
+                    "description": "Use measured-default chirp sampling, or official error-controlled adaptive probes for comparison.",
                 },
                 "distance_m": {
                     "type": "number", "minimum": 0.25, "maximum": 10,
@@ -1578,7 +1578,7 @@ def register(ctx: Any) -> None:
             "placement_objective": str(args.get("placement_objective") or "balanced"),
             "height_m": float(args.get("height_m", 1.0)),
             "target_multipath": bool(args.get("target_multipath", False)),
-            "target_motion_sampling": str(args.get("target_motion_sampling") or "adaptive"),
+            "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
         }
 
         automatic_interval = None
@@ -1695,9 +1695,9 @@ def register(ctx: Any) -> None:
                 },
                 "target_motion_sampling": {
                     "type": "string",
-                    "enum": ["adaptive", "chirp"],
-                    "default": "adaptive",
-                    "description": "Official Radar 0.4 adaptive probes or chirp-by-chirp target motion.",
+                    "enum": ["chirp", "adaptive"],
+                    "default": "chirp",
+                    "description": "Chirp-by-chirp target motion by default, or official Radar 0.4 adaptive probes.",
                 },
                 "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
                 "reuse_existing": {"type": "boolean", "default": True},
@@ -1861,7 +1861,7 @@ def register(ctx: Any) -> None:
             radar.animation_duration_s = float(args.get("duration_s", 5.0))
             radar.animation_fps = float(args.get("fps", 10.0))
             radar.target_multipath = bool(args.get("target_multipath", False))
-            radar.target_motion_sampling = str(args.get("target_motion_sampling") or "adaptive")
+            radar.target_motion_sampling = str(args.get("target_motion_sampling") or "chirp")
             radar.fov = float(args.get("fov_deg", 60.0))
             # The existing animation adapter requires these review controls.
             radar.view = "range_doppler"

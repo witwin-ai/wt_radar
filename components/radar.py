@@ -316,13 +316,13 @@ class RadarComponent(Component):
         ),
     )
     target_motion_sampling = string_field(
-        "adaptive",
-        options=["adaptive", "chirp"],
+        "chirp",
+        options=["chirp", "adaptive"],
         enum_toggle=True,
         group=_ANIMATION,
         description=(
-            "Adaptive uses official error-controlled FMCW probes for normal Studio runs. "
-            "Chirp evaluates every TX chirp as the slower motion-sampling reference; "
+            "Chirp evaluates every TX chirp and is the measured default for Studio runs. "
+            "Adaptive uses official error-controlled FMCW probes for comparison; "
             "path topology is still rediscovered per Studio frame."
         ),
     )
@@ -694,7 +694,7 @@ class RadarComponent(Component):
                     "LOS plus target multipath" if request.get("target_multipath", False)
                     else "LOS-only target"
                 )
-                target_motion_label = f"{request.get('target_motion_sampling', 'adaptive')} motion sampling"
+                target_motion_label = f"{request.get('target_motion_sampling', 'chirp')} motion sampling"
                 self.animation_status = (
                     f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
                     f"{request['fps']:g} FPS. Uncalibrated skin sites; {target_path_label}; "
