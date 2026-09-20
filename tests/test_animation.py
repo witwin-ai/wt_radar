@@ -16,7 +16,7 @@ from wt_radar.adapter.animation import (
 )
 from wt_radar.adapter.saved_result import SavedRadarResult
 from wt_radar.adapter.snapshot import prepare_snapshot, snapshot_request
-from wt_radar.adapter.studio_motion import StudioSkinSampler
+from wt_radar.adapter.studio_motion import StudioSkinSampler, anatomically_prioritized_ranks
 
 
 class AnimationContext(Context):
@@ -53,7 +53,7 @@ def test_animation_request_carries_explicit_target_physics(scene):
 
     assert animation_request(component)["target_multipath"] is False
     assert animation_request(component)["target_motion_sampling"] == "chirp"
-    assert animation_request(component)["target_site_budget"] == 64
+    assert animation_request(component)["target_site_budget"] == 24
     component.target_multipath = True
     component.target_motion_sampling = "chirp"
     request = animation_request(component)
@@ -70,6 +70,24 @@ def test_sampler_site_budget_uses_stable_spatial_coverage(scene):
     assert sampler.available_site_count == 2
     assert sampler.site_budget == 1
     assert len(sampler.vertex_ids) == len(sampler.site_names) == 1
+
+
+def test_anatomical_budget_prefers_major_cat_motion_sites():
+    core = ["spine_01", "spine_02", "spine_03", "spine_04", "spine_05", "neck", "head"]
+    limbs = [
+        f"{part}.{side}"
+        for side in ("L", "R")
+        for part in ("shoulder_blade", "hip_f", "leg_f", "foot_f", "hip_b", "leg_b", "foot_b")
+    ]
+    tail = [f"tail_0{index}" for index in range(1, 6)]
+    cosmetic = ["mouth", "tongue_01", "eye.L", "eyelid.R", "mustache.L", "ear_1.R", "claw_f.L"]
+    names = core + limbs + tail + cosmetic
+    points = np.arange(len(names) * 3, dtype=np.float64).reshape(-1, 3)
+
+    ranks = anatomically_prioritized_ranks(points, names, 24)
+    selected = {names[rank] for rank in ranks}
+
+    assert selected == {*core, *limbs, "tail_01", "tail_03", "tail_05"}
 
 
 def add_track(scene, oid, field, keys):

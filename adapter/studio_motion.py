@@ -5,6 +5,7 @@ Differences stay inside a LINEAR key interval, with a right-hand derivative at
 knots. The step (at most 1 ms) and approximation are reported, not RF algorithms.
 """
 import inspect
+import re
 
 import numpy as np
 
@@ -33,6 +34,43 @@ def spatially_spread_ranks(points, count):
             nearest_distance,
             np.sum((points - points[rank]) ** 2, axis=1),
         )
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
+def anatomical_site_priority(name):
+    """Rank useful articulated-body sites above cosmetic micro-bones."""
+    name = str(name).casefold()
+    if any(token in name for token in ("mouth", "tongue", "mustache", "eyelid", "eye", "claw", "ear")):
+        return 0
+    if any(token in name for token in ("head", "neck", "spine")):
+        return 100
+    if any(token in name for token in ("shoulder", "hip", "leg", "foot")):
+        return 90
+    if "tail" in name:
+        numbers = re.findall(r"\d+", name)
+        segment = int(numbers[-1]) if numbers else 1
+        return 80 if segment % 2 else 60
+    return 70
+
+
+def anatomically_prioritized_ranks(points, names, count):
+    """Select semantic priority tiers, using spatial coverage to break ties."""
+    points = np.asarray(points, dtype=np.float64)
+    if len(points) != len(names):
+        raise ValueError("Site names and bind-pose points must have equal length.")
+    count = min(int(count), len(points))
+    priorities = np.asarray([anatomical_site_priority(name) for name in names])
+    selected = []
+    for priority in sorted(set(priorities.tolist()), reverse=True):
+        tier = np.flatnonzero(priorities == priority)
+        remaining = count - len(selected)
+        if remaining <= 0:
+            break
+        if len(tier) <= remaining:
+            selected.extend(tier.tolist())
+        else:
+            local = spatially_spread_ranks(points[tier], remaining)
+            selected.extend(tier[local].tolist())
     return np.asarray(sorted(selected), dtype=np.int64)
 
 
@@ -113,7 +151,9 @@ class StudioSkinSampler:
             raise ValueError("Target site budget must be an integer from 1 to 64.")
         self.available_site_count = len(chosen)
         self.site_budget = int(site_budget)
-        ranks = spatially_spread_ranks(vertices[np.asarray(chosen)], min(self.site_budget, len(chosen)))
+        ranks = anatomically_prioritized_ranks(
+            vertices[np.asarray(chosen)], names, min(self.site_budget, len(chosen)),
+        )
         chosen = [chosen[rank] for rank in ranks]
         names = [names[rank] for rank in ranks]
         self.vertex_ids, self.site_names = np.asarray(chosen), names

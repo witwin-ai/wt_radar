@@ -101,7 +101,7 @@ def target_motion_policy(Motion, request):
 
 
 def target_site_budget(request):
-    value = request.get("target_site_budget", 64)
+    value = request.get("target_site_budget", 24)
     if isinstance(value, (bool, np.bool_)) or int(value) != value or not 1 <= int(value) <= 64:
         raise ValueError("target_site_budget must be an integer from 1 to 64.")
     return int(value)
@@ -586,7 +586,7 @@ def solve_animation(ctx, scene, request):
                 declared_site_bone_names=sampler.site_names,
                 available_bone_site_count=sampler.available_site_count,
                 target_site_budget=sampler.site_budget,
-                site_selection="bind_pose_farthest_point_coverage",
+                site_selection="anatomical_priority_then_bind_pose_coverage",
                 site_vertex_indices=sampler.vertex_ids[active_ranks].tolist(),
                 site_bone_names=[sampler.site_names[rank] for rank in active_ranks],
                 active_site_ids=list(active_site_ids),

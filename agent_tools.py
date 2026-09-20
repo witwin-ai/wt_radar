@@ -572,7 +572,7 @@ def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
     if radar is None:
         raise ValueError("Radar measurement fingerprint requires a Radar component.")
     payload = {
-        "schema": "witwin.radar.agent-input.v9",
+        "schema": "witwin.radar.agent-input.v10",
         "scene_fingerprint": _scene_input_fingerprint(scene),
         "scene_id": str(scene.scene_id),
         "radar_object_id": str(obj.id),
@@ -830,7 +830,7 @@ def _configuration_matches(current: dict[str, Any], expected: dict[str, Any]) ->
         expected.get("target_motion_sampling") or "chirp"
     ):
         return False
-    if int(current.get("target_site_budget", 64)) != int(expected.get("target_site_budget", 64)):
+    if int(current.get("target_site_budget", 24)) != int(expected.get("target_site_budget", 24)):
         return False
     for key in ("start_s", "duration_s", "fps", "fov_deg"):
         if not math.isclose(float(current.get(key, math.nan)), float(expected.get(key, math.nan)), abs_tol=1e-9):
@@ -1512,8 +1512,8 @@ def register(ctx: Any) -> None:
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 64,
-                    "default": 64,
-                    "description": "Maximum moving-target surface sites; lower values trade spatial detail for speed.",
+                    "default": 24,
+                    "description": "Maximum anatomically prioritized moving-target surface sites.",
                 },
                 "distance_m": {
                     "type": "number", "minimum": 0.25, "maximum": 10,
@@ -1593,7 +1593,7 @@ def register(ctx: Any) -> None:
             "height_m": float(args.get("height_m", 1.0)),
             "target_multipath": bool(args.get("target_multipath", False)),
             "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
-            "target_site_budget": int(args.get("target_site_budget", 64)),
+            "target_site_budget": int(args.get("target_site_budget", 24)),
         }
 
         automatic_interval = None
@@ -1718,8 +1718,8 @@ def register(ctx: Any) -> None:
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 64,
-                    "default": 64,
-                    "description": "Maximum moving-target surface sites selected with spatial coverage.",
+                    "default": 24,
+                    "description": "Maximum moving-target surface sites selected by anatomical priority then spatial coverage.",
                 },
                 "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
                 "reuse_existing": {"type": "boolean", "default": True},
@@ -1885,7 +1885,7 @@ def register(ctx: Any) -> None:
             radar.animation_fps = float(args.get("fps", 10.0))
             radar.target_multipath = bool(args.get("target_multipath", False))
             radar.target_motion_sampling = str(args.get("target_motion_sampling") or "chirp")
-            radar.target_site_budget = int(args.get("target_site_budget", 64))
+            radar.target_site_budget = int(args.get("target_site_budget", 24))
             radar.fov = float(args.get("fov_deg", 60.0))
             # The existing animation adapter requires these review controls.
             radar.view = "range_doppler"

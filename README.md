@@ -21,9 +21,9 @@ comparison, but is not assumed to outperform chirp sampling. Path topology is
 still rediscovered at Studio-frame boundaries.
 
 **Target Site Budget** caps the one-surface-site-per-influenced-bone model at
-1..64 sites. The default 64 preserves every available site (44 for the current
-cat); lower budgets use deterministic bind-pose spatial coverage and keep the
-declared total target RCS constant.
+1..64 sites. The default 24 prioritizes head, neck, spine, shoulders, major leg
+and foot joints, plus representative tail segments; cosmetic face, ear and claw
+micro-bones rank last. The declared total target RCS remains constant.
 
 ## Supported physical model
 

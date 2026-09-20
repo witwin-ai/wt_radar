@@ -28,7 +28,7 @@ def test_current_controls_keep_simulation_replay_and_export():
         assert fields["target_motion_sampling"]["group"] == "StudioAnimation"
         assert RadarComponent().target_motion_sampling == "chirp"
         assert fields["target_site_budget"]["group"] == "StudioAnimation"
-        assert RadarComponent().target_site_budget == 64
+        assert RadarComponent().target_site_budget == 24
 
 
 def test_old_stream_and_timeline_settings_round_trip_without_ui_controls():
