@@ -56,6 +56,9 @@ def build_radar(
     device: str = "cuda",
 ):
     """Construct the immutable Radar 0.4 instrument from Studio state."""
+    from .runtime_contract import require_supported_runtime
+
+    require_supported_runtime()
 
     from witwin.radar import Radar
 
@@ -71,4 +74,3 @@ def build_radar(
         ),
         device=device,
     )
-

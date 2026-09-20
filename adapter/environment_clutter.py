@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import torch
 
 from .direct_environment import DirectEnvironmentComposer
+from .runtime_contract import require_supported_runtime
 
 
 SINGLE_BOUNCE_COMPONENTS = frozenset({"reflection"})
@@ -60,6 +61,8 @@ def single_bounce_environment_cube(radar, world, *, polarization):
     this plugin: Channel discovers the specular path and evaluates the actual
     exported material.
     """
+    require_supported_runtime()
+
     from witwin.radar.channel import ChannelPropagationAdapter, compile_scene
     from witwin.radar.sensors import RoundTripPatternStage
     from witwin.radar.simulation import ScatterSitePolicy, bind_radar_world
