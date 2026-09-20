@@ -29,6 +29,43 @@ Last run: 2026-09-19
 - Semantic-24 dynamic Range-Doppler peak matched the 44-site reference in 4/40 frames; this records the intentional target-model change
 - Repository tests: 278 passed
 
+## Studio Agent natural-language acceptance
+
+The Studio live Agent harness was run against the current checkout through the
+real configured provider, Workbench controller, Home Simulation confirmation
+action, ProjectServer, and the plugin paths below. Both runs used fresh isolated
+test Projects; the user's `witwin-scratch` Project was not mutated.
+
+### Fresh positive measurement
+
+- Prompt: `Record the existing cat motion from 0 to 5 seconds at 10 FPS. Do not change the animation.`
+- Evidence: `C:\WiTwin\test-runs\wt-radar-agent-fresh-run-20260919\report.json`
+- Plugin under test: `C:\WiTwin\plugins\wt_radar`
+- Agent plan: preserve the existing Timeline, measure `0..5 s` at `10 FPS`, and do not export NPZ
+- Confirmation path: compiled Home Simulation Run action using the exact pending plan
+- Result: pipeline `succeeded`, completion `verified`, native GPU result independently verified
+- Frames/cube: 50/50 nonzero frames, `[50, 3, 4, 128, 256]`
+- Dynamic target: 24/24 active sites, LOS-only, chirp motion sampling, target multipath disabled
+- Static room: 37 material slots and 60 coherent native single-bounce reflection paths
+- Physics runtime: `witwin 0.4.0`, `witwin-radar 0.4.0`, `witwin-channel 0.5.0`, CUDA
+- Motion preservation: passed; the complete authored Timeline remained unchanged
+- Replay: persistent 50-frame payload created and integrity-verified
+- Agent turn plus confirmed execution: 116.073 s
+- Confirmed pipeline: 97.892 s; GPU submission step, including its synchronous simulation, completed in 79.995 s after preflight
+
+The model also requested Replay although the sentence only asked for a recording.
+The native measurement is valid, but this is recorded as an Agent intent-routing
+overreach outside the Radar physics implementation.
+
+### Stale-result safety check
+
+- Prompt: `Prepare replay and NPZ from the last successful recording.`
+- Evidence: `C:\WiTwin\test-runs\wt-radar-agent-result-reuse-20260919\report.json`
+- Calls: `witwin.radar.inspect_pipeline`, then `witwin.radar.prepare_replay`
+- Result: the Agent found the saved payload but correctly refused reuse because
+  the durable native result fingerprint was stale after Scene inputs changed;
+  it did not claim success or export an invalid NPZ.
+
 Reproduction command from this repository:
 
 ```powershell
