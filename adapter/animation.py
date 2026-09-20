@@ -137,11 +137,16 @@ def solve_native_frame(
     v = torch.as_tensor(velocities, dtype=torch.float32, device=radar.device).contiguous()
     if environment_cube is not None:
         raise ValueError("Radar 0.4 owns coherent reflections; a separate environment cube is not accepted.")
-    speed = torch.linalg.vector_norm(v, dim=1)
+    radar_position = torch.as_tensor(radar.position, dtype=p.dtype, device=p.device)
+    displacement = p - radar_position
+    distance = torch.linalg.vector_norm(displacement, dim=1)
+    if distance.numel() and bool((distance <= 1e-12).any()):
+        raise ValueError("Radar position intersects an authored target site.")
+    radial_speed = (v * displacement).sum(dim=1) / distance.clamp_min(1e-12)
     max_speed = float(radar.system_config.waveform_spec().max_unambiguous_speed_mps)
-    if speed.numel() and float(speed.max()) > max_speed:
+    if radial_speed.numel() and float(radial_speed.abs().max()) > max_speed:
         raise ValueError(
-            f"Target speed exceeds Radar's {max_speed:.6g} m/s unambiguous velocity; "
+            f"Target radial speed exceeds Radar's {max_speed:.6g} m/s unambiguous velocity; "
             "lower the motion speed or change radar timing explicitly."
         )
 
@@ -168,10 +173,6 @@ def solve_native_frame(
     if primal.device.type != "cuda" or not torch.isfinite(primal).all():
         raise RuntimeError(f"Nonfinite native CUDA frame at t={time_s:.6f}s; no zero-fill or discarded sites.")
     processed = processing_cube(simulation, radar)
-    radar_position = torch.as_tensor(radar.position, dtype=p.dtype, device=p.device)
-    displacement = p - radar_position
-    distance = torch.linalg.vector_norm(displacement, dim=1).clamp_min(1e-12)
-    radial_speed = (v * displacement).sum(dim=1) / distance
     delay_rate_abs_max = float((2.0 * radial_speed.abs() / 299_792_458.0).max()) if p.numel() else 0.0
     return processed, {
         "delay_rate_abs_max": delay_rate_abs_max,
@@ -255,20 +256,30 @@ def sample_authored_motion(times, sampler):
     )
 
 
-def validate_unambiguous_velocity(radar, velocities):
-    """Fail before topology discovery when authored motion must Doppler-alias."""
-    speed = np.linalg.norm(np.asarray(velocities, dtype=np.float64), axis=2)
-    if not np.isfinite(speed).all():
-        raise ValueError("Authored target motion contains non-finite velocity samples.")
-    observed_max = float(speed.max()) if speed.size else 0.0
+def validate_unambiguous_velocity(radar, positions, velocities):
+    """Fail before topology discovery when authored radial motion must alias."""
+    positions = np.asarray(positions, dtype=np.float64)
+    velocities = np.asarray(velocities, dtype=np.float64)
+    if positions.shape != velocities.shape or positions.ndim != 3 or positions.shape[2] != 3:
+        raise ValueError("Authored target positions and velocities must have matching frame/site/XYZ shape.")
+    if not np.isfinite(positions).all() or not np.isfinite(velocities).all():
+        raise ValueError("Authored target motion contains non-finite position or velocity samples.")
+    displacement = positions - np.asarray(radar.position, dtype=np.float64)
+    distance = np.linalg.norm(displacement, axis=2)
+    if (distance <= 1e-12).any():
+        raise ValueError("Radar position intersects an authored target site.")
+    radial_speed = np.sum(velocities * displacement, axis=2) / distance
+    speed = np.linalg.norm(velocities, axis=2)
+    observed_max = float(np.abs(radial_speed).max()) if radial_speed.size else 0.0
     supported_max = float(radar.system_config.waveform_spec().max_unambiguous_speed_mps)
     if observed_max > supported_max:
         raise ValueError(
-            f"Target speed {observed_max:.6g} m/s exceeds Radar's {supported_max:.6g} m/s "
+            f"Target radial speed {observed_max:.6g} m/s exceeds Radar's {supported_max:.6g} m/s "
             "unambiguous velocity; lower the motion speed or change radar timing explicitly."
         )
     return {
-        "motion_speed_max_mps": observed_max,
+        "motion_speed_max_mps": float(speed.max()) if speed.size else 0.0,
+        "radial_motion_speed_max_mps": observed_max,
         "max_unambiguous_speed_mps": supported_max,
     }
 
@@ -277,7 +288,7 @@ def animation_preflight(scene, request):
     """Return solve evidence after native topology discovery, before synthesis."""
     times, sampler, radar, world, _config, meta, _motion = prepare_animation(scene, request)
     positions, velocities = sample_authored_motion(times, sampler)
-    velocity_evidence = validate_unambiguous_velocity(radar, velocities)
+    velocity_evidence = validate_unambiguous_velocity(radar, positions, velocities)
     topology = visibility_preflight(
         radar, world, positions, sampler,
         polarization=meta["world_polarization"],
@@ -553,7 +564,7 @@ def solve_animation(ctx, scene, request):
     else:
         poses, velocities = cached_motion
         ctx.progress(0.03, "Reusing verified authored motion samples")
-    velocity_evidence = validate_unambiguous_velocity(radar, velocities)
+    velocity_evidence = validate_unambiguous_velocity(radar, poses, velocities)
     topology = validated_cached_topology(request, times, sampler, meta)
     preflight_reused = topology is not None
     if topology is None:

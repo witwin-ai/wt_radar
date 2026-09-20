@@ -13,7 +13,7 @@ from witwin_server.features.timeline import InterpolationType, TimelineManager
 from wt_radar.adapter.animation import (
     MODEL, AnimationTopologyError, animation_preflight, animation_request,
     animation_view, export_animation, frame_times, solve_animation,
-    solve_native_frame,
+    solve_native_frame, validate_unambiguous_velocity,
 )
 from wt_radar.adapter.saved_result import SavedRadarResult
 from wt_radar.adapter.snapshot import prepare_snapshot, snapshot_request
@@ -476,6 +476,25 @@ def test_native_animation_refuses_slow_time_velocity_alias(scene, cuda_ready):
     add_track(original, "bone0", "position", [(0., [0., 0., 0.]), (2., [0., 0., -200.])])
     with pytest.raises((ValueError, RuntimeError), match="(?i)(Nyquist|alias|unambiguous)"):
         solve_animation(AnimationContext(), copy_for_solver(original), animation_request(component))
+
+
+def test_unambiguous_velocity_uses_radar_radial_component(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    radar, *_ = native_setup(original, component)
+    positions = np.array([[[0.0, 1.0, -3.0]]])
+    aliased_speed = 2.0 * radar.system_config.waveform_spec().max_unambiguous_speed_mps
+
+    evidence = validate_unambiguous_velocity(
+        radar, positions, np.array([[[aliased_speed, 0.0, 0.0]]])
+    )
+
+    assert evidence["motion_speed_max_mps"] == pytest.approx(aliased_speed)
+    assert evidence["radial_motion_speed_max_mps"] == pytest.approx(0.0)
+    with pytest.raises(ValueError, match="Target radial speed"):
+        validate_unambiguous_velocity(
+            radar, positions, np.array([[[0.0, 0.0, -aliased_speed]]])
+        )
 
 
 def test_preflight_rejects_velocity_alias_before_topology_discovery(scene, cuda_ready, monkeypatch):
