@@ -21,7 +21,13 @@ Last run: 2026-09-19
 - Export: `C:\WiTwin\projects\witwin-scratch\results\radar-animation\official-radar-0.4-los-default-20260919.npz`
 - SHA-256: `A90D98B10B535415E2E7DCDA4B428C25DE620E3BD6B2357BC611685A6D33853E`
 - Saved-result reload: passed with matching shape, times, versions, and environment metadata
-- Repository tests: 276 passed
+- 24-site experiment: 71.14 s, 288 target path rows/frame (5.95% faster than 44 sites)
+- 24-site whole-cube difference: complex relative L2 2.756%, power ratio 1.000024
+- 24-site dynamic-only difference after slow-time mean removal: complex relative L2 73.30%, Range-Doppler magnitude relative L2 47.55%, power ratio 0.9717
+- 24-site dynamic Range-Doppler peak matched the 44-site result in 4/40 frames; therefore 44 remains the cat default and 24 is opt-in
+- 24-site export: `C:\WiTwin\projects\witwin-scratch\results\radar-animation\official-radar-0.4-24-sites-20260919.npz`
+- 24-site SHA-256: `7E0493CA3AF852A08620295FDF7FBC938B8DC644C78445B8BD96D49653511C3B`
+- Repository tests: 277 passed
 
 Reproduction command from this repository:
 
