@@ -45,7 +45,6 @@ from witwin_server.core.components import (
     foldout_group,
     int_field,
     list_field,
-    stream_ref_field,
     string_field,
     vector3_field,
 )
@@ -87,8 +86,6 @@ _PIXEL = {"field_name": "sampling", "operator": "eq", "value": "pixel"}
 _SEPARABLE = {"field_name": "pattern_kind", "operator": "eq", "value": "separable"}
 _MAP = {"field_name": "pattern_kind", "operator": "eq", "value": "map"}
 _AGC = "enable_agc"
-_POINTCLOUD = {"field_name": "timeline_source", "operator": "eq", "value": "pointcloud_sequence"}
-_MOTION_SOURCE = {"field_name": "timeline_source", "operator": "eq", "value": "motion"}
 
 
 @component(name="Radar", display_name="Radar", category=_CAT)
@@ -107,24 +104,12 @@ class RadarComponent(Component):
 
     _signal = None   # runtime MIMO cube (TX, RX, chirps, ADC); never serialized
     _radar = None    # runtime Radar
-    _frames = None   # runtime timeline frame stack; never serialized
-    _timeline_radar = None
     _solver_result_handle = ""
     _solver_run_id = ""
     _snapshot_solver_result_handle = ""
     _snapshot_solver_run_id = ""
     _snapshot_solver_pending_run_id = ""
-    _signal_stream_id = ""
     _signal_source_id = ""
-    _live_thread = None
-    _live_stop_event = None
-    _live_pause_event = None
-    _live_lock = None
-    _live_last_signature = None
-    _live_last_scene_payload_signature = None
-    _live_started_at = 0.0
-    _live_generation = 0
-    _live_session_id = ""
     _auto_refreshing_view = False
     _saved_result = None
     _snapshot_result = False
@@ -168,8 +153,6 @@ class RadarComponent(Component):
     define_group(foldout_group(_ANIMATION, display_name="Simulation & Replay (multi-frame)"))
     define_group(foldout_group(_SAVED, display_name="Load Saved Recording", collapsed=True))
     define_group(foldout_group(_POSTPROC, display_name="Result Display"))
-    define_group(foldout_group(_TIMELINE, display_name="Timeline", collapsed=True))
-
     # --- frequency / power (RadarConfig) ------------------------------------
     fc = float_field(77e9, min=1e9, max=300e9, units=FREQUENCY_UNITS, default_unit="GHz",
                      group=_CONFIG, description="Carrier / start frequency")
@@ -307,27 +290,16 @@ class RadarComponent(Component):
                                    group=_SOLVE, hidden=True, description="Legacy only; snapshots freeze all motion")
     t0 = float_field(0.0, group=_ANIMATION,
                      description="Measurement start time (s). Multi-frame simulation continues from here; Snapshot freezes here.")
-    stream_max_fps = float_field(30.0, min=0.1, max=30.0, group=_SOLVE,
-                                 description="Maximum realtime stream solves per second")
-    stream_channels = string_field("rd", group=_SOLVE,
-                                   description="Comma-separated live channels: raw, rd, pc")
-    stream_history_length = int_field(1, min=1, group=_SOLVE,
-                                      description="Stream history frames retained for reconnect")
-    stream_on_change_only = bool_field(True, group=_SOLVE,
-                                       description="Only re-solve when radar settings or scene transforms change")
-    stream_status = string_field("stopped", options=["stopped", "running", "paused", "error"],
-                                 enum_toggle=True, readonly=True, group=_SOLVE,
-                                 description="Realtime stream producer state")
+    # Serialized only so old project files round-trip without data loss. The
+    # Radar 0.3 stream UI and execution methods have been removed.
+    stream_max_fps = float_field(30.0, min=0.1, max=30.0, group=_SOLVE, hidden=True)
+    stream_channels = string_field("rd", group=_SOLVE, hidden=True)
+    stream_history_length = int_field(1, min=1, group=_SOLVE, hidden=True)
+    stream_on_change_only = bool_field(True, group=_SOLVE, hidden=True)
+    stream_status = string_field("stopped", readonly=True, transient=True, group=_SOLVE, hidden=True)
     post_processors = list_field(component_field(component_type="RadarPostProcessor"), default=[],
                                  group=_SOLVE,
                                  description="Extra post-processor views run after each solve")
-    signal_stream = stream_ref_field(
-        default_channel="rd",
-        group=_SOLVE,
-        hide_label=True,
-        show_header=False,
-        hidden=True,
-    )
     signal_source = data_source_ref_field(
         default_channel="rd",
         mode="stream",
@@ -337,11 +309,7 @@ class RadarComponent(Component):
         show_header=False,
         hide_if="saved_result_loaded",
     )
-    signal_figure = figure(
-        title="Radar Replay",
-        group=_ANIMATION,
-        hide_if={"field_name": "stream_status", "operator": "in", "value": ["running", "paused"]},
-    )
+    signal_figure = figure(title="Radar Replay", group=_ANIMATION)
 
     saved_result_path = string_field("", group=_SAVED,
                                      description="Absolute path to a metadata-bearing radar_cube.npz")
@@ -396,19 +364,14 @@ class RadarComponent(Component):
     energy_top_k = int_field(128, min=1, group=_POSTPROC,
                              description="Top-K energy detections (topk detector)")
 
-    # --- timeline (RadarTimeline) -------------------------------------------
-    frame_rate = float_field(30.0, min=1.0, group=_TIMELINE, description="Source keyframe rate (Hz)")
-    timeline_source = string_field("pointcloud_sequence", options=["pointcloud_sequence", "motion"],
-                                   enum_toggle=True, group=_TIMELINE,
-                                   description="How keyframes are built")
-    pointcloud_path = string_field("", show_if=_POINTCLOUD, group=_TIMELINE,
-                                   description=".npy/.npz with (F,N,3) positions [+ (F,N) intensities]")
-    motion_path = string_field("", show_if=_MOTION_SOURCE, group=_TIMELINE,
-                               description=".npz pose (F,72)/shape/root_translation; needs an SMPL 'human'")
-    velocity_corrected = bool_field(True, group=_TIMELINE,
-                                    description="Scale displacement to physical velocity per frame")
-    frame_index = int_field(0, min=0, group=_TIMELINE,
-                            description="Frame to display (steps the RD movie)")
+    # Hidden serialized compatibility for pre-0.4 projects. These fields no
+    # longer create controls or drive simulation.
+    frame_rate = float_field(30.0, min=1.0, group=_TIMELINE, hidden=True)
+    timeline_source = string_field("pointcloud_sequence", group=_TIMELINE, hidden=True)
+    pointcloud_path = string_field("", group=_TIMELINE, hidden=True)
+    motion_path = string_field("", group=_TIMELINE, hidden=True)
+    velocity_corrected = bool_field(True, group=_TIMELINE, hidden=True)
+    frame_index = int_field(0, min=0, group=_TIMELINE, hidden=True)
 
     # --- gizmo (pose comes from the owner Transform; cone direction is local -Z) ---
 
@@ -449,20 +412,11 @@ class RadarComponent(Component):
             return
         if getattr(self, "_auto_refreshing_view", False):
             return
-        stream_status = str(self.stream_status)
-        if stream_status in {"running", "paused"}:
-            if field_name == "view":
-                self._open_signal_stream(
-                    self._stream_channel_descriptors(),
-                    status="active" if stream_status == "running" else stream_status,
-                )
-            return
         if not self._has_preview_result():
             return
         self._auto_refreshing_view = True
         try:
             self.update_view()
-            self._publish_signal_stream()
         finally:
             self._auto_refreshing_view = False
 
@@ -473,8 +427,8 @@ class RadarComponent(Component):
     def load_saved_result(self):
         """Load exported producer metadata and reuse the existing figure UI."""
         from ..adapter.saved_result import SavedRadarResult
-        if self._snapshot_running or self._export_running or self._replay_preparing or str(self.stream_status) in {"running", "paused"}:
-            raise ValueError("Stop the running solve/live stream before loading a saved result.")
+        if self._snapshot_running or self._export_running or self._replay_preparing:
+            raise ValueError("Wait for the running simulation or replay operation before loading a saved result.")
         self._saved_result = None
         self._last_animation_view_metadata = {}
         self._snapshot_result = False
@@ -483,12 +437,10 @@ class RadarComponent(Component):
         self.animation_export_path = ""
         self.saved_result_loaded = False
         self._signal = None
-        self._frames = None
         self._radar = None
         self._solver_result_handle = ""
         self._clear_query_cache()
         self.signal_source = None
-        self.signal_stream = None
         self.signal_figure.clear()
         self.saved_result_status = "Loading saved result"
         try:
@@ -512,17 +464,6 @@ class RadarComponent(Component):
             f"{result.producer.get('physical_model', 'unspecified physical model')}"
         )
         return self.update_view()
-
-    @staticmethod
-    def _require_legacy_solver():
-        # The historical live adapter has not been ported to Radar 0.4. This
-        # is an explicit UI boundary, not a compatibility shim or fallback.
-        import importlib.util
-        if importlib.util.find_spec("witwin.radar.sigproc") is None:
-            raise RuntimeError(
-                "This plugin's legacy Stream/Generate adapter is not connected to Radar 0.4. "
-                "Use Simulate for a frozen-point snapshot or Load Saved Result for replay. No solver or DSP fallback is performed."
-            )
 
     def _max_range(self) -> float:
         return Derived.compute(self)["max_range_m"]
@@ -618,8 +559,8 @@ class RadarComponent(Component):
     async def _simulate_async(self, animation=False, on_submitted=None):
         """Submit an immutable copy of current Studio state to the native solver."""
         from ..adapter.snapshot import snapshot_request, SUPPORTED_VIEWS
-        if self._snapshot_running or self._export_running or self._replay_preparing or str(self.stream_status) in {"running", "paused"}:
-            raise ValueError("A Radar solve/stream is already active; wait before starting another simulation.")
+        if self._snapshot_running or self._export_running or self._replay_preparing:
+            raise ValueError("A Radar simulation or replay operation is already active; wait before starting another one.")
         self._snapshot_running = True
         if animation:
             # A new multi-frame measurement replaces the previous measurement.
@@ -637,7 +578,6 @@ class RadarComponent(Component):
             self._radar = None
             self._signal = None
             self.signal_source = None
-            self.signal_stream = None
             self.signal_figure.clear()
             self.snapshot_status = "Animation simulation in progress; not a frozen snapshot."
             self.animation_status = "Running native GPU simulation of baked Studio skin motion"
@@ -837,142 +777,6 @@ class RadarComponent(Component):
         finally:
             self._snapshot_running = False
 
-    @button(display_name="Start Stream", group=_SOLVE)
-    def start_stream(self):
-        """Start solver-side realtime stream production."""
-        self._require_legacy_solver()
-        logger.info("=== Radar Start Stream clicked ===")
-        if self.scene is None or self.owner is None:
-            logger.warning("Radar stream start ignored: component is not attached to a scene")
-            return "Radar must be attached to a scene"
-        self._ensure_live_state()
-        self._apply_live_latency_defaults()
-        with self._live_lock:
-            if self._live_thread is not None and self._live_thread.is_alive():
-                if self._live_stop_event.is_set():
-                    logger.info("Radar stream start ignored: existing stream is stopping")
-                    return "Stream stopping"
-                try:
-                    api.solvers.call(
-                        "witwin.radar.simulate",
-                        "live_resume",
-                        params={"session_id": self._live_session_id or self._stream_id()},
-                        timeout=5,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.stream_status = "error"
-                    self._mark_stream_error(str(exc))
-                    logger.warning(f"Radar stream resume failed: {exc}")
-                    return f"Stream failed: {exc}"
-                self._live_pause_event.clear()
-                self.stream_status = "running"
-                self._update_stream_status("active")
-                Notifications.info("Radar", "Realtime stream resumed")
-                logger.info(f"Radar stream resumed: thread={self._live_thread.name}")
-                return "Stream running"
-            self._live_generation += 1
-            generation = self._live_generation
-            self._live_stop_event.clear()
-            self._live_pause_event.clear()
-            self._live_started_at = time.monotonic()
-            self._clear_query_cache()
-            self.stream_status = "running"
-            self._open_signal_stream(self._stream_channel_descriptors(), status="active")
-            signature = self._live_scene_signature()
-            self._live_last_signature = signature
-            self._live_last_scene_payload_signature = self._live_scene_payload_signature()
-            params = self._live_solver_params(signature)
-            logger.info(
-                "Radar live start request: "
-                f"session={params['session_id']} channels={params['channels']} "
-                f"max_fps={params['max_fps']:.2f} scene={self._live_scene_summary()}"
-            )
-            try:
-                response = api.solvers.call(
-                    "witwin.radar.simulate",
-                    "live_start",
-                    params=params,
-                    scene=self.scene,
-                    timeout=10,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.stream_status = "error"
-                self._mark_stream_error(str(exc))
-                logger.warning(f"Radar live start failed: {exc}")
-                return f"Stream failed: {exc}"
-            self._live_session_id = str((response or {}).get("sessionId") or params["session_id"])
-            self._live_thread = threading.Thread(
-                target=self._live_loop,
-                args=(generation,),
-                name=f"RadarStream-{id(self):x}",
-                daemon=True,
-            )
-            self._live_thread.start()
-            logger.info(f"Radar stream thread started: generation={generation} thread={self._live_thread.name}")
-        Notifications.info("Radar", "Realtime stream started")
-        return "Stream started"
-
-    @button(display_name="Pause Stream", group=_SOLVE)
-    def pause_stream(self):
-        """Pause realtime solve production without closing the stream."""
-        self._ensure_live_state()
-        try:
-            api.solvers.call(
-                "witwin.radar.simulate",
-                "live_pause",
-                params={"session_id": self._live_session_id or self._stream_id()},
-                timeout=5,
-            )
-        except Exception as exc:  # noqa: BLE001 - local pause still prevents update traffic
-            logger.warning(f"Radar stream pause control failed: {exc}")
-        self._live_pause_event.set()
-        self.stream_status = "paused"
-        self._update_stream_status("paused")
-        Notifications.info("Radar", "Realtime stream paused")
-        logger.info("Radar stream paused")
-        return "Stream paused"
-
-    @button(display_name="Stop Stream", group=_SOLVE)
-    def stop_stream(self):
-        """Stop realtime production and close the stream."""
-        self._ensure_live_state()
-        logger.info("Radar stream stop requested")
-        thread = None
-        session_id = ""
-        with self._live_lock:
-            self._live_generation += 1
-            self._live_stop_event.set()
-            self._live_pause_event.clear()
-            self.stream_status = "stopped"
-            self._clear_query_cache()
-            thread = self._live_thread
-            session_id = self._live_session_id or self._signal_stream_id
-            self._live_thread = None
-            self._live_session_id = ""
-        if session_id:
-            try:
-                api.solvers.call(
-                    "witwin.radar.simulate",
-                    "live_stop",
-                    params={"session_id": session_id},
-                    timeout=5,
-                )
-            except Exception as exc:  # noqa: BLE001 - stop should still close local stream
-                logger.debug(f"Radar live_stop skipped: {exc}")
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-        with self._live_lock:
-            if self._signal_stream_id:
-                try:
-                    api.streams.close(self._signal_stream_id, reason="stopped")
-                except Exception as exc:  # noqa: BLE001 - stop should be idempotent
-                    logger.debug(f"Radar stream close skipped: {exc}")
-            self.signal_stream = None
-            self._signal_stream_id = ""
-        Notifications.info("Radar", "Realtime stream stopped")
-        logger.info("Radar stream stopped")
-        return "Stream stopped"
-
     def _scene_is_live(self):
         scene, owner = self.scene, self.owner
         if (scene is None or owner is None or scene.get_object(owner.id) is not owner
@@ -1107,47 +911,6 @@ class RadarComponent(Component):
         if view == "point_cloud":
             return self._show_pc()
         return self._show_music()
-
-    @button(display_name="Generate Frames", group=_TIMELINE)
-    def generate_timeline(self):
-        """Build the timeline + radar, generate the frame stack, and show the first frame."""
-        self._require_legacy_solver()
-        import torch
-        if not torch.cuda.is_available():
-            Notifications.warning("Radar", "Timeline generation requires a CUDA device")
-            return "CUDA required"
-        from ..adapter.timeline_run import TimelineRunner
-
-        radar, frames = TimelineRunner.generate(
-            self,
-            sensor=SensorSpec.from_component(self),
-            tracer=TracerSpec.from_component(self),
-            studio_scene=self.scene)
-        self._timeline_radar = radar
-        self._frames = frames
-        self._solver_result_handle = ""
-        self._solver_run_id = ""
-        self._clear_query_cache()
-        self._register_signal_timeline_dataset()
-        self._publish_signal_stream()
-        self.show_frame()
-        Notifications.success("Radar", f"Timeline: {frames.shape[0]} frames {tuple(frames.shape)}")
-        return f"{frames.shape[0]} frames"
-
-    @button(display_name="Show Frame", group=_TIMELINE)
-    def show_frame(self):
-        """Display the selected timeline frame in the signal view."""
-        if self._frames is None:
-            return "Generate first"
-        index = max(0, min(int(self.frame_index), self._frames.shape[0] - 1))
-        self._signal = self._frames[index]
-        self._radar = self._timeline_radar
-        self._solver_result_handle = ""
-        self._solver_run_id = ""
-        self._clear_query_cache()
-        self.update_view()
-        self._publish_signal_stream()
-        return f"Frame {index}"
 
     # --- post-processors ----------------------------------------------------
 

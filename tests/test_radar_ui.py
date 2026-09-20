@@ -21,7 +21,7 @@ def test_current_controls_keep_simulation_replay_and_export():
         assert fields["snapshot_figure"]["group"] == "SnapshotTarget"
 
 
-def test_old_settings_round_trip_and_remain_available_for_repair():
+def test_old_stream_and_timeline_settings_round_trip_without_ui_controls():
     component = RadarComponent()
     component.enable_thermal = True
     component.thermal_std = 0.25
@@ -31,7 +31,8 @@ def test_old_settings_round_trip_and_remain_available_for_repair():
     fields = {field["name"]: field for field in metadata["fields"]}
     assert fields["enable_thermal"]["group"] == "Compatibility"
     assert fields["thermal_std"]["group"] == "Compatibility"
-    assert fields["frame_rate"]["group"] == "Compatibility"
+    assert "frame_rate" not in fields
+    assert "stream_max_fps" not in fields
     assert fields["animation_duration_s"]["group"] == "StudioAnimation"
     assert component.to_properties_dict() == saved
     restored = RadarComponent()

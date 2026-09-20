@@ -68,7 +68,7 @@ def test_component_reuses_existing_figure_and_recorded_time(tmp_path, payload):
     assert figure["data"]["y"] == torch.from_numpy(payload["cube"][1, 0, 0, 2]).abs().tolist()
     assert "0.1000s" in figure["title"]
     assert component._radar is None and component._signal is None
-    assert component.signal_source is None and component.signal_stream is None
+    assert component.signal_source is None
 
 
 @pytest.mark.parametrize("change", ["metadata", "shape", "time", "nonfinite", "axis", "real", "beat"])
@@ -113,11 +113,10 @@ def test_saved_mode_refuses_legacy_dsp(tmp_path, payload):
         component.static_clutter_removal = True
 
 
-def test_live_commands_fail_explicitly_on_current_api():
+def test_legacy_live_commands_are_removed_from_current_component():
     component = RadarComponent()
-    for command in (component.start_stream, component.generate_timeline):
-        with pytest.raises(RuntimeError, match="not connected to Radar 0.4"):
-            command()
+    assert not hasattr(component, "start_stream")
+    assert not hasattr(component, "generate_timeline")
 
 
 def test_path_change_and_failed_reload_clear_stale_result(tmp_path, payload):
