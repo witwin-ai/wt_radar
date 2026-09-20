@@ -14,15 +14,16 @@ Last run: 2026-09-19
 - Static room: 37 meshes/material slots, 1890 triangles
 - Environment reflection paths: 60
 - Environment model: `radar04_native_single_bounce`, `max_depth=1`
-- Solve + compressed export: 59.735 s (pre-sparse semantic-24 run: 71.875 s; 16.89% lower)
+- Solve + fast stored export: 56.156 s (compressed sparse-skin run: 59.735 s; 5.99% lower)
 - Adaptive 44-site comparison: 123.547 s, 63.3% slower than 44-site chirp on this scene
 - Adaptive/chirp difference: complex relative L2 0.0903%, magnitude relative L2 0.0631%, complex correlation 0.9999996, power ratio 0.9999995
 - Target path rows: 288/frame (44-site reference: 528/frame; previous target-multipath mean: 14,080.8/frame)
-- Export: `C:\WiTwin\projects\witwin-scratch\results\radar-animation\official-radar-0.4-semantic-24-sparse-skin-20260919.npz`
-- SHA-256: `FB631AD2C25B2463BF82936E52C491A4FAB3E684193C1F2DAA81E49B226BD1BA`
+- Export: `C:\WiTwin\projects\witwin-scratch\results\radar-animation\official-radar-0.4-semantic-24-fast-export-20260919.npz`
+- SHA-256: `C3ED8C660E138F4CE521FB3CDFDD5C80F44C86FA2953B6986D8407C955F798E8`
 - Saved-result reload: passed with matching shape, times, versions, and environment metadata
 - Target motion sampling alone: 13.243 s full-mesh reference versus 1.708 s sparse/memoized, with bit-exact positions and velocities
 - Sparse-skin export SHA-256 is identical to the pre-optimization semantic-24 export
+- Fast export: 0.134 s and 120.16 MiB versus compressed 3.324 s and 111.63 MiB; all seven saved arrays/metadata fields are bit-exact after reload
 - Semantic-24 versus 44-site whole-cube complex relative L2: 2.864%
 - Semantic-24 dynamic-only difference after slow-time mean removal: complex relative L2 77.20%, Range-Doppler magnitude relative L2 50.49%, power ratio 0.8498
 - Semantic-24 dynamic Range-Doppler peak matched the 44-site reference in 4/40 frames; this records the intentional target-model change
