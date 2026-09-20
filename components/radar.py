@@ -1,24 +1,8 @@
-"""Unified Radar component — the single scene-level component for a radar simulation.
+"""Studio controls for Radar 0.4 snapshots, baked animation, and replay.
 
-Replaces the nine separate Radar Settings components (RadarConfig + RadarSensor +
-RadarTracer + the four sub-configs + RadarResult + RadarTimeline) with one component
-exposing every setting through foldout groups. The marker the adapter keys off is now
-``Radar`` (master plan §6.4); optional per-structure ``RadarMotion`` and the
-polymorphic ``RadarPostProcessor`` hierarchy stay separate because they live on
-other scene objects.
-
-The grouping consolidates the old split: ``Configuration`` holds the FMCW core
-(frequency / power + ADC + chirp / frame + FFT bins); ``Antenna`` holds the array
-geometry plus the antenna-pattern sub-config; ``Tracer`` is the ray-tracer + sensor
-optic (fov); the three ``Noise / Polarization / Receiver`` foldouts are the optional
-``RadarConfig`` sub-configs; ``Solve`` runs the solve and ``Post Processing`` drives
-the in-component MIMO views + detector/CFAR; ``Timeline`` generates multi-frame sequences.
-
-The sensor **pose** (position + look direction + up) is read from the owner SceneObject's
-``Transform`` at solve time — moving / rotating the Radar Settings object in the viewport
-moves the simulated radar. The solver backend defaults to ``dirichlet`` on ``cuda`` and
-is hidden from the UI; tests / scripts can still override ``backend`` / ``device`` /
-``pad_factor`` on the component directly.
+The sensor pose comes from the owner object's world Transform: local ``-Z`` is
+forward and local ``+Y`` is up. Historical Radar 0.3 fields remain serialized
+only where needed to open old projects; they are not presented as runnable UI.
 """
 import asyncio
 import copy

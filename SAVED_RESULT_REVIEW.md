@@ -67,7 +67,7 @@ source cube selection exactly. The current targeted test suite passes 24 tests.
 
 ## Export
 
-From a Python environment with Studio and Radar 0.3:
+From a Python environment with Studio and Radar 0.4:
 
 ```powershell
 python tools/export_saved_profiles.py --input C:\path\radar_cube.npz --output C:\path\range_profiles.npz --tx 0 --rx 0 --chirp 0
@@ -78,7 +78,7 @@ times to NPZ and CSV. It refuses to overwrite an existing export.
 
 ## Explicitly not complete
 
-- The legacy Simulate, Stream, and Generate Frames APIs are not migrated.
+- Historical Stream and Generate Frames APIs have been removed.
 - Saved-result RD, point clouds, CFAR, and static-clutter removal are not enabled.
 - Frame selection does not drive the scene timeline or produce a video yet.
 - The bedroom Cat is still a scalar point-RCS target, not skeletal scattering.
