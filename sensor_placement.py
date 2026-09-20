@@ -249,6 +249,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     radar.animation_duration_s = float(args.get('duration_s', 5.))
     radar.animation_fps = float(args.get('fps', 10.))
     radar.target_multipath = bool(args.get('target_multipath', False))
+    radar.target_motion_sampling = str(args.get('target_motion_sampling', 'adaptive'))
     radar.fov = float(args.get('fov_deg', 60.))
     radar.view, radar.static_clutter_removal, radar.show_cfar = 'range_doppler', False, False
     sampler = StudioSkinSampler(detached, args['target_object_id'])

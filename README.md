@@ -15,6 +15,11 @@ contributes a native one-bounce background. **Target Multipath** is an explicit
 high-cost option for wall-to-target and target-to-wall paths; it is off by
 default.
 
+Intra-frame target motion uses official Radar 0.4 error-controlled adaptive
+sampling by default. **Chirp** remains available as the slower per-chirp motion
+reference that evaluates every transmitted chirp. Path topology is
+still rediscovered at Studio-frame boundaries.
+
 ## Supported physical model
 
 The multi-frame animation path combines two coherent contributions:

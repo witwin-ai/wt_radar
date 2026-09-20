@@ -20,6 +20,7 @@ from .memory_budget import MAX_RESULT_BYTES, require_result_memory
 from .timebase import aligned_frame_count
 
 MODEL = "studio_visible_skinned_surface_sites_v2"
+TARGET_MOTION_SAMPLING = frozenset({"adaptive", "chirp"})
 
 
 @contextmanager
@@ -53,7 +54,8 @@ def animation_request(component):
     request = snapshot_request(component)
     request.update(adapter=MODEL, duration_s=float(component.animation_duration_s),
                    fps=float(component.animation_fps),
-                   target_multipath=bool(component.target_multipath))
+                   target_multipath=bool(component.target_multipath),
+                   target_motion_sampling=str(component.target_motion_sampling))
     fingerprint = str(getattr(component, "_agent_input_fingerprint", "") or "")
     if not fingerprint and getattr(component, "scene", None) is not None:
         # Component-button and Agent execution must publish the same immutable
@@ -82,6 +84,21 @@ def target_reflection_depth(request):
     return 1 if value else 0
 
 
+def target_motion_sampling(request):
+    """Return the explicit Radar 0.4 intra-frame target motion policy."""
+    value = str(request.get("target_motion_sampling", "adaptive"))
+    if value not in TARGET_MOTION_SAMPLING:
+        raise ValueError(
+            f"target_motion_sampling must be one of {sorted(TARGET_MOTION_SAMPLING)}, got {value!r}."
+        )
+    return value
+
+
+def target_motion_policy(Motion, request):
+    mode = target_motion_sampling(request)
+    return Motion.adaptive() if mode == "adaptive" else Motion.chirp(rediscover_every_frames=1)
+
+
 def frame_times(request, component):
     start, duration, fps = (float(request[key]) for key in ("time_s", "duration_s", "fps"))
     if (not np.isfinite([start, duration, fps]).all() or start < 0 or duration <= 0
@@ -103,6 +120,7 @@ def frame_times(request, component):
 def solve_native_frame(
     radar, world, rcs_m2, time_s, positions, velocities, polarization,
     *, stable_site_ids=None, environment_cube=None, target_reflections=0,
+    target_motion_sampling_mode="adaptive",
 ):
     """Simulate one Studio frame through Radar 0.4's public moving-target API."""
     from witwin.radar import Motion, PointTargets
@@ -136,7 +154,7 @@ def solve_native_frame(
         times=(base_time,),
         los=True,
         reflections=int(target_reflections),
-        motion=Motion.chirp(),
+        motion=target_motion_policy(Motion, {"target_motion_sampling": target_motion_sampling_mode}),
     )
     primal = simulation.cube.detach()
     if primal.device.type != "cuda" or not torch.isfinite(primal).all():
@@ -548,6 +566,7 @@ def solve_animation(ctx, scene, request):
     for key in ("snapshot_time_s", "target_local_point", "target_world_point_m", "velocity_m_per_s"):
         meta.pop(key, None)
     target_reflections = target_reflection_depth(request)
+    motion_sampling = target_motion_sampling(request)
     target_components = ["los"] + (["reflection"] if target_reflections else [])
     meta.update(model=MODEL, motion_fingerprint=authored_motion_fingerprint, frame_count=len(times), fps=float(request["fps"]),
                 duration_s=float(request["duration_s"]),
@@ -562,6 +581,7 @@ def solve_animation(ctx, scene, request):
                     "components": target_components,
                     "max_depth": target_reflections,
                     "multipath_enabled": bool(target_reflections),
+                    "motion_sampling": motion_sampling,
                 },
                 environment_reflection={
                     "model": "radar04_native_single_bounce",
@@ -574,7 +594,7 @@ def solve_animation(ctx, scene, request):
                 native_motion_samples_reused=motion_samples_reused,
                 **velocity_evidence,
                 velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
-                slow_time_model="Radar 0.4 public chirp-time motion sampling per Studio frame",
+                slow_time_model=f"Radar 0.4 public {motion_sampling} motion sampling per Studio frame",
                 limitations="Uncalibrated equal-RCS surface samples, not full electromagnetic skin. "
                             "Only sites with native inbound+outbound paths throughout the interval are active; "
                             "occluded sites keep their original RCS share and are not renormalized. "
@@ -615,7 +635,7 @@ def solve_animation(ctx, scene, request):
         times=times,
         los=True,
         reflections=target_reflections,
-        motion=Motion.chirp(rediscover_every_frames=1),
+        motion=target_motion_policy(Motion, request),
     ))
     diagnostics = []
     result = None

@@ -47,13 +47,17 @@ def test_frame_times_accepts_float32_round_trip_for_frame_aligned_duration():
     assert times[-1] == pytest.approx(16.8)
 
 
-def test_animation_request_carries_explicit_target_multipath(scene):
+def test_animation_request_carries_explicit_target_physics(scene):
     original, component = scene
     make_rig(original, component)
 
     assert animation_request(component)["target_multipath"] is False
+    assert animation_request(component)["target_motion_sampling"] == "adaptive"
     component.target_multipath = True
-    assert animation_request(component)["target_multipath"] is True
+    component.target_motion_sampling = "chirp"
+    request = animation_request(component)
+    assert request["target_multipath"] is True
+    assert request["target_motion_sampling"] == "chirp"
 
 
 def add_track(scene, oid, field, keys):
@@ -296,9 +300,10 @@ def test_native_frame_coherently_adds_single_bounce_room_return(scene, cuda_read
         radar, world, response, 0.0,
         [[0.0, 1.0, -3.0]], [[0.0, 0.0, -1.0]], polarization,
         target_reflections=1,
+        target_motion_sampling_mode="chirp",
     )
     assert stats["path_count"] > 1
-    assert stats["path_set_complete"] is True
+    assert stats["path_set_complete"] is False
     assert stats["motion_sampling"] == "chirp"
     assert bool((target.data.abs() > 0).any())
 
@@ -475,6 +480,7 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
     assert result.metadata["max_depth"] == 1
     assert result.metadata["target_propagation"] == {
         "components": ["los"], "max_depth": 0, "multipath_enabled": False,
+        "motion_sampling": "adaptive",
     }
     environment = result.metadata["environment_reflection"]
     assert environment["model"] == "radar04_native_single_bounce"

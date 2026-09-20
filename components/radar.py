@@ -315,6 +315,17 @@ class RadarComponent(Component):
             "Off matches the original WT Radar default; static one-bounce room background remains enabled."
         ),
     )
+    target_motion_sampling = string_field(
+        "adaptive",
+        options=["adaptive", "chirp"],
+        enum_toggle=True,
+        group=_ANIMATION,
+        description=(
+            "Adaptive uses official error-controlled FMCW probes for normal Studio runs. "
+            "Chirp evaluates every TX chirp as the slower motion-sampling reference; "
+            "path topology is still rediscovered per Studio frame."
+        ),
+    )
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,
                                       description="Recorded result frame. Does not seek or modify the editor timeline.")
     animation_status = string_field("Not run. Uses LOS target returns plus static one-bounce room background.",
@@ -683,10 +694,11 @@ class RadarComponent(Component):
                     "LOS plus target multipath" if request.get("target_multipath", False)
                     else "LOS-only target"
                 )
+                target_motion_label = f"{request.get('target_motion_sampling', 'adaptive')} motion sampling"
                 self.animation_status = (
                     f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
                     f"{request['fps']:g} FPS. Uncalibrated skin sites; {target_path_label}; "
-                    "static one-bounce room background."
+                    f"{target_motion_label}; static one-bounce room background."
                 )
                 if completion_won_cancel_race:
                     self.animation_status += " Native completion won the cancellation race; result preserved."
@@ -719,7 +731,7 @@ class RadarComponent(Component):
                             f"GPU animation complete: {count} real frames, {request['duration_s']:g}s at "
                             f"{request['fps']:g} FPS. Interval-visible sites {active}/{declared} "
                             f"({coverage:.1f}%, {quality}); uncalibrated RCS; {target_path_label}; "
-                            "static one-bounce room background."
+                            f"{target_motion_label}; static one-bounce room background."
                         )
                         if completion_won_cancel_race:
                             self.animation_status += (
