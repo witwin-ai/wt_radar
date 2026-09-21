@@ -142,6 +142,55 @@ def test_trajectory_metrics_report_radial_sign_fov_and_nyquist():
     assert metrics['doppler_within_nyquist'] is False
 
 
+def test_trajectory_metrics_use_each_skin_site_velocity_for_nyquist():
+    times = np.asarray([0., 1.])
+    points = np.asarray([
+        [[2., 0., 0.], [3., 0., 0.]],
+        [[2., 0., 0.], [3., 0., 0.]],
+    ])
+    # The body centre is stationary, but two articulated sites move equally in
+    # opposite directions. A centre-only estimate incorrectly reports 0 m/s.
+    velocities = np.asarray([
+        [[2., 0., 0.], [-2., 0., 0.]],
+        [[2., 0., 0.], [-2., 0., 0.]],
+    ])
+    metrics = sensor_placement._trajectory_metrics(
+        [0., 0., 0.], [2.5, 0., 0.], points, times,
+        fov_deg=60., max_doppler_mps=1., velocities_by_frame=velocities,
+    )
+    assert metrics['centre_peak_abs_radial_velocity_mps'] == pytest.approx(0.)
+    assert metrics['peak_abs_radial_velocity_mps'] == pytest.approx(2.)
+    assert metrics['doppler_within_nyquist'] is False
+
+
+def test_automatic_placement_skips_site_velocity_alias_before_native_preflight(scene, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    original_metrics = sensor_placement._trajectory_metrics
+    metric_calls = []
+    preflight_calls = []
+
+    def metrics(*args, **kwargs):
+        result = original_metrics(*args, **kwargs)
+        metric_calls.append(1)
+        if len(metric_calls) == 1:
+            result['doppler_within_nyquist'] = False
+            result['peak_abs_radial_velocity_mps'] = 6.
+        return result
+
+    monkeypatch.setattr(sensor_placement, '_trajectory_metrics', metrics)
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: preflight_calls.append(1) or {
+        'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
+    })
+    result = sensor_placement.choose_sensor_placement(original, {
+        'target_object_id': 'target', 'duration_s': .2, 'fps': 10, 'height_m': 1.,
+    }, radar_object_id='radar')
+
+    assert result['tested_candidates'] == 2
+    assert len(preflight_calls) == 1
+    assert result['rejected_candidates'][0]['reason'] == 'doppler_nyquist_exceeded'
+
+
 def test_whole_path_visibility_requires_target_presence_not_every_skin_site():
     points = np.asarray([
         [[2., 0., 0.], [0., 0., 2.]],

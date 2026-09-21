@@ -126,7 +126,8 @@ def _static_candidate_constraint(scene, position, *, excluded_ids=()):
     return None
 
 
-def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg, max_doppler_mps):
+def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg,
+                        max_doppler_mps, velocities_by_frame=None):
     """Predict placement-only kinematics from every authored Radar frame.
 
     This deliberately does not approximate propagation or scattering. Native
@@ -141,7 +142,13 @@ def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg, ma
     if (ranges <= 1e-8).any():
         raise ValueError('Radar candidate intersects the animated target trajectory.')
     los = relative / ranges[:, None]
-    if len(times) > 1:
+    site_velocities = None
+    if velocities_by_frame is not None:
+        site_velocities = np.asarray(velocities_by_frame, dtype=np.float64)
+        if site_velocities.shape != points.shape or not np.isfinite(site_velocities).all():
+            raise ValueError('Target site velocities must be finite and match sampled positions.')
+        velocities = site_velocities.mean(axis=1)
+    elif len(times) > 1:
         velocities = np.gradient(centers, np.asarray(times, dtype=np.float64), axis=0)
     else:
         velocities = np.zeros_like(centers)
@@ -152,13 +159,24 @@ def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg, ma
     forward /= np.linalg.norm(forward)
     all_relative = points - position[None, None, :]
     all_norm = np.linalg.norm(all_relative, axis=2)
+    if (all_norm <= 1e-8).any():
+        raise ValueError('Radar candidate intersects an animated target site.')
+    if site_velocities is None:
+        if len(times) > 1:
+            site_velocities = np.gradient(
+                points, np.asarray(times, dtype=np.float64), axis=0)
+        else:
+            site_velocities = np.zeros_like(points)
+    site_radial = np.sum(
+        site_velocities * all_relative / all_norm[:, :, None], axis=2)
     cosine = np.sum(all_relative * forward[None, None, :], axis=2) / np.maximum(all_norm, 1e-12)
     angles = np.degrees(np.arccos(np.clip(cosine, -1., 1.)))
     in_fov = angles <= float(fov_deg) / 2.
     visible_frames = in_fov.any(axis=1)
     per_frame_site_fraction = in_fov.mean(axis=1)
     continuous_fov_ranks = np.flatnonzero(in_fov.all(axis=0)).tolist()
-    peak_radial = float(np.max(np.abs(radial)))
+    centre_peak_radial = float(np.max(np.abs(radial)))
+    site_peak_radial = float(np.max(np.abs(site_radial)))
     return {
         'sampled_frame_count': int(len(times)),
         'sampled_site_count': int(points.shape[1]),
@@ -170,7 +188,8 @@ def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg, ma
         'radial_velocity_min_mps': float(radial.min()),
         'radial_velocity_max_mps': float(radial.max()),
         'radial_velocity_rms_mps': float(np.sqrt(np.mean(radial ** 2))),
-        'peak_abs_radial_velocity_mps': peak_radial,
+        'peak_abs_radial_velocity_mps': site_peak_radial,
+        'centre_peak_abs_radial_velocity_mps': centre_peak_radial,
         'approaching_peak_mps': float(max(0., -radial.min())),
         'receding_peak_mps': float(max(0., radial.max())),
         'tangential_velocity_rms_mps': float(np.sqrt(np.mean(tangential ** 2))),
@@ -186,7 +205,7 @@ def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg, ma
         'whole_path_in_fov': bool(continuous_fov_ranks),
         'max_off_axis_angle_deg': float(angles.max()),
         'doppler_nyquist_mps': float(max_doppler_mps),
-        'doppler_within_nyquist': bool(peak_radial <= float(max_doppler_mps) + 1e-9),
+        'doppler_within_nyquist': bool(site_peak_radial <= float(max_doppler_mps) + 1e-9),
     }
 
 
@@ -268,7 +287,9 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     if times[-1] > sampler.duration + 1e-7:
         raise ToolError('Automatic placement interval extends beyond the baked Studio timeline.',
                         code='invalid_sensor_placement')
-    positions_by_frame = np.asarray([sampler.positions(float(t)) for t in times])
+    sampled_motion = [sampler.sample(float(t)) for t in times]
+    positions_by_frame = np.asarray([sample[0] for sample in sampled_motion])
+    velocities_by_frame = np.asarray([sample[1] for sample in sampled_motion])
     aim = positions_by_frame.reshape(-1, 3).mean(axis=0)
     height = float(args.get('height_m', 1.))
     requested_distance = args.get('distance_m')
@@ -309,7 +330,19 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         metrics = _trajectory_metrics(
             position, candidate_aim, positions_by_frame, times,
             fov_deg=float(radar.fov), max_doppler_mps=max_doppler_mps,
+            velocities_by_frame=velocities_by_frame,
         )
+        if not metrics['doppler_within_nyquist']:
+            failures.append({
+                'position_m': position,
+                'reason': 'doppler_nyquist_exceeded',
+                'detail': {
+                    'code': 'doppler_nyquist_exceeded',
+                    'peak_abs_radial_velocity_mps': metrics['peak_abs_radial_velocity_mps'],
+                    'max_unambiguous_speed_mps': max_doppler_mps,
+                },
+            })
+            continue
         # Native coverage cannot exceed one.  This optimistic score is therefore
         # a true upper bound on the final score and lets explicit objectives use
         # branch-and-bound without changing which candidate is selected.
@@ -487,9 +520,10 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         if baseline_position is not None:
             try:
                 baseline_metrics = _trajectory_metrics(
-                    baseline_position, aim, positions_by_frame, times,
-                    fov_deg=float(radar.fov), max_doppler_mps=max_doppler_mps,
-                )
+                baseline_position, aim, positions_by_frame, times,
+                fov_deg=float(radar.fov), max_doppler_mps=max_doppler_mps,
+                velocities_by_frame=velocities_by_frame,
+            )
             except ValueError:
                 baseline_metrics = None
         improvement = None
