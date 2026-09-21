@@ -23,6 +23,7 @@ register = "register"
 
 [permissions]
 tools = ["read", "soft_write", "scene_write", "execute", "file_write"]
+frontend = true
 
 [[contributes.solvers]]
 id = "witwin.radar.simulate"
@@ -40,3 +41,7 @@ python = "${backend:python}"
 cancel = true
 partials = true
 query = ["snapshot_view", "animation_view", "animation_export", "animation_replay", "animation_manifest"]
+
+[contributes.viewport.host]
+entry = "frontend/viewport.mjs"
+sdkVersion = "1.6.0"
