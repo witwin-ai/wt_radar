@@ -85,16 +85,20 @@ Studio can load a metadata-bearing exported result without rerunning the solver.
 Replay uses the official Radar 0.4 processing API and the existing numeric
 LineChart/Heatmap widgets.
 
-For an exported or measured `.npz` recording, **Measured Recording Overview**
-adds three whole-recording views after **Load Saved Result**:
+For an exported or measured `.npz` recording, the existing **Radar Replay**
+figure is the single review surface. **All Frames** is enabled by default and
+adds an in-figure Play/Pause button and frame scrubber for Range Profile and
+Range-Doppler. The same **Result Display** selector also provides:
 
 - **Micro-Doppler**: time x closing velocity, integrated across range.
 - **Range-Time**: time x range, integrated across Doppler velocity.
 - **Motion Energy**: normalized energy outside the zero-Doppler bin.
 
-Click **Build Complete Recording Overview** after choosing TX/RX. The heatmaps
-show relative amplitude in dB against the recording peak and retain every saved
-frame and physical bin; changing TX/RX clears the old overview until rebuilt.
+The complete-recording heatmaps show relative amplitude in dB against the
+recording peak and retain every saved frame and physical bin. Hardware timestamp
+jitter is rendered on uniform display bins between the measured start/end times
+because Studio heatmaps require uniform x spacing. Turn off **All Frames** only
+when a specific numeric frame/chirp needs inspection.
 
 ## Runtime contract
 

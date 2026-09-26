@@ -10,7 +10,7 @@ from witwin.radar import Radar
 from witwin.radar.processing import ProcessingAxes
 from witwin.radar.synthesis.assembly import SynthesisResult
 from wt_radar.adapter.saved_result import SavedRadarResult
-from wt_radar.adapter.recording_overview import build_recording_overview
+from wt_radar.adapter.recording_overview import build_recording_overview, recording_overview_plot
 from wt_radar.components.radar import RadarComponent
 
 
@@ -89,26 +89,31 @@ def test_complete_recording_overview_keeps_every_time_and_physical_bin(tmp_path,
     assert overview.motion_energy.max() == pytest.approx(1.0)
 
 
-def test_component_publishes_all_three_recording_overview_figures(tmp_path, payload):
+def test_component_reuses_radar_replay_figure_for_complete_recording_views(tmp_path, payload):
     component = RadarComponent()
     component.saved_result_path = str(save(tmp_path, payload))
     component.load_saved_result()
-    status = component.build_recording_overview()
-    assert "2 frames" in status
-    micro = component.micro_doppler_figure.to_dict()
-    range_time = component.range_time_figure.to_dict()
-    energy = component.motion_energy_figure.to_dict()
-    assert micro["type"] == "imshow"
-    assert range_time["type"] == "imshow"
-    assert energy["type"] == "line"
-    assert micro["data"]["x"] == payload["times_s"].tolist()
-    assert range_time["data"]["x"] == payload["times_s"].tolist()
-    assert energy["data"]["series"][0]["x"] == payload["times_s"].tolist()
-    component._clear_recording_overview("Antenna selection changed; rebuild the complete recording overview.")
-    assert "Antenna selection changed" in component.overview_status
-    assert not component.micro_doppler_figure._series
-    assert not component.range_time_figure._series
-    assert not component.motion_energy_figure._series
+    for view, expected_type in (
+        ("micro_doppler", "imshow"),
+        ("range_time", "imshow"),
+        ("motion_energy", "line"),
+    ):
+        component.view = view
+        status = component.update_view()
+        figure = component.signal_figure.to_dict()
+        assert expected_type == figure["type"]
+        assert "2 frames" in status
+        assert "all 2 frames" in figure["title"]
+
+
+def test_heatmap_uses_uniform_render_bins_for_jittered_hardware_time(tmp_path, payload):
+    payload["cube"] = np.concatenate([payload["cube"], payload["cube"][:1]], axis=0)
+    payload["times_s"] = np.array([0.0, 0.101, 0.199])
+    overview = build_recording_overview(SavedRadarResult.load(save(tmp_path, payload)), 0, 0)
+    figure = recording_overview_plot(overview, "micro_doppler").to_dict()
+    rendered_time = np.asarray(figure["data"]["x"])
+    assert np.allclose(np.diff(rendered_time), np.diff(rendered_time)[0])
+    assert rendered_time[[0, -1]].tolist() == [0.0, 0.199]
 
 
 @pytest.mark.parametrize("change", ["metadata", "shape", "time", "nonfinite", "axis", "real", "beat"])

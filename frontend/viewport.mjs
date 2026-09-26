@@ -118,6 +118,8 @@ function createRecordingWidget(host, React) {
     const [time, setTime] = useState(() => manifest && host.playback
       ? host.playback.getTime(manifest.sceneId) : null);
     const [loaded, setLoaded] = useState();
+    const [manualFrame, setManualFrame] = useState(null);
+    const [playing, setPlaying] = useState(false);
 
     useEffect(() => {
       if (!manifest || !host.playback) return undefined;
@@ -143,19 +145,87 @@ function createRecordingWidget(host, React) {
       return () => { disposed = true; lease?.release(); };
     }, [manifest?.asset?.uri, manifest?.asset?.contentHash, manifest?.asset?.byteLength]);
 
+    useEffect(() => {
+      setManualFrame(null);
+      setPlaying(false);
+    }, [manifest?.asset?.contentHash, manifest?.view]);
+
+    useEffect(() => {
+      if (!playing || !manifest || manualFrame === null) return undefined;
+      if (manualFrame >= manifest.timesS.length - 1) {
+        setPlaying(false);
+        return undefined;
+      }
+      const measuredDelay = 1000 * (manifest.timesS[manualFrame + 1] - manifest.timesS[manualFrame]);
+      const timer = globalThis.setTimeout(
+        () => setManualFrame((frame) => frame === null ? 0 : Math.min(frame + 1, manifest.timesS.length - 1)),
+        Math.max(16, Math.min(measuredDelay, 1000)),
+      );
+      return () => globalThis.clearTimeout(timer);
+    }, [playing, manualFrame, manifest]);
+
     let value;
     if (parsed.error) value = textPlot("Invalid Radar recording", parsed.error);
     else if (loaded?.error) value = textPlot(manifest.sourceLabel, `Radar replay unavailable: ${loaded.error}`);
     else if (!loaded?.samples) value = textPlot(manifest.sourceLabel, "Loading and verifying recorded Radar frames…");
     else {
-      const frame = recordingFrameAtTime(manifest, time);
+      const frame = manualFrame ?? recordingFrameAtTime(manifest, time);
       value = frame === null
         ? textPlot(manifest.sourceLabel, `No recorded Radar frame at scene time ${Number(time).toFixed(3)} s.`)
         : recordingFramePlot(manifest, loaded.samples, frame);
     }
-    return host.ui.renderWidget(
+    const plot = host.ui.renderWidget(
       { ...props.config, widget_type: "plot" },
       { ...props, value },
+    );
+    if (!manifest || !loaded?.samples) return plot;
+
+    const timelineFrame = recordingFrameAtTime(manifest, time);
+    const frame = manualFrame ?? timelineFrame ?? 0;
+    const playLabel = playing ? "Pause" : (frame >= manifest.timesS.length - 1 ? "Replay" : "Play");
+    const startOrPause = () => {
+      if (playing) {
+        setPlaying(false);
+        return;
+      }
+      setManualFrame(frame >= manifest.timesS.length - 1 ? 0 : frame);
+      setPlaying(true);
+    };
+    return React.createElement(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: "8px", minWidth: 0 } },
+      plot,
+      React.createElement(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "8px", padding: "0 8px 8px" } },
+        React.createElement("button", { type: "button", onClick: startOrPause }, playLabel),
+        React.createElement("input", {
+          type: "range",
+          min: 0,
+          max: manifest.timesS.length - 1,
+          step: 1,
+          value: frame,
+          onChange: (event) => {
+            setPlaying(false);
+            setManualFrame(Number(event.target.value));
+          },
+          style: { flex: 1 },
+          "aria-label": "Recorded Radar frame",
+        }),
+        React.createElement(
+          "span",
+          { style: { whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" } },
+          `${frame + 1}/${manifest.timesS.length} · ${manifest.timesS[frame].toFixed(3)} s`,
+        ),
+        React.createElement("button", {
+          type: "button",
+          onClick: () => {
+            setPlaying(false);
+            setManualFrame(null);
+          },
+          disabled: manualFrame === null,
+        }, "Follow Timeline"),
+      ),
     );
   };
 }

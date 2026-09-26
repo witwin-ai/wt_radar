@@ -152,6 +152,17 @@ def show_saved_result(component):
     if bool(component.static_clutter_removal) or bool(component.show_cfar):
         raise ValueError("Saved-result replay does not apply static-clutter removal or CFAR. Turn these controls off.")
     view = str(component.view)
+    if view in ("micro_doppler", "range_time", "motion_energy"):
+        from .recording_overview import build_recording_overview, recording_overview_plot
+        cache = getattr(component, "_recording_overview", None)
+        if cache is None or (cache.tx, cache.rx) != (tx, rx):
+            cache = build_recording_overview(result, tx, rx)
+            component._recording_overview = cache
+        component.signal_figure.set_plot_data(recording_overview_plot(cache, view))
+        return (
+            f"{view.replace('_', ' ').title()}: {len(cache.times_s)} frames across "
+            f"{cache.times_s[-1] - cache.times_s[0]:.3f}s | TX{tx} RX{rx}"
+        )
     if view == "range_doppler":
         from .snapshot import SnapshotResult, snapshot_view
         from .replay import numeric_plot

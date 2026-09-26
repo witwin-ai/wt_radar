@@ -87,11 +87,15 @@ def build_recording_overview(result, tx=0, rx=0):
 def _image_plot(values, x, y, title, ylabel):
     from witwin_server.core.components.core.plot import PlotData
 
+    # Studio's heatmap requires uniformly spaced bins. Hardware timestamps are
+    # increasing but contain sub-frame USB/host jitter, so render them on the
+    # measured recording endpoints while retaining every frame in order.
+    display_time = np.linspace(float(x[0]), float(x[-1]), len(x), dtype=np.float64)
     return PlotData(
         "imshow",
         {
             "values": values.T.tolist(),
-            "x": x.tolist(),
+            "x": display_time.tolist(),
             "y": y.tolist(),
             "origin": "lower",
             "range": {
@@ -106,41 +110,41 @@ def _image_plot(values, x, y, title, ylabel):
     )
 
 
-def publish_recording_overview(component, overview):
-    """Publish three explicit figures; no Timeline or saved-result state changes."""
+def recording_overview_plot(overview, view):
+    """Return one whole-recording plot for the shared Radar Replay figure."""
     from witwin_server.core.components.core.plot import PlotData
 
     antenna = f"TX{overview.tx} RX{overview.rx}"
-    component.micro_doppler_figure.set_plot_data(_image_plot(
-        overview.micro_doppler_db,
-        overview.times_s,
-        overview.velocity_mps,
-        f"Micro-Doppler | complete recording | {antenna}",
-        "Closing velocity (m/s)",
-    ))
-    component.range_time_figure.set_plot_data(_image_plot(
-        overview.range_time_db,
-        overview.times_s,
-        overview.range_m,
-        f"Range-Time | complete recording | {antenna}",
-        "Range (m)",
-    ))
-    component.motion_energy_figure.set_plot_data(PlotData(
-        "line",
-        {
-            "series": [{
-                "x": overview.times_s.tolist(),
-                "y": overview.motion_energy.tolist(),
-                "label": "Non-zero-Doppler energy",
-            }],
-            "xlim": [float(overview.times_s[0]), float(overview.times_s[-1])],
-            "ylim": [0.0, 1.05],
-        },
-        title=f"Motion Energy | complete recording | {antenna}",
-        xlabel="Time (s)",
-        ylabel="Relative motion energy (recording peak = 1)",
-    ))
-    return (
-        f"Overview ready: {len(overview.times_s)} frames across "
-        f"{overview.times_s[-1] - overview.times_s[0]:.3f}s | {antenna}"
-    )
+    if view == "micro_doppler":
+        return _image_plot(
+            overview.micro_doppler_db,
+            overview.times_s,
+            overview.velocity_mps,
+            f"Micro-Doppler | all {len(overview.times_s)} frames | {antenna}",
+            "Closing velocity (m/s)",
+        )
+    if view == "range_time":
+        return _image_plot(
+            overview.range_time_db,
+            overview.times_s,
+            overview.range_m,
+            f"Range-Time | all {len(overview.times_s)} frames | {antenna}",
+            "Range (m)",
+        )
+    if view == "motion_energy":
+        return PlotData(
+            "line",
+            {
+                "series": [{
+                    "x": overview.times_s.tolist(),
+                    "y": overview.motion_energy.tolist(),
+                    "label": "Non-zero-Doppler energy",
+                }],
+                "xlim": [float(overview.times_s[0]), float(overview.times_s[-1])],
+                "ylim": [0.0, 1.05],
+            },
+            title=f"Motion Energy | all {len(overview.times_s)} frames | {antenna}",
+            xlabel="Time (s)",
+            ylabel="Relative motion energy (recording peak = 1)",
+        )
+    raise ValueError(f"Unsupported complete-recording view: {view}")
