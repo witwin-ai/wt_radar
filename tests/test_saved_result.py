@@ -10,6 +10,7 @@ from witwin.radar import Radar
 from witwin.radar.processing import ProcessingAxes
 from witwin.radar.synthesis.assembly import SynthesisResult
 from wt_radar.adapter.saved_result import SavedRadarResult
+from wt_radar.adapter.recording_overview import build_recording_overview
 from wt_radar.components.radar import RadarComponent
 
 
@@ -69,6 +70,45 @@ def test_component_reuses_existing_figure_and_recorded_time(tmp_path, payload):
     assert "0.1000s" in figure["title"]
     assert component._radar is None and component._signal is None
     assert component.signal_source is None
+
+
+def test_complete_recording_overview_keeps_every_time_and_physical_bin(tmp_path, payload):
+    result = SavedRadarResult.load(save(tmp_path, payload))
+    overview = build_recording_overview(result, 0, 0)
+    assert np.array_equal(overview.times_s, payload["times_s"])
+    assert np.array_equal(overview.range_m, payload["range_m"])
+    assert np.array_equal(overview.velocity_mps, payload["velocity_mps"])
+    assert overview.micro_doppler_db.shape == (2, len(payload["velocity_mps"]))
+    assert overview.range_time_db.shape == (2, len(payload["range_m"]))
+    assert overview.motion_energy.shape == (2,)
+    assert np.isfinite(overview.micro_doppler_db).all()
+    assert np.isfinite(overview.range_time_db).all()
+    assert np.isfinite(overview.motion_energy).all()
+    assert overview.micro_doppler_db.max() == pytest.approx(0.0)
+    assert overview.range_time_db.max() == pytest.approx(0.0)
+    assert overview.motion_energy.max() == pytest.approx(1.0)
+
+
+def test_component_publishes_all_three_recording_overview_figures(tmp_path, payload):
+    component = RadarComponent()
+    component.saved_result_path = str(save(tmp_path, payload))
+    component.load_saved_result()
+    status = component.build_recording_overview()
+    assert "2 frames" in status
+    micro = component.micro_doppler_figure.to_dict()
+    range_time = component.range_time_figure.to_dict()
+    energy = component.motion_energy_figure.to_dict()
+    assert micro["type"] == "imshow"
+    assert range_time["type"] == "imshow"
+    assert energy["type"] == "line"
+    assert micro["data"]["x"] == payload["times_s"].tolist()
+    assert range_time["data"]["x"] == payload["times_s"].tolist()
+    assert energy["data"]["series"][0]["x"] == payload["times_s"].tolist()
+    component._clear_recording_overview("Antenna selection changed; rebuild the complete recording overview.")
+    assert "Antenna selection changed" in component.overview_status
+    assert not component.micro_doppler_figure._series
+    assert not component.range_time_figure._series
+    assert not component.motion_energy_figure._series
 
 
 @pytest.mark.parametrize("change", ["metadata", "shape", "time", "nonfinite", "axis", "real", "beat"])

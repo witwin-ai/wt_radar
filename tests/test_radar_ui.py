@@ -29,6 +29,11 @@ def test_current_controls_keep_simulation_replay_and_export():
         assert RadarComponent().target_motion_sampling == "chirp"
         assert fields["target_site_budget"]["group"] == "StudioAnimation"
         assert RadarComponent().target_site_budget == 24
+        assert groups["MeasuredOverview"]["display_name"] == "Measured Recording Overview"
+        assert fields["micro_doppler_figure"]["group"] == "MeasuredOverview"
+        assert fields["range_time_figure"]["group"] == "MeasuredOverview"
+        assert fields["motion_energy_figure"]["group"] == "MeasuredOverview"
+        assert "build_recording_overview" in buttons
 
 
 def test_old_stream_and_timeline_settings_round_trip_without_ui_controls():

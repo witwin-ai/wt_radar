@@ -57,6 +57,7 @@ _SOLVE = "Solve"
 _POSTPROC = "PostProcessing"   # signal views + detector/CFAR run on the solved signal
 _TIMELINE = "Timeline"
 _SAVED = "SavedResult"
+_OVERVIEW = "MeasuredOverview"
 _SNAPSHOT = "SnapshotTarget"
 _ANIMATION = "StudioAnimation"
 
@@ -124,6 +125,11 @@ class RadarComponent(Component):
     ))
     define_group(foldout_group(_ANIMATION, display_name="Simulation & Replay (multi-frame)"))
     define_group(foldout_group(_SAVED, display_name="Load Saved Recording", collapsed=True))
+    define_group(foldout_group(
+        _OVERVIEW,
+        display_name="Measured Recording Overview",
+        collapsed=True,
+    ))
     define_group(foldout_group(_POSTPROC, display_name="Result Display"))
     # --- frequency / power (RadarConfig) ------------------------------------
     fc = float_field(77e9, min=1e9, max=300e9, units=FREQUENCY_UNITS, default_unit="GHz",
@@ -290,6 +296,16 @@ class RadarComponent(Component):
     saved_result_loaded = bool_field(False, readonly=True, hidden=True, transient=True, group=_SAVED)
     saved_result_status = string_field("No saved result loaded", readonly=True, transient=True, group=_SAVED)
 
+    overview_status = string_field(
+        "Load a saved recording, then build its complete time overview.",
+        readonly=True,
+        transient=True,
+        group=_OVERVIEW,
+    )
+    micro_doppler_figure = figure(title="Micro-Doppler (complete recording)", group=_OVERVIEW)
+    range_time_figure = figure(title="Range-Time (complete recording)", group=_OVERVIEW)
+    motion_energy_figure = figure(title="Motion Energy (complete recording)", group=_OVERVIEW)
+
     snapshot_model = string_field("One explicit RCS point; frozen pose, NO gait Doppler", readonly=True,
                                   display_name="Snapshot diagnostic model", group=_SNAPSHOT, transient=True)
     snapshot_target_id = string_field("", group=_SNAPSHOT,
@@ -392,9 +408,14 @@ class RadarComponent(Component):
             self.saved_result_loaded = False
             self.saved_result_status = "Result path changed; click Load Saved Result"
             self.signal_figure.clear()
+            self._clear_recording_overview()
             return
         if self._saved_result is not None:
             if field_name in self._POSTPROC_AUTO_REFRESH_FIELDS | {"saved_frame_index", "saved_chirp_index"}:
+                if field_name in {"tx_index", "rx_index"}:
+                    self._clear_recording_overview(
+                        "Antenna selection changed; rebuild the complete recording overview."
+                    )
                 self.update_view()
             return
         if self._animation_result:
@@ -424,6 +445,12 @@ class RadarComponent(Component):
     def _has_preview_result(self):
         return self._saved_result is not None or bool(getattr(self, "_solver_result_handle", "")) or getattr(self, "_signal", None) is not None
 
+    def _clear_recording_overview(self, status=None):
+        self.micro_doppler_figure.clear().title("Micro-Doppler (complete recording)")
+        self.range_time_figure.clear().title("Range-Time (complete recording)")
+        self.motion_energy_figure.clear().title("Motion Energy (complete recording)")
+        self.overview_status = status or "Load a saved recording, then build its complete time overview."
+
     @button(display_name="Load Saved Result", group=_SAVED)
     def load_saved_result(self):
         """Load exported producer metadata and reuse the existing figure UI."""
@@ -443,6 +470,7 @@ class RadarComponent(Component):
         self._clear_query_cache()
         self.signal_source = None
         self.signal_figure.clear()
+        self._clear_recording_overview()
         self.saved_result_status = "Loading saved result"
         try:
             result = SavedRadarResult.load(str(self.saved_result_path))
@@ -465,6 +493,26 @@ class RadarComponent(Component):
             f"{result.producer.get('physical_model', 'unspecified physical model')}"
         )
         return self.update_view()
+
+    @button(display_name="Build Complete Recording Overview", group=_OVERVIEW)
+    def build_recording_overview(self):
+        """Show Micro-Doppler, Range-Time, and motion energy for every saved frame."""
+        if self._saved_result is None:
+            raise ValueError("Load a saved Radar result before building its recording overview.")
+        self.overview_status = "Building complete recording overview"
+        try:
+            from ..adapter.recording_overview import build_recording_overview, publish_recording_overview
+            overview = build_recording_overview(
+                self._saved_result,
+                int(self.tx_index),
+                int(self.rx_index),
+            )
+            self.overview_status = publish_recording_overview(self, overview)
+            return self.overview_status
+        except Exception as exc:
+            self._clear_recording_overview()
+            self.overview_status = f"Overview failed: {exc}"
+            raise
 
     def _max_range(self) -> float:
         return Derived.compute(self)["max_range_m"]
