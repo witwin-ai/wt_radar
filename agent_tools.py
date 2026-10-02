@@ -798,6 +798,7 @@ def _operation_result(receipt: dict[str, Any], obj: Any | None = None) -> dict[s
         "verification": receipt.get("verification"),
         "error": receipt.get("error"),
         "next_step": receipt.get("next_step"),
+        "motion_fidelity": receipt.get("motion_fidelity"),
     }
     if obj is not None:
         result["radar"] = _sensor_summary(obj)
@@ -966,6 +967,7 @@ def _require_matching_operation(
     scene_id: str,
     radar_object_id: str,
     input_fingerprint: str | None = None,
+    motion_fidelity_report_id: str | None = None,
 ) -> dict[str, Any]:
     receipt = _get_operation(ctx, operation_id)
     if receipt is None:
@@ -977,6 +979,9 @@ def _require_matching_operation(
     expected = {"scene_id": str(scene_id), "radar_object_id": str(radar_object_id)}
     if input_fingerprint is not None:
         expected["input_fingerprint"] = str(input_fingerprint)
+    if motion_fidelity_report_id is not None:
+        expected["motion_fidelity_report_id"] = str(
+            motion_fidelity_report_id)
     conflicts = {
         key: {"stored": receipt.get(key), "requested": value}
         for key, value in expected.items()
@@ -999,6 +1004,7 @@ async def _run_animation_job(
     obj: Any,
     input_fingerprint: str,
     native_preflight: dict[str, Any],
+    motion_fidelity: dict[str, Any] | None = None,
 ) -> None:
     receipt = _get_operation(ctx, operation_id) or {}
     receipt.update(status="running", next_step="wait_for_simulation")
@@ -1006,6 +1012,8 @@ async def _run_animation_job(
     radar = obj.get_component("Radar")
     setattr(radar, "_agent_input_fingerprint", input_fingerprint)
     setattr(radar, "_agent_native_preflight", copy.deepcopy(native_preflight))
+    if motion_fidelity is not None:
+        setattr(radar, "_motion_fidelity_provenance", copy.deepcopy(motion_fidelity))
     def _on_submitted(run_id: str) -> None:
         latest = _get_operation(ctx, operation_id) or receipt
         _put_operation(ctx, {
@@ -1149,6 +1157,10 @@ async def _run_animation_job(
             delattr(radar, "_agent_input_fingerprint")
         if hasattr(radar, "_agent_native_preflight"):
             delattr(radar, "_agent_native_preflight")
+        if (motion_fidelity is not None
+                and getattr(radar, "_motion_fidelity_provenance", None)
+                == motion_fidelity):
+            delattr(radar, "_motion_fidelity_provenance")
 
 
 def _validate_interval(scene: Any, radar: Any, start_s: float, duration_s: float, fps: float) -> dict[str, Any]:
@@ -2102,6 +2114,24 @@ def register(ctx: Any) -> None:
                 "radar_object_id": {"type": "string", "minLength": 1},
                 "operation_id": {"type": "string", "minLength": 1, "maxLength": 160},
                 "expected_input_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "motion_fidelity": {
+                    "type": "object",
+                    "description": (
+                        "Optional final_motion_fidelity report returned by the motion tool. "
+                        "It is bound to the current baked Timeline and embedded in the Radar result."
+                    ),
+                    "required": ["report_id", "snapshot_fingerprint", "status"],
+                    "properties": {
+                        "report_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "snapshot_fingerprint": {
+                            "type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["passed", "needs_review", "failed", "not_evaluated"],
+                        },
+                    },
+                    "additionalProperties": True,
+                },
                 "wait_for_completion": {
                     "type": "boolean",
                     "default": False,
@@ -2123,6 +2153,14 @@ def register(ctx: Any) -> None:
         obj = _select_radar(scene, str(args["radar_object_id"]))
         operation_id = str(args["operation_id"])
         expected = str(args["expected_input_fingerprint"])
+        motion_fidelity = None
+        if args.get("motion_fidelity") is not None:
+            from .adapter.fidelity_ab import normalize_fidelity_provenance
+            from .adapter.replay import motion_fingerprint
+            motion_fidelity = normalize_fidelity_provenance(
+                args["motion_fidelity"],
+                radar_motion_fingerprint=motion_fingerprint(scene),
+            )
         current = _measurement_input_fingerprint(scene, obj)
         if current != expected:
             raise ToolError(
@@ -2138,6 +2176,8 @@ def register(ctx: Any) -> None:
                 scene_id=str(scene.scene_id),
                 radar_object_id=str(obj.id),
                 input_fingerprint=expected,
+                motion_fidelity_report_id=(
+                    motion_fidelity["report_id"] if motion_fidelity else ""),
             )
             if bool(args.get("wait_for_completion")) and existing.get("status") in {"queued", "running"}:
                 task = _ACTIVE_JOBS.get(_job_key(ctx, operation_id))
@@ -2182,6 +2222,9 @@ def register(ctx: Any) -> None:
             "scene_id": str(scene.scene_id),
             "radar_object_id": str(obj.id),
             "input_fingerprint": expected,
+            "motion_fidelity_report_id": (
+                motion_fidelity["report_id"] if motion_fidelity else None),
+            "motion_fidelity": motion_fidelity,
             "status": "queued",
             "created_at": _utc_now(),
             "run_id": None,
@@ -2199,6 +2242,7 @@ def register(ctx: Any) -> None:
             obj=obj,
             input_fingerprint=expected,
             native_preflight=native_preflight,
+            motion_fidelity=motion_fidelity,
         ))
         _ACTIVE_JOBS[key] = task
         owned_job_keys.add(key)

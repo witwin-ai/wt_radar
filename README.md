@@ -100,6 +100,30 @@ jitter is rendered on uniform display bins between the measured start/end times
 because Studio heatmaps require uniform x spacing. Turn off **All Frames** only
 when a specific numeric frame/chirp needs inspection.
 
+### Motion-fidelity A/B evidence
+
+`submit_animation_measurement` optionally accepts the complete
+`final_motion_fidelity` object returned by Motion Matching. Radar binds its
+report ID to the current baked Timeline fingerprint and embeds the reduced
+provenance in the exported NPZ. A stale report cannot be attached after the
+Timeline changes.
+
+Compare two exports made with the same interval and Radar configuration:
+
+```powershell
+python tools/compare_motion_fidelity.py `
+  --before C:\path\before.npz `
+  --after C:\path\after.npz `
+  --output C:\path\motion-fidelity-ab.json
+```
+
+Without a separately identified trusted reference, the report describes
+micro-Doppler distribution and motion-energy changes but explicitly refuses to
+claim improvement. Add `--reference` and `--reference-id` to measure whether
+the repaired result is closer to that reference. These metrics are offline
+evidence and never replace the animation fidelity, collision, support, or
+Timeline commit gates.
+
 ## Runtime contract
 
 The plugin manifest and startup checks require:
