@@ -9,6 +9,10 @@ combines the supported direct environment return, calls official Radar waveform
 synthesis, and publishes results for Studio replay and export. It does not modify
 or replace Radar, Channel, or Maxwell physics code.
 
+The animated-target boundary is the existing Studio `SkinnedMesh` plus baked
+`Transform` tracks; no target-side Radar component is required. See
+[the animated skinned target contract](docs/animated-skinned-target-contract.md).
+
 The default animation policy matches the original WT Radar behavior: moving
 skin sites use line-of-sight target returns, while static room geometry still
 contributes a native one-bounce background. **Target Multipath** is an explicit
