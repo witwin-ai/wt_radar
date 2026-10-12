@@ -57,6 +57,23 @@ The model also requested Replay although the sentence only asked for a recording
 The native measurement is valid, but this is recorded as an Agent intent-routing
 overreach outside the Radar physics implementation.
 
+### Genesis human to Radar 0.4.1
+
+- Prompt 1: `In the current furnished room, add one human who walks forward naturally and turns slightly. Make about two seconds of animation and use baked transform playback. Do not create a cat or dog, and do not change the furniture. Do this now.`
+- Prompt 2: `Now place one Radar automatically so it faces that generated person. Record the person from 0 to 1 second at 4 FPS using the real GPU Radar 0.4 pipeline, verify the measurement, and prepare synchronized replay. Keep the human animation unchanged, do not export an NPZ, and finish the work now.`
+- Evidence: `C:\WiTwin\test-runs\human-radar-agent-20261011-f\report.json`
+- Isolated review Project: `C:\WiTwin\test-runs\human-radar-agent-20261011-f\harness-e2e-b5aaa190-27fb-4ae9-b1d8-cf57bea52654`
+- Agent result: one generated SMPL human (`walking_human`), one automatically placed Radar (`agent_radar`), durable verified receipt, and synchronized replay payload
+- Human playback: 40 source frames at 20 FPS, 1.95 seconds, 26 baked Transform tracks, 1,040 baked keyframes, 24-bone skinned mesh
+- Radar result: 4/4 finite nonzero CUDA frames at `0, 0.25, 0.5, 0.75 s`; cube shape `[4, 3, 4, 128, 256]`
+- Runtime: `witwin-radar 0.4.1`, `witwin-channel 0.5.0`, `witwin 0.4.0`; NVIDIA GeForce RTX 4090 Laptop GPU
+- Target model: `studio_visible_skinned_surface_sites_v2`; 24 declared sites, 3 interval-visible stable sites, no zero-fill or dropped active sites
+- Motion evidence: 0.7831 m position extent, 3 moving sites, 4 dynamic delay-rate frames, and 4 coupled dynamic-return frames
+- Room response: 28 material slots and 60 coherent native single-bounce reflection paths
+- Replay: durable operation status `replay_ready`; the 0.4.1 submission atomically verified and prepared replay, so no redundant replay mutation was required
+- Export: intentionally omitted, matching the natural-language request
+- Harness verdict: passed every end-to-end assertion through the real configured provider, Workbench tool routing, ProjectServer, Genesis, Humanoid, and Radar plugins
+
 ### Stale-result safety check
 
 - Prompt: `Prepare replay and NPZ from the last successful recording.`
