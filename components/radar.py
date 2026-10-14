@@ -277,6 +277,7 @@ class RadarComponent(Component):
         mode="stream",
         kind="radar.result",
         group=_ANIMATION,
+        transient=False,
         hide_label=True,
         show_header=False,
         hide_if="saved_result_loaded",
