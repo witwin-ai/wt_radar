@@ -54,6 +54,19 @@ def test_old_stream_and_timeline_settings_round_trip_without_ui_controls():
     assert RadarComponent._fields_meta["enable_thermal"].group == "Noise"
 
 
+def test_timeline_replay_source_round_trips_with_the_scene():
+    component = RadarComponent()
+    descriptor = {"sourceId": "radar.replay.saved", "mode": "timeline"}
+    component.signal_source = descriptor
+
+    saved = component.to_properties_dict()["properties"]
+    assert saved["signal_source"] == descriptor
+
+    restored = RadarComponent()
+    restored.from_properties_dict(saved)
+    assert restored.signal_source == descriptor
+
+
 def test_library_demo_selects_its_radar04_snapshot_target():
     scene = Scene(scene_id="radar-demo", name="Radar demo")
     settings = _make_demo(SimpleNamespace(scene=scene, name="Radar Settings"))
