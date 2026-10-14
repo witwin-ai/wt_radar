@@ -190,14 +190,27 @@ class DataSources:
         return descriptor
 
 
+class Persistence:
+    def __init__(self):
+        self.saved = []
+
+    def save_scene_file(self, scene, *, force_overwrite=False):
+        self.saved.append((scene, force_overwrite))
+        return True
+
+
 def publish_fixture(saved):
     room, component = replay_scene()
     metadata = {"scene_id": room.scene_id, "motion_fingerprint": replay.motion_fingerprint(room)}
     record, data = replay.build_recording(replace(saved, producer=metadata))
     service = BinaryService()
     data_sources = DataSources()
+    persistence = Persistence()
     api = SimpleNamespace(
-        server=SimpleNamespace(handlers={"binary_assets": SimpleNamespace(service=service)}),
+        server=SimpleNamespace(
+            handlers={"binary_assets": SimpleNamespace(service=service)},
+            persistence=persistence,
+        ),
         data_sources=data_sources,
     )
     return room, component, record, data, service, api
@@ -226,6 +239,7 @@ def test_publish_uses_binary_asset_and_bound_figure_not_rgb(saved):
     }
     assert component.signal_source["sourceId"] == descriptor["sourceId"]
     assert api.data_sources.registered == [descriptor]
+    assert api.server.persistence.saved == [(room, True)]
     assert "recording" in figure["data"] and "image" not in figure["data"]
     assert record == original_record  # metadata supplied by producer is not mutated
 
