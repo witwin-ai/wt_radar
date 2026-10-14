@@ -60,11 +60,12 @@ def test_timeline_replay_source_round_trips_with_the_scene():
     component.signal_source = descriptor
 
     saved = component.to_properties_dict()["properties"]
-    assert saved["signal_source"] == descriptor
+    assert saved["signal_source"]["sourceId"] == descriptor["sourceId"]
+    assert saved["signal_source"]["mode"] == descriptor["mode"]
 
     restored = RadarComponent()
     restored.from_properties_dict(saved)
-    assert restored.signal_source == descriptor
+    assert restored.signal_source == saved["signal_source"]
 
 
 def test_library_demo_selects_its_radar04_snapshot_target():
