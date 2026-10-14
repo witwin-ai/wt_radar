@@ -57,7 +57,7 @@ export function recordingFrameAtTime(manifest, time) {
   return low - 1;
 }
 
-export function recordingFramePlot(manifest, samples, frame) {
+export function recordingFramePlot(manifest, samples, frame, view = manifest.view ?? "range_doppler") {
   if (!Number.isInteger(frame) || frame < 0 || frame >= manifest.timesS.length
       || samples.length !== manifest.timesS.length * manifest.frameStride) {
     throw new Error("Invalid Radar recording frame.");
@@ -65,7 +65,7 @@ export function recordingFramePlot(manifest, samples, frame) {
   const offset = frame * manifest.frameStride;
   const rangeCount = manifest.rangeM.length;
   const title = `${manifest.sourceLabel} | measurement ${manifest.timesS[frame].toFixed(3)} s | frame ${frame + 1}/${manifest.timesS.length}`;
-  if ((manifest.view ?? "range_doppler") === "range_profile") {
+  if (view === "range_profile") {
     return {
       type: "line",
       title,
@@ -118,6 +118,15 @@ function createRecordingWidget(host, React) {
     const [time, setTime] = useState(() => manifest && host.playback
       ? host.playback.getTime(manifest.sceneId) : null);
     const [loaded, setLoaded] = useState();
+    const [view, setView] = useState(() => manifest?.view ?? "range_doppler");
+    const [followTimeline, setFollowTimeline] = useState(true);
+    const [manualFrame, setManualFrame] = useState(0);
+
+    useEffect(() => {
+      setView(manifest?.view ?? "range_doppler");
+      setFollowTimeline(true);
+      setManualFrame(0);
+    }, [manifest?.asset?.contentHash]);
 
     useEffect(() => {
       if (!manifest || !host.playback) return undefined;
@@ -148,15 +157,48 @@ function createRecordingWidget(host, React) {
     else if (loaded?.error) value = textPlot(manifest.sourceLabel, `Radar replay unavailable: ${loaded.error}`);
     else if (!loaded?.samples) value = textPlot(manifest.sourceLabel, "Loading and verifying recorded Radar frames…");
     else {
-      const frame = recordingFrameAtTime(manifest, time);
+      const frame = followTimeline
+        ? recordingFrameAtTime(manifest, time)
+        : Math.min(manualFrame, manifest.timesS.length - 1);
       value = frame === null
         ? textPlot(manifest.sourceLabel, `No recorded Radar frame at scene time ${Number(time).toFixed(3)} s.`)
-        : recordingFramePlot(manifest, loaded.samples, frame);
+        : recordingFramePlot(manifest, loaded.samples, frame, view);
     }
-    return host.ui.renderWidget(
+    const plot = host.ui.renderWidget(
       { ...props.config, widget_type: "plot" },
       { ...props, value },
     );
+    if (!manifest) return plot;
+    const controlStyle = {
+      display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8,
+      padding: "6px 8px", marginBottom: 6, borderRadius: 4,
+      border: "1px solid var(--border-default)", background: "var(--bg-tertiary)",
+      color: "var(--text-primary)", fontSize: 12,
+    };
+    const viewSelect = React.createElement("select", {
+      value: view,
+      "aria-label": "Radar replay view",
+      onChange: (event) => setView(event.target.value),
+    },
+    React.createElement("option", { value: "range_profile" }, "Range Profile (line)"),
+    React.createElement("option", { value: "range_doppler" }, "Range-Doppler"));
+    const followControl = React.createElement("label", null,
+      React.createElement("input", {
+        type: "checkbox", checked: followTimeline,
+        onChange: (event) => setFollowTimeline(event.target.checked),
+      }), " Follow Timeline");
+    const frameControl = React.createElement("label", {
+      style: { display: "flex", alignItems: "center", gap: 5, opacity: followTimeline ? 0.55 : 1 },
+    }, "Frame",
+    React.createElement("input", {
+      type: "range", min: 0, max: manifest.timesS.length - 1, step: 1,
+      value: Math.min(manualFrame, manifest.timesS.length - 1), disabled: followTimeline,
+      "aria-label": "Radar replay frame",
+      onChange: (event) => setManualFrame(Number(event.target.value)),
+    }), `${Math.min(manualFrame, manifest.timesS.length - 1) + 1}/${manifest.timesS.length}`);
+    return React.createElement("div", null,
+      React.createElement("div", { style: controlStyle }, viewSelect, followControl, frameControl),
+      plot);
   };
 }
 

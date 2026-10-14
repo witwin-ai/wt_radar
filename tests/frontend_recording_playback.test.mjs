@@ -48,6 +48,14 @@ test("range-doppler plot slices the selected frame rather than frame zero", () =
   assert.match(last.title, /frame 3\/3/);
 });
 
+test("the replay view can switch from Doppler heatmap to range-profile line", () => {
+  const manifest = validateRecordingManifest(fixture());
+  const samples = Float32Array.from({ length: 18 }, (_, index) => index);
+  const profile = recordingFramePlot(manifest, samples, 1, "range_profile");
+  assert.equal(profile.type, "line");
+  assert.deepEqual(Array.from(profile.data.y), [6, 7]);
+});
+
 test("manifest rejects a payload whose byte length cannot hold every frame", () => {
   assert.throws(
     () => validateRecordingManifest({ ...fixture(), asset: { ...fixture().asset, byteLength: 68 } }),
