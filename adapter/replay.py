@@ -225,6 +225,10 @@ def publish_recording(component, api, record, data):
         }
         component.signal_figure.set_plot_data(PlotData("line", {"recording": record},
                                                       title="Recorded radar — follows this room's Timeline"))
+        persistence = getattr(api.server, "persistence", None)
+        save_scene = getattr(persistence, "save_scene_file", None)
+        if callable(save_scene) and save_scene(component.scene, force_overwrite=True) is False:
+            raise RuntimeError("Studio did not persist the Radar replay binding.")
     except Exception:
         component.signal_source = previous_source
         unregister = getattr(data_sources, "unregister", None)
