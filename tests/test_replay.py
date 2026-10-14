@@ -244,6 +244,16 @@ def test_publish_uses_binary_asset_and_bound_figure_not_rgb(saved):
     assert record == original_record  # metadata supplied by producer is not mutated
 
 
+def test_publish_preserves_selected_replay_view(saved):
+    _room, component, record, data, _service, api = publish_fixture(saved)
+    component.view = "range_profile"
+
+    replay.publish_recording(component, api, record, data)
+
+    manifest = component.signal_figure.to_dict()["data"]["recording"]
+    assert manifest["view"] == "range_profile"
+
+
 @pytest.mark.parametrize("change", ["scene", "motion", "bytes", "service"])
 def test_publish_refuses_mismatch_before_asset_or_figure_update(saved, change):
     room, component, record, data, service, api = publish_fixture(saved)

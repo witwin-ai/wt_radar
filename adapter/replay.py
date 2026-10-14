@@ -197,11 +197,14 @@ def publish_recording(component, api, record, data):
     result_id = record.get("resultId")
     if not result_id or result_id == "pending-result":
         result_id = str(getattr(component, "_solver_run_id", "") or getattr(component, "_solver_result_handle", "") or "saved-result")
+    selected_view = str(getattr(component, "view", "range_doppler"))
+    if selected_view not in {"range_profile", "range_doppler"}:
+        selected_view = "range_doppler"
     record = {
         **record,
         "resultId": result_id,
         "asset": ref.to_dict(),
-        "view": "range_doppler",
+        "view": selected_view,
         "motionVerifiedAtPreparation": bool(fingerprint),
         "sceneGeometryFingerprint": scene_geometry_fingerprint(component.scene),
         "radarPoseConfigFingerprint": radar_pose_config_fingerprint(component),
