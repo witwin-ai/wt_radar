@@ -364,7 +364,7 @@ class RadarComponent(Component):
         max=2400,
         group=_ANIMATION,
         description=(
-            "Engineering override for non-SMPL targets. SMPL humans automatically use 2400 "
+            "Engineering override for non-SMPL targets. SMPL humans automatically use 240 "
             "deterministic skinned-surface sites in the backend."
         ),
     )

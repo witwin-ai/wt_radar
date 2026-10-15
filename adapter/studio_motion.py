@@ -14,7 +14,7 @@ from .snapshot import _hierarchy
 
 LEGACY_ANATOMICAL_SITE_LIMIT = 64
 MAX_TARGET_SITE_BUDGET = 2400
-SMPL_TARGET_SITE_BUDGET = 2400
+SMPL_TARGET_SITE_BUDGET = 240
 
 
 def resolved_target_site_budget(scene, target_id, authored_budget):

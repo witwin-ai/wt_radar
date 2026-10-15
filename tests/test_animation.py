@@ -96,7 +96,7 @@ def test_smpl_human_uses_backend_dense_budget_without_authored_override():
     )
     scene = SimpleNamespace(get_object=lambda object_id: target if object_id == "human" else None)
 
-    assert resolved_target_site_budget(scene, "human", 24) == 2400
+    assert resolved_target_site_budget(scene, "human", 24) == 240
     assert resolved_target_site_budget(scene, "missing", 24) == 24
 
 
