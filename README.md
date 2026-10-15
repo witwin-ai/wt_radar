@@ -24,11 +24,12 @@ official Radar 0.4 error-controlled **Adaptive** policy remains available for
 comparison, but is not assumed to outperform chirp sampling. Path topology is
 still rediscovered at Studio-frame boundaries.
 
-**Target Site Budget** is an engineering override for untyped skinned targets.
-Budgets through 64 use anatomically prioritized bone anchors; larger values use
-deterministic full-surface coverage. Typed SMPL humans and registered animal
-actors use the backend's fixed 720-site policy per actor, without requiring an
-Agent or prompt parameter. The declared total target RCS remains constant.
+**Target Site Budget** is the fallback for untyped skinned targets. Typed SMPL
+humans default to the editable **Human Target Site Budget** (720), while
+registered animal actors default to the editable **Animal Target Site Budget**
+(360). An explicit per-target `site_budget` still wins. Budgets through 64 use
+anatomically prioritized bone anchors; larger values use deterministic
+full-surface coverage. The declared total target RCS remains constant.
 
 Animation measurements accept either the legacy single `target_object_id` or a
 `targets` list. A human and dog declaration is sampled jointly, passed to one

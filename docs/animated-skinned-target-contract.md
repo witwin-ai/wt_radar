@@ -28,16 +28,19 @@ The canonical Agent/tool declaration is:
 ```json
 {
   "targets": [
-    {"object_id": "human", "site_budget": 720},
-    {"object_id": "dog", "site_budget": 720}
+    {"object_id": "human"},
+    {"object_id": "dog"}
   ]
 }
 ```
 
 Target IDs must be unique and each object must own a hydrated `SkinnedMesh`.
-Typed `SMPLBody` and registered `AnimalActor` targets resolve to 720 sites in
-the backend even when an older caller supplies a smaller engineering fallback.
-Untyped skinned meshes retain their explicit 1..2400 budget.
+When `site_budget` is omitted, typed `SMPLBody` targets resolve from the Radar
+component's editable `human_target_site_budget` (720 by default) and registered
+`AnimalActor` targets resolve from `animal_target_site_budget` (360 by default).
+Untyped skinned meshes use `target_site_budget` (24 by default). An explicit
+per-target `site_budget` in the declaration always wins. Every budget remains
+editable in the 1..2400 range and is consumed by the backend simulation.
 
 ## Producer requirements
 
@@ -120,9 +123,9 @@ revision and conformance tests. A version-number-only check is not sufficient.
 ## Conformance evidence
 
 Automated conformance tests cover legacy single-target loading, human-and-dog
-list normalization, deterministic 720-site policy for `SMPLBody` and
-`AnimalActor`, combined positions and velocities, joint automatic placement,
-and combined native-preflight requests. A full native GPU measurement is still
-required to claim end-to-end physical acceptance for a specific Scene and
-sensor placement.
+list normalization, editable typed defaults (720 for `SMPLBody`, 360 for
+`AnimalActor`), explicit per-target overrides, combined positions and
+velocities, joint automatic placement, and combined native-preflight requests.
+A full native GPU measurement is still required to claim end-to-end physical
+acceptance for a specific Scene and sensor placement.
 
