@@ -1,6 +1,7 @@
 """Agent Radar façade tests; native RF/propagation/DSP is intentionally untouched."""
 import asyncio
 import copy
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -454,6 +455,36 @@ def test_ensure_sensor_creates_once_and_aims_local_minus_z(harness):
     actual = np.asarray(pose.target) - np.asarray(pose.position)
     expected = np.asarray(args["aim_point_m"]) - np.asarray(args["position_m"])
     np.testing.assert_allclose(actual / np.linalg.norm(actual), expected / np.linalg.norm(expected), atol=1e-6)
+
+
+def test_ensure_sensor_persists_multi_target_contract_and_legacy_primary(harness):
+    scene, tools = harness
+    dog = SceneObject(id="dog", name="Dog", mesh_type="Empty")
+    dog.add_component(SkinnedMeshComponent())
+    scene.add_object(dog)
+
+    result = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "multi-target-radar",
+        "targets": [
+            {"object_id": "catstray", "site_budget": 24},
+            {"object_id": "dog", "site_budget": 720},
+        ],
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+    })
+
+    sensor = scene.get_object(result["radar"]["object_id"])
+    radar = sensor.get_component("Radar")
+    assert radar.snapshot_target_id == "catstray"
+    assert json.loads(radar.animation_targets_json) == [
+        {"object_id": "catstray", "site_budget": 24},
+        {"object_id": "dog", "site_budget": 720},
+    ]
+    assert result["radar"]["targets"] == [
+        {"object_id": "catstray", "site_budget": 24},
+        {"object_id": "dog", "site_budget": 720},
+    ]
 
 
 def test_plan_and_ensure_sensor_can_narrow_native_fmcw_range(harness):

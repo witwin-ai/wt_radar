@@ -49,6 +49,24 @@ SCENE_ID_PROPERTY = {
     "description": "Exact open Studio scene id; never inferred from an object name.",
 }
 
+TARGETS_PROPERTY = {
+    "type": "array",
+    "minItems": 1,
+    "items": {
+        "type": "object",
+        "required": ["object_id"],
+        "properties": {
+            "object_id": {"type": "string", "minLength": 1},
+            "site_budget": {"type": "integer", "minimum": 1, "maximum": 2400, "default": 24},
+        },
+        "additionalProperties": False,
+    },
+    "description": (
+        "One or more independently animated skinned targets. SMPL targets use the backend "
+        "720-site policy regardless of an authored fallback budget."
+    ),
+}
+
 _PIPELINE_RADAR_TAG = "witwin.pipeline.radar"
 _RUNTIME_RADAR_FIELDS = {
     "animation_export_path",
@@ -548,14 +566,54 @@ def _scene_input_fingerprint(scene: Any) -> str:
 
 
 def _effective_target_site_budget(obj: Any) -> int:
-    from .adapter.studio_motion import resolved_target_site_budget
+    return sum(spec["site_budget"] for spec in _target_specs(obj))
+
+
+def _target_specs(obj: Any) -> list[dict[str, Any]]:
+    from .adapter.target_contract import component_target_specs
 
     radar = obj.get_component("Radar")
-    return resolved_target_site_budget(
-        getattr(obj, "scene", None),
-        str(radar.snapshot_target_id or ""),
-        int(radar.target_site_budget),
+    if not str(getattr(radar, "animation_targets_json", "") or "").strip() and not str(
+        getattr(radar, "snapshot_target_id", "") or ""
+    ).strip():
+        return []
+    return component_target_specs(radar)
+
+
+def _target_specs_from_args(scene: Any, args: dict[str, Any], *, infer_single: bool) -> list[dict[str, Any]]:
+    """Resolve the new target list or the legacy single target argument."""
+    from .adapter.target_contract import normalize_target_specs
+
+    has_targets = "targets" in args
+    legacy_id = str(args.get("target_object_id") or "").strip()
+    if has_targets and legacy_id:
+        raise ToolError(
+            "Use targets or target_object_id, not both.",
+            code="conflicting_target_contract",
+        )
+    values = args.get("targets") if has_targets else (
+        [{"object_id": legacy_id, "site_budget": 24}] if legacy_id else None
     )
+    if values is None and infer_single:
+        candidates = [
+            obj for obj in (getattr(scene, "objects", {}) or {}).values()
+            if callable(getattr(obj, "get_component", None))
+            and obj.get_component("SkinnedMesh") is not None
+        ]
+        if len(candidates) == 1:
+            values = [{"object_id": str(candidates[0].id), "site_budget": 24}]
+        else:
+            return []
+    if values is None:
+        raise ToolError("Radar requires at least one animated target.", code="missing_target")
+    try:
+        return normalize_target_specs(scene, values)
+    except ValueError as exc:
+        message = str(exc)
+        code = "target_not_skinned" if "SkinnedMesh" in message else "missing_target"
+        if "duplicated" in message:
+            code = "duplicate_target"
+        raise ToolError(message, code=code) from exc
 
 
 def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
@@ -569,6 +627,7 @@ def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
     contract = _persisted_numeric_identity({
         "config": ConfigMap.build_dict(obj),
         "tracer": asdict(TracerSpec.from_component(radar)),
+        "targets": _target_specs(obj),
         "target": {
             "object_id": str(radar.snapshot_target_id or ""),
             "local_point_m": _jsonable(radar.snapshot_local_point),
@@ -609,6 +668,7 @@ def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
                 "motion_sampling": str(radar.target_motion_sampling),
                 "site_budget": _effective_target_site_budget(obj),
             },
+            "targets": _target_specs(obj),
             "environment": {"components": ["reflection"], "max_depth": 1},
             "device": "cuda",
         },
@@ -761,6 +821,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "max_range_m": float(waveform["max_range_m"]),
         },
         "target_object_id": target_id or None,
+        "targets": _target_specs(obj),
         # Read-only current authored measurement identity.  Orchestrators use
         # this to distinguish harmless Radar UI/runtime-state normalization
         # from a real pose/FOV/target/waveform/scene-input change after export.
@@ -843,6 +904,7 @@ def _sensor_configuration_state(obj: Any) -> dict[str, Any]:
     transform = obj.get_component("Transform")
     return {
         "target_object_id": str(radar.snapshot_target_id or ""),
+        "targets": _target_specs(obj),
         "start_s": float(radar.t0),
         "duration_s": float(radar.animation_duration_s),
         "fps": float(radar.animation_fps),
@@ -858,6 +920,8 @@ def _sensor_configuration_state(obj: Any) -> dict[str, Any]:
 
 def _configuration_matches(current: dict[str, Any], expected: dict[str, Any]) -> bool:
     if str(current.get("target_object_id") or "") != str(expected.get("target_object_id") or ""):
+        return False
+    if current.get("targets") != expected.get("targets", current.get("targets")):
         return False
     if bool(current.get("target_multipath", False)) != bool(expected.get("target_multipath", False)):
         return False
@@ -1488,22 +1552,23 @@ def register(ctx: Any) -> None:
                 "message": "Select one exact Radar object.",
                 "radar_object_ids": [item["object_id"] for item in summaries],
             })
-        if selected and not selected["target_object_id"]:
+        if selected and not selected["targets"]:
             blockers.append({"code": "missing_target", "message": "Radar has no animated target."})
-        elif selected and scene.get_object(selected["target_object_id"]) is None:
-            blockers.append({
-                "code": "missing_target",
-                "message": "Radar target no longer exists in this scene.",
-                "target_object_id": selected["target_object_id"],
-            })
         elif selected:
-            target = scene.get_object(selected["target_object_id"])
-            if target.get_component("SkinnedMesh") is None:
-                blockers.append({
-                    "code": "target_not_skinned",
-                    "message": "Selected target has no SkinnedMesh and cannot drive the animation adapter.",
-                    "target_object_id": selected["target_object_id"],
-                })
+            for target_spec in selected["targets"]:
+                target = scene.get_object(target_spec["object_id"])
+                if target is None:
+                    blockers.append({
+                        "code": "missing_target",
+                        "message": "Radar target no longer exists in this scene.",
+                        "target_object_id": target_spec["object_id"],
+                    })
+                elif target.get_component("SkinnedMesh") is None:
+                    blockers.append({
+                        "code": "target_not_skinned",
+                        "message": "Selected target has no SkinnedMesh and cannot drive the animation adapter.",
+                        "target_object_id": target_spec["object_id"],
+                    })
         timeline = _timeline_summary(scene)
         if not timeline["available"] or timeline["duration_s"] <= 0:
             blockers.append({"code": "timeline_unavailable", "message": "Scene has no baked animation interval."})
@@ -1539,6 +1604,7 @@ def register(ctx: Any) -> None:
                 "scene_id": SCENE_ID_PROPERTY,
                 "radar_object_id": {"type": "string"},
                 "target_object_id": {"type": "string", "minLength": 1},
+                "targets": TARGETS_PROPERTY,
                 "placement_mode": {
                     "type": "string",
                     "enum": ["fixed", "automatic", "current"],
@@ -1596,29 +1662,14 @@ def register(ctx: Any) -> None:
     )
     def _plan_sensor_placement(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
-        target_id = str(args.get("target_object_id") or "").strip()
+        target_specs = _target_specs_from_args(scene, args, infer_single=True)
+        target_id = target_specs[0]["object_id"] if target_specs else ""
         candidates = [
             obj for obj in (getattr(scene, "objects", {}) or {}).values()
             if callable(getattr(obj, "get_component", None))
             and obj.get_component("SkinnedMesh") is not None
         ]
-        if target_id:
-            target = scene.get_object(target_id)
-            if target is None:
-                raise ToolError(
-                    f"Radar target does not exist in scene: {target_id}",
-                    code="missing_target",
-                    detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
-                )
-            if target.get_component("SkinnedMesh") is None:
-                raise ToolError(
-                    "Radar animation target must have a SkinnedMesh component.",
-                    code="target_not_skinned",
-                    detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
-                )
-        elif len(candidates) == 1:
-            target_id = str(candidates[0].id)
-        else:
+        if not target_specs:
             return {
                 "ok": False,
                 "status": "blocked",
@@ -1656,7 +1707,7 @@ def register(ctx: Any) -> None:
 
         proposed = {
             "scene_id": str(scene.scene_id),
-            "target_object_id": target_id,
+            "targets": target_specs,
             "placement_mode": placement_mode,
             "placement_objective": str(args.get("placement_objective") or "balanced"),
             "height_m": float(args.get("height_m", 1.0)),
@@ -1744,6 +1795,7 @@ def register(ctx: Any) -> None:
             "status": "ready_for_confirmation",
             "scene_id": str(scene.scene_id),
             "target_object_id": target_id,
+            "targets": target_specs,
             "placement": placement,
             "proposed_ensure_sensor_arguments": proposed,
             "next_step": {
@@ -1762,17 +1814,18 @@ def register(ctx: Any) -> None:
             "Idempotently create or configure one Studio Radar Settings object at an "
             "explicit world position (fixed mode), or choose a native-preflight-verified "
             "pose near the authored motion (automatic mode), and bind it to "
-            "one animated target. This only edits Studio orchestration fields; it does "
+            "one or more animated targets. This only edits Studio orchestration fields; it does "
             "not alter Radar or Channel algorithms."
         ),
         input_schema={
             "type": "object",
-            "required": ["scene_id", "operation_id", "target_object_id"],
+            "required": ["scene_id", "operation_id"],
             "properties": {
                 "scene_id": SCENE_ID_PROPERTY,
                 "operation_id": {"type": "string", "minLength": 1},
                 "radar_object_id": {"type": "string"},
                 "target_object_id": {"type": "string", "minLength": 1},
+                "targets": TARGETS_PROPERTY,
                 "placement_mode": {
                     "type": "string",
                     "enum": ["fixed", "automatic", "current"],
@@ -1894,20 +1947,8 @@ def register(ctx: Any) -> None:
                 code="timeline_busy",
                 detail={"timeline": timeline},
             )
-        target_id = str(args["target_object_id"]).strip()
-        target = scene.get_object(target_id)
-        if target is None:
-            raise ToolError(
-                f"Radar target does not exist in scene: {target_id}",
-                code="missing_target",
-                detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
-            )
-        if target.get_component("SkinnedMesh") is None:
-            raise ToolError(
-                "Radar animation target must have a SkinnedMesh component.",
-                code="target_not_skinned",
-                detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
-            )
+        target_specs = _target_specs_from_args(scene, args, infer_single=False)
+        target_id = target_specs[0]["object_id"]
         placement_mode = str(args.get("placement_mode") or "fixed")
         automatic = placement_mode == "automatic"
         current = placement_mode == "current"
@@ -1961,7 +2002,11 @@ def register(ctx: Any) -> None:
         placement = None
         if automatic:
             from .sensor_placement import choose_sensor_placement
-            placement = choose_sensor_placement(scene, args, radar_object_id=None if created else str(obj.id))
+            placement_args = {**args, "target_object_id": target_id}
+            placement_args.pop("targets", None)
+            placement = choose_sensor_placement(
+                scene, placement_args, radar_object_id=None if created else str(obj.id)
+            )
         if created:
             scene.add_object(obj)
         radar = obj.get_component("Radar")
@@ -1985,6 +2030,7 @@ def register(ctx: Any) -> None:
             rotation = _look_at_euler(position, aim)
         previous = {
             "snapshot_target_id": radar.snapshot_target_id,
+            "animation_targets_json": radar.animation_targets_json,
             "t0": radar.t0,
             "animation_duration_s": radar.animation_duration_s,
             "animation_fps": radar.animation_fps,
@@ -2006,7 +2052,9 @@ def register(ctx: Any) -> None:
             "rotation": _jsonable(transform.rotation),
         }
         try:
+            from .adapter.target_contract import encode_target_specs
             radar.snapshot_target_id = target_id
+            radar.animation_targets_json = encode_target_specs(target_specs)
             radar.t0 = float(args.get("start_s", 0.0))
             radar.animation_duration_s = float(args.get("duration_s", 5.0))
             radar.animation_fps = float(args.get("fps", 10.0))
@@ -2028,7 +2076,7 @@ def register(ctx: Any) -> None:
                 scene.remove_object(str(obj.id))
             else:
                 for key in (
-                    "snapshot_target_id", "t0", "animation_duration_s", "animation_fps",
+                    "snapshot_target_id", "animation_targets_json", "t0", "animation_duration_s", "animation_fps",
                     "target_multipath", "target_motion_sampling", "target_site_budget",
                     "fov", "slope", "use_default", "pattern_kind", "x_angles_deg",
                     "y_angles_deg", "x_values", "y_values", "view",
@@ -2115,13 +2163,15 @@ def register(ctx: Any) -> None:
         scene = _scene_from_args(ctx, args)
         obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
         radar = obj.get_component("Radar")
-        target_id = str(radar.snapshot_target_id or "").strip()
-        target = scene.get_object(target_id) if target_id else None
-        if target is None or target_id == str(obj.id):
+        target_specs = _target_specs(obj)
+        if not target_specs or any(
+            scene.get_object(spec["object_id"]) is None or spec["object_id"] == str(obj.id)
+            for spec in target_specs
+        ):
             raise ToolError(
-                "Radar must reference one separate existing animated target.",
+                "Radar must reference one or more separate existing animated targets.",
                 code="missing_target",
-                detail={"target_object_id": target_id or None},
+                detail={"targets": target_specs},
             )
         from .adapter.snapshot import validate_options
         try:
@@ -2182,21 +2232,32 @@ def register(ctx: Any) -> None:
             fingerprint=input_fingerprint,
             native_preflight=native_preflight,
         )
+        target_results = []
+        preflight_targets = {
+            item["object_id"]: item for item in native_preflight.get("targets", [])
+        }
+        for spec in target_specs:
+            target = scene.get_object(spec["object_id"])
+            evidence = preflight_targets.get(spec["object_id"], {})
+            if not evidence and len(target_specs) == 1:
+                evidence = native_preflight.get("topology", {})
+            target_results.append({
+                **spec,
+                "name": str(target.name),
+                "declared_site_count": int(evidence.get("declared_site_count", 0)),
+                "active_site_count": int(evidence.get("active_site_count", 0)),
+                "occluded_site_count": int(evidence.get("occluded_site_count", 0)),
+                "visibility_coverage": float(evidence.get("visibility_coverage", 0.0)),
+                "visibility_quality": str(evidence.get("visibility_quality", "unknown")),
+            })
+        target_results[0]["moving_object_ids"] = native_preflight["moving_object_ids"]
         return {
             "ok": True,
             "status": "ready",
             "scene_id": str(scene.scene_id),
             "radar": _sensor_summary(obj),
-            "target": {
-                "object_id": target_id,
-                "name": str(target.name),
-                "declared_site_count": int(native_preflight["topology"]["declared_site_count"]),
-                "active_site_count": int(native_preflight["topology"]["active_site_count"]),
-                "occluded_site_count": int(native_preflight["topology"]["occluded_site_count"]),
-                "visibility_coverage": float(native_preflight["topology"]["visibility_coverage"]),
-                "visibility_quality": str(native_preflight["topology"]["visibility_quality"]),
-                "moving_object_ids": native_preflight["moving_object_ids"],
-            },
+            "target": target_results[0],
+            "targets": target_results,
             "measurement": measurement,
             "native_preflight": _public_preflight(native_preflight),
             "runtime": runtime,
