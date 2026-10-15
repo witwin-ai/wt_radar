@@ -188,7 +188,8 @@ class RadarComponent(Component):
 
     # --- antenna pattern sub-config (RadarAntennaPattern) -------------------
     use_default = bool_field(True, group=_ANTENNA,
-                             description="Use Radar's unconfigured antenna pattern (no custom gain map)")
+                             display_name="Use isotropic antenna",
+                             description="Equal gain in every direction; disable to author a directional pattern")
     pattern_kind = string_field("separable", options=["separable", "map"], enum_toggle=True,
                                 hide_if="use_default", group=_ANTENNA,
                                 description="Separable per-axis cuts or a 2D gain map")

@@ -23,7 +23,7 @@ class SubConfigMap:
 
     @staticmethod
     def antenna_to_studio(radar: Any, pattern: Optional[dict]) -> None:
-        # antenna_pattern dict (or None = default dipole) -> antenna-pattern fields.
+        # antenna_pattern dict (or None = isotropic/no-op default) -> antenna fields.
         if pattern is None:
             radar.use_default = True
             return
@@ -39,7 +39,7 @@ class SubConfigMap:
 
     @staticmethod
     def antenna_build(radar: Any) -> Optional[dict]:
-        # antenna-pattern fields -> antenna_pattern dict, or None (use default dipole).
+        # antenna fields -> antenna_pattern dict, or None (use isotropic default).
         if bool(radar.use_default):
             return None
         kind = str(radar.pattern_kind)
