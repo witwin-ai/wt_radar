@@ -15,17 +15,29 @@ from .snapshot import _hierarchy
 LEGACY_ANATOMICAL_SITE_LIMIT = 64
 MAX_TARGET_SITE_BUDGET = 2400
 SMPL_TARGET_SITE_BUDGET = 720
+ANIMAL_TARGET_SITE_BUDGET = 360
 
 
-def resolved_target_site_budget(scene, target_id, authored_budget):
-    """Choose the backend sampling policy without exposing it as an Agent knob."""
+def target_kind(scene, target_id):
+    """Return the stable typed-target class used by the sampling contract."""
     target = scene.get_object(target_id) if scene is not None and target_id else None
-    if target is not None and (
-        target.get_component("SMPLBody") is not None
-        or target.get_component("AnimalActor") is not None
-    ):
+    if target is not None and target.get_component("SMPLBody") is not None:
+        return "human"
+    if target is not None and target.get_component("AnimalActor") is not None:
+        return "animal"
+    return "skinned"
+
+
+def resolved_target_site_budget(scene, target_id, authored_budget=None):
+    """Use a typed default only when the caller did not author an explicit budget."""
+    if authored_budget is not None:
+        return int(authored_budget)
+    kind = target_kind(scene, target_id)
+    if kind == "human":
         return SMPL_TARGET_SITE_BUDGET
-    return int(authored_budget)
+    if kind == "animal":
+        return ANIMAL_TARGET_SITE_BUDGET
+    return 24
 
 
 def spatially_spread_ranks(points, count):

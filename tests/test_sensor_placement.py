@@ -54,8 +54,8 @@ def test_automatic_placement_aims_and_preflights_all_declared_targets(scene, mon
 
     assert requests
     assert result["targets"] == [
-        {"object_id": "target", "site_budget": 2},
-        {"object_id": "dog", "site_budget": 2},
+        {"object_id": "target", "target_kind": "skinned", "site_budget": 2, "budget_source": "explicit"},
+        {"object_id": "dog", "target_kind": "skinned", "site_budget": 2, "budget_source": "explicit"},
     ]
     assert result["native_preflight"]["site_count"] == 4
 

@@ -29,6 +29,10 @@ def test_current_controls_keep_simulation_replay_and_export():
         assert RadarComponent().target_motion_sampling == "chirp"
         assert fields["target_site_budget"]["group"] == "StudioAnimation"
         assert RadarComponent().target_site_budget == 24
+        assert fields["human_target_site_budget"]["group"] == "StudioAnimation"
+        assert RadarComponent().human_target_site_budget == 720
+        assert fields["animal_target_site_budget"]["group"] == "StudioAnimation"
+        assert RadarComponent().animal_target_site_budget == 360
         assert "MeasuredOverview" not in groups
         assert fields["micro_doppler_figure"]["hidden"] is True
         assert fields["range_time_figure"]["hidden"] is True

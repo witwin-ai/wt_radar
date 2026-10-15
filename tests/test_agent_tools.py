@@ -478,12 +478,12 @@ def test_ensure_sensor_persists_multi_target_contract_and_legacy_primary(harness
     radar = sensor.get_component("Radar")
     assert radar.snapshot_target_id == "catstray"
     assert json.loads(radar.animation_targets_json) == [
-        {"object_id": "catstray", "site_budget": 24},
-        {"object_id": "dog", "site_budget": 720},
+        {"budget_source": "explicit", "object_id": "catstray", "site_budget": 24, "target_kind": "skinned"},
+        {"budget_source": "explicit", "object_id": "dog", "site_budget": 720, "target_kind": "skinned"},
     ]
     assert result["radar"]["targets"] == [
-        {"object_id": "catstray", "site_budget": 24},
-        {"object_id": "dog", "site_budget": 720},
+        {"object_id": "catstray", "target_kind": "skinned", "site_budget": 24, "budget_source": "explicit"},
+        {"object_id": "dog", "target_kind": "skinned", "site_budget": 720, "budget_source": "explicit"},
     ]
 
 

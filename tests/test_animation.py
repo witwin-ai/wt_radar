@@ -1,5 +1,6 @@
 """Small real-Studio/native-Radar contracts; no offline experiment dependency."""
 from types import SimpleNamespace
+import json
 import zipfile
 
 import numpy as np
@@ -123,7 +124,7 @@ def test_dense_surface_sampler_supports_2400_deterministic_sites():
     np.testing.assert_array_equal(first, second)
 
 
-def test_smpl_human_uses_backend_dense_budget_without_authored_override():
+def test_typed_defaults_apply_only_without_an_authored_override():
     human = SimpleNamespace(
         get_component=lambda name: object() if name == "SMPLBody" else None,
     )
@@ -132,14 +133,16 @@ def test_smpl_human_uses_backend_dense_budget_without_authored_override():
     )
     scene = SimpleNamespace(get_object=lambda object_id: {"human": human, "dog": dog}.get(object_id))
 
-    assert resolved_target_site_budget(scene, "human", 24) == 720
-    assert resolved_target_site_budget(scene, "dog", 24) == 720
+    assert resolved_target_site_budget(scene, "human") == 720
+    assert resolved_target_site_budget(scene, "dog") == 360
+    assert resolved_target_site_budget(scene, "human", 240) == 240
+    assert resolved_target_site_budget(scene, "dog", 120) == 120
     assert resolved_target_site_budget(scene, "missing", 24) == 24
 
 
 def test_multi_target_contract_resolves_each_budget_and_rejects_duplicates():
     human = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "SMPLBody"} else None)
-    dog = SimpleNamespace(get_component=lambda name: object() if name == "SkinnedMesh" else None)
+    dog = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "AnimalActor"} else None)
     targets = {"human": human, "dog": dog}
     scene = SimpleNamespace(get_object=lambda object_id: targets.get(object_id))
 
@@ -149,8 +152,8 @@ def test_multi_target_contract_resolves_each_budget_and_rejects_duplicates():
     ])
 
     assert specs == [
-        {"object_id": "human", "site_budget": 720},
-        {"object_id": "dog", "site_budget": 720},
+        {"object_id": "human", "target_kind": "human", "site_budget": 24, "budget_source": "explicit"},
+        {"object_id": "dog", "target_kind": "animal", "site_budget": 720, "budget_source": "explicit"},
     ]
     with pytest.raises(ValueError, match="duplicated"):
         normalize_target_specs(scene, [
@@ -169,7 +172,34 @@ def test_component_target_contract_keeps_legacy_single_target_compatible():
         target_site_budget=24,
     )
 
-    assert component_target_specs(component) == [{"object_id": "dog", "site_budget": 24}]
+    assert component_target_specs(component) == [{
+        "object_id": "dog",
+        "target_kind": "skinned",
+        "site_budget": 24,
+        "budget_source": "component_default",
+    }]
+
+
+def test_component_budget_controls_reconfigure_typed_targets_after_authoring():
+    human = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "SMPLBody"} else None)
+    dog = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "AnimalActor"} else None)
+    scene = SimpleNamespace(get_object=lambda object_id: {"human": human, "dog": dog}.get(object_id))
+    authored = normalize_target_specs(scene, [{"object_id": "human"}, {"object_id": "dog"}])
+    component = SimpleNamespace(
+        scene=scene,
+        animation_targets_json=json.dumps(authored),
+        snapshot_target_id="human",
+        target_site_budget=24,
+        human_target_site_budget=480,
+        animal_target_site_budget=180,
+    )
+
+    assert component_target_specs(component) == [
+        {"object_id": "human", "target_kind": "human", "site_budget": 480,
+         "budget_source": "component_default"},
+        {"object_id": "dog", "target_kind": "animal", "site_budget": 180,
+         "budget_source": "component_default"},
+    ]
 
 
 def test_anatomical_budget_prefers_major_cat_motion_sites():

@@ -373,9 +373,24 @@ class RadarComponent(Component):
         max=2400,
         group=_ANIMATION,
         description=(
-            "Engineering override for untyped targets. SMPL humans and registered AnimalActor "
-            "targets automatically use 720 deterministic skinned-surface sites in the backend."
+            "Sampling sites per untyped skinned target. This value is consumed by the backend."
         ),
+    )
+    human_target_site_budget = int_field(
+        720,
+        min=1,
+        max=2400,
+        group=_ANIMATION,
+        display_name="Human Target Site Budget",
+        description="Sampling sites per SMPL human. Editable and consumed by the backend.",
+    )
+    animal_target_site_budget = int_field(
+        360,
+        min=1,
+        max=2400,
+        group=_ANIMATION,
+        display_name="Animal Target Site Budget",
+        description="Sampling sites per registered animal. Editable and consumed by the backend.",
     )
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,
                                       description="Recorded result frame. Does not seek or modify the editor timeline.")

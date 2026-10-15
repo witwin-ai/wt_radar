@@ -57,13 +57,13 @@ TARGETS_PROPERTY = {
         "required": ["object_id"],
         "properties": {
             "object_id": {"type": "string", "minLength": 1},
-            "site_budget": {"type": "integer", "minimum": 1, "maximum": 2400, "default": 24},
+            "site_budget": {"type": "integer", "minimum": 1, "maximum": 2400},
         },
         "additionalProperties": False,
     },
     "description": (
-        "One or more independently animated skinned targets. SMPL and registered AnimalActor "
-        "targets use the backend 720-site policy regardless of an authored fallback budget."
+        "One or more independently animated skinned targets. Omit site_budget for the editable "
+        "type default (720 per SMPL human, 360 per registered animal); an explicit value wins."
     ),
 }
 
@@ -592,7 +592,7 @@ def _target_specs_from_args(scene: Any, args: dict[str, Any], *, infer_single: b
             code="conflicting_target_contract",
         )
     values = args.get("targets") if has_targets else (
-        [{"object_id": legacy_id, "site_budget": 24}] if legacy_id else None
+        [{"object_id": legacy_id}] if legacy_id else None
     )
     if values is None and infer_single:
         candidates = [
@@ -601,7 +601,7 @@ def _target_specs_from_args(scene: Any, args: dict[str, Any], *, infer_single: b
             and obj.get_component("SkinnedMesh") is not None
         ]
         if len(candidates) == 1:
-            values = [{"object_id": str(candidates[0].id), "site_budget": 24}]
+            values = [{"object_id": str(candidates[0].id)}]
         else:
             return []
     if values is None:
