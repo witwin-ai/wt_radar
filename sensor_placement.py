@@ -253,8 +253,9 @@ def _objective_score(objective, metrics, *, position, aim, baseline_position):
 def choose_sensor_placement(scene, args, *, radar_object_id=None):
     from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
     from .library_items import _settings_object
-    from .adapter.studio_motion import StudioSkinSampler
+    from .adapter.studio_motion import MultiTargetSkinSampler
     from .adapter.animation import animation_preflight, animation_request, AnimationTopologyError
+    from .adapter.target_contract import encode_target_specs, normalize_target_specs
     from .agent_tools import _configure_directional_pattern, _look_at_euler
 
     detached = load_scene_ref(copy.deepcopy(make_scene_ref(scene)))
@@ -263,7 +264,16 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         sensor = _settings_object('Automatic placement probe')
         detached.add_object(sensor)
     radar = sensor.get_component('Radar')
-    radar.snapshot_target_id = args['target_object_id']
+    declarations = args.get('targets')
+    if declarations is None:
+        declarations = [{
+            'object_id': args['target_object_id'],
+            'site_budget': args.get('target_site_budget', 24),
+        }]
+    target_specs = normalize_target_specs(detached, declarations)
+    target_ids = [spec['object_id'] for spec in target_specs]
+    radar.snapshot_target_id = target_ids[0]
+    radar.animation_targets_json = encode_target_specs(target_specs)
     radar.t0 = float(args.get('start_s', 0.))
     radar.animation_duration_s = float(args.get('duration_s', 5.))
     radar.animation_fps = float(args.get('fps', 10.))
@@ -273,9 +283,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     radar.fov = float(args.get('fov_deg', 60.))
     _configure_directional_pattern(radar, radar.fov)
     radar.view, radar.static_clutter_removal, radar.show_cfar = 'range_doppler', False, False
-    sampler = StudioSkinSampler(
-        detached, args['target_object_id'], site_budget=radar.target_site_budget,
-    )
+    sampler = MultiTargetSkinSampler(detached, target_specs)
     duration_s = float(radar.animation_duration_s)
     fps = float(radar.animation_fps)
     start_s = float(radar.t0)
@@ -321,7 +329,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         constraint = _static_candidate_constraint(
             detached,
             position,
-            excluded_ids={str(sensor.id), str(args['target_object_id'])},
+            excluded_ids={str(sensor.id), *target_ids},
         )
         if constraint is not None:
             failures.append({'position_m': position, 'reason': constraint['code'], 'detail': constraint})
@@ -546,6 +554,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
             }
         return {'position_m': selected['position_m'], 'aim_point_m': selected['aim_point_m'],
                 'mode': 'automatic', 'height_m': height,
+                'targets': target_specs,
                 'placement_objective': objective,
                 'requested_distance_m': distance,
                 'actual_distance_m': float(np.linalg.norm(np.asarray(selected['position_m']) - aim)),

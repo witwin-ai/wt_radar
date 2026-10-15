@@ -290,6 +290,7 @@ class MultiTargetSkinSampler:
         self.targets = [sampler.target for sampler in self.samplers]
         self.target = self.targets[0]
         self.target_ids = [str(target.id) for target in self.targets]
+        self.duration = min(sampler.duration for sampler in self.samplers)
         self.moving_ids = set().union(*(sampler.moving_ids for sampler in self.samplers))
         self.tracks = [track for sampler in self.samplers for track in sampler.tracks]
         manager = scene.timeline_manager

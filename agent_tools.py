@@ -2002,8 +2002,12 @@ def register(ctx: Any) -> None:
         placement = None
         if automatic:
             from .sensor_placement import choose_sensor_placement
-            placement_args = {**args, "target_object_id": target_id}
-            placement_args.pop("targets", None)
+            placement_args = {**args}
+            if "targets" in args:
+                placement_args["targets"] = target_specs
+                placement_args.pop("target_object_id", None)
+            else:
+                placement_args["target_object_id"] = target_id
             placement = choose_sensor_placement(
                 scene, placement_args, radar_object_id=None if created else str(obj.id)
             )

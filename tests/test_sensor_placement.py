@@ -3,10 +3,61 @@ import numpy as np
 import pytest
 from test_agent_tools import harness, run
 from test_snapshot import scene
-from test_animation import make_rig
+from test_animation import add_track, make_rig
 from wt_radar import sensor_placement
 from wt_radar.adapter import animation
 from witwin_server.tools.base import ToolError
+from witwin_server import SceneObject
+from witwin_server.core.components import SkinnedMeshComponent
+
+
+def add_second_rig(scene, vertices):
+    dog = SceneObject(id="dog", name="Dog", mesh_type="Empty")
+    scene.add_object(dog)
+    skin = dog.add_component(SkinnedMeshComponent())
+    skin.set_mesh_data(vertices, np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint32))
+    for object_id in ("dog-bone0", "dog-bone1"):
+        scene.add_object(SceneObject(id=object_id, name=object_id, mesh_type="Empty"))
+        scene.set_parent(object_id, "dog", keep_local_transform=True)
+    indices = np.zeros((6, 4), dtype=np.int64)
+    indices[3:, 0] = 1
+    weights = np.zeros((6, 4), dtype=np.float32)
+    weights[:, 0] = 1
+    skin.set_skinning_data(
+        ["dog-bone0", "dog-bone1"], indices, weights,
+        np.tile(np.eye(4, dtype=np.float32), (2, 1, 1)), root_bone_id="dog-bone0",
+    )
+    add_track(scene, "dog-bone0", "position", [(0., [2., 0., 0.]), (2., [3., 0., 0.])])
+
+
+def test_automatic_placement_aims_and_preflights_all_declared_targets(scene, monkeypatch):
+    original, component = scene
+    _, vertices = make_rig(original, component)
+    add_second_rig(original, vertices)
+    requests = []
+
+    def preflight(_detached, request):
+        requests.append(request)
+        assert [target["object_id"] for target in request["targets"]] == ["target", "dog"]
+        return {"frame_count": 2, "site_count": 4, "radar_device": "cuda"}
+
+    monkeypatch.setattr(animation, "animation_preflight", preflight)
+    result = sensor_placement.choose_sensor_placement(original, {
+        "targets": [
+            {"object_id": "target", "site_budget": 2},
+            {"object_id": "dog", "site_budget": 2},
+        ],
+        "duration_s": .2,
+        "fps": 10,
+        "height_m": 1.,
+    }, radar_object_id="radar")
+
+    assert requests
+    assert result["targets"] == [
+        {"object_id": "target", "site_budget": 2},
+        {"object_id": "dog", "site_budget": 2},
+    ]
+    assert result["native_preflight"]["site_count"] == 4
 
 
 def test_trials_are_detached_and_use_unchanged_native_preflight(scene, monkeypatch):
