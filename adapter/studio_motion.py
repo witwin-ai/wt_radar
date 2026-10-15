@@ -20,7 +20,10 @@ SMPL_TARGET_SITE_BUDGET = 720
 def resolved_target_site_budget(scene, target_id, authored_budget):
     """Choose the backend sampling policy without exposing it as an Agent knob."""
     target = scene.get_object(target_id) if scene is not None and target_id else None
-    if target is not None and target.get_component("SMPLBody") is not None:
+    if target is not None and (
+        target.get_component("SMPLBody") is not None
+        or target.get_component("AnimalActor") is not None
+    ):
         return SMPL_TARGET_SITE_BUDGET
     return int(authored_budget)
 

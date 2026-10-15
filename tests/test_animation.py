@@ -124,12 +124,16 @@ def test_dense_surface_sampler_supports_2400_deterministic_sites():
 
 
 def test_smpl_human_uses_backend_dense_budget_without_authored_override():
-    target = SimpleNamespace(
+    human = SimpleNamespace(
         get_component=lambda name: object() if name == "SMPLBody" else None,
     )
-    scene = SimpleNamespace(get_object=lambda object_id: target if object_id == "human" else None)
+    dog = SimpleNamespace(
+        get_component=lambda name: object() if name == "AnimalActor" else None,
+    )
+    scene = SimpleNamespace(get_object=lambda object_id: {"human": human, "dog": dog}.get(object_id))
 
     assert resolved_target_site_budget(scene, "human", 24) == 720
+    assert resolved_target_site_budget(scene, "dog", 24) == 720
     assert resolved_target_site_budget(scene, "missing", 24) == 24
 
 

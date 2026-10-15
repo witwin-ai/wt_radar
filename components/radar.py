@@ -373,8 +373,8 @@ class RadarComponent(Component):
         max=2400,
         group=_ANIMATION,
         description=(
-            "Engineering override for non-SMPL targets. SMPL humans automatically use 720 "
-            "deterministic skinned-surface sites in the backend."
+            "Engineering override for untyped targets. SMPL humans and registered AnimalActor "
+            "targets automatically use 720 deterministic skinned-surface sites in the backend."
         ),
     )
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,

@@ -62,8 +62,8 @@ TARGETS_PROPERTY = {
         "additionalProperties": False,
     },
     "description": (
-        "One or more independently animated skinned targets. SMPL targets use the backend "
-        "720-site policy regardless of an authored fallback budget."
+        "One or more independently animated skinned targets. SMPL and registered AnimalActor "
+        "targets use the backend 720-site policy regardless of an authored fallback budget."
     ),
 }
 
