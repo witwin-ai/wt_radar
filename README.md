@@ -24,11 +24,17 @@ official Radar 0.4 error-controlled **Adaptive** policy remains available for
 comparison, but is not assumed to outperform chirp sampling. Path topology is
 still rediscovered at Studio-frame boundaries.
 
-**Target Site Budget** is an engineering override for non-SMPL skinned targets.
+**Target Site Budget** is an engineering override for untyped skinned targets.
 Budgets through 64 use anatomically prioritized bone anchors; larger values use
-deterministic full-surface coverage. SMPL humans use the backend's fixed 2400-site
-surface policy automatically, without requiring an Agent or prompt parameter.
-The declared total target RCS remains constant.
+deterministic full-surface coverage. Typed SMPL humans and registered animal
+actors use the backend's fixed 720-site policy per actor, without requiring an
+Agent or prompt parameter. The declared total target RCS remains constant.
+
+Animation measurements accept either the legacy single `target_object_id` or a
+`targets` list. A human and dog declaration is sampled jointly, passed to one
+native `PointTargets` solve, and reported with per-target site slices. Automatic
+placement uses the combined trajectories and confirms the combined native
+topology before accepting a sensor pose.
 
 ## Supported physical model
 
@@ -51,11 +57,12 @@ zero-filled, and excluded sites do not transfer their RCS to visible sites.
 
 ## Studio workflow
 
-1. Open a furnished room containing one skinned target and a baked Motion
-   Matching timeline.
+1. Open a furnished room containing one or more skinned targets and baked
+   Motion Matching timelines.
 2. Add **Library -> Radar -> Radar Settings** to the same scene. The object's
    Transform is the sensor pose; local `-Z` is its forward direction.
-3. Set **Snapshot Target ID** to the existing skinned object ID.
+3. Let the Agent configure the target list, or set **Snapshot Target ID** for a
+   legacy single-target measurement.
 4. Set **Measurement start time**, **Animation duration**, and **Animation FPS**.
    The interval must fit the baked timeline, and `duration * FPS` must be an
    integer. The limits are 30 seconds, 30 FPS, and 1536 MiB of raw result data.

@@ -19,8 +19,25 @@ not a Radar physics or signal-processing algorithm.
   Radar processing. `witwin-channel >=0.5,<0.6` owns path discovery.
 
 No target-side `RadarScattererComponent` is required. The stable boundary is
-the existing Studio `SkinnedMesh` plus baked `Transform` tracks. The Radar
-object selects that target through `snapshot_target_id`.
+the existing Studio `SkinnedMesh` plus baked `Transform` tracks. New projects
+declare one or more targets through `animation_targets_json`; the legacy
+`snapshot_target_id` remains a supported single-target fallback.
+
+The canonical Agent/tool declaration is:
+
+```json
+{
+  "targets": [
+    {"object_id": "human", "site_budget": 720},
+    {"object_id": "dog", "site_budget": 720}
+  ]
+}
+```
+
+Target IDs must be unique and each object must own a hydrated `SkinnedMesh`.
+Typed `SMPLBody` and registered `AnimalActor` targets resolve to 720 sites in
+the backend even when an older caller supplies a smaller engineering fallback.
+Untyped skinned meshes retain their explicit 1..2400 budget.
 
 ## Producer requirements
 
@@ -47,11 +64,14 @@ transforms during measurement.
 
 ## Consumer behavior
 
-`StudioSkinSampler` validates the complete contract before simulation. It then:
+`StudioSkinSampler` validates each actor's complete contract. The
+`MultiTargetSkinSampler` then presents their stable sites as one combined
+native target set. The adapter:
 
 1. chooses one representative bind-pose surface vertex for each influenced
    bone;
-2. caps the available set at 64 and applies the configured 1..64 site budget;
+2. uses deterministic surface coverage for budgets above the anatomical bone
+   anchors, up to 2400 sites per actor;
 3. selects sites deterministically by anatomical priority and bind-pose spatial
    coverage;
 4. evaluates Studio's linear-blend skinning in world coordinates at each
@@ -61,9 +81,16 @@ transforms during measurement.
    and
 6. preserves stable site identity across the entire requested interval.
 
-WT Radar passes the resulting finite world-space positions, velocities, scalar
-RCS policy, and stable IDs to the official Radar 0.4 moving-target API. It does
-not replace propagation, scattering, waveform, or DSP algorithms.
+WT Radar concatenates the resulting finite world-space positions, velocities,
+scalar RCS policy, and stable IDs and passes them to one official Radar 0.4
+moving-target call. Human and dog returns therefore coexist coherently in the
+same physical solve; they are not simulated separately or combined as images.
+WT Radar does not replace propagation, scattering, waveform, or DSP algorithms.
+
+Automatic placement samples the joint trajectories of every declared target,
+aims at their angular envelope, excludes all target meshes from static sensor
+collision checks, and accepts a pose only after the combined native topology
+preflight passes.
 
 ## Failure semantics
 
@@ -81,7 +108,7 @@ do not transfer their RCS share to visible sites.
 
 This contract targets:
 
-- WT Radar plugin on the `codex/r41-development` line;
+- WT Radar plugin on the `codex/r46-development` line;
 - `witwin-radar >=0.4,<0.5` (validated with 0.4.1);
 - `witwin-channel >=0.5,<0.6`; and
 - the Studio `SkinnedMesh` and baked Timeline APIs used by Core 0.4.
@@ -92,11 +119,10 @@ revision and conformance tests. A version-number-only check is not sufficient.
 
 ## Conformance evidence
 
-The persisted Genesis SMPL scene
-`human_genesis_walk_persistent_20261010` was cold-loaded and sampled through
-`StudioSkinSampler` with all 24 available SMPL bone sites selected. Samples at
-0.0, 0.5, 1.0, 1.5, and 1.95 seconds produced finite world positions and
-velocities. This proves the Studio-to-WT-Radar bridge; a native GPU measurement
-is still required to claim end-to-end physical acceptance for that specific
-human Scene and sensor placement.
+Automated conformance tests cover legacy single-target loading, human-and-dog
+list normalization, deterministic 720-site policy for `SMPLBody` and
+`AnimalActor`, combined positions and velocities, joint automatic placement,
+and combined native-preflight requests. A full native GPU measurement is still
+required to claim end-to-end physical acceptance for a specific Scene and
+sensor placement.
 
