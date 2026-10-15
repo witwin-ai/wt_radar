@@ -338,6 +338,19 @@ def _look_at_euler(position: Any, aim_point: Any) -> list[float]:
     return Rotation.from_matrix(rotation).as_euler("ZXY", degrees=False).tolist()
 
 
+def _configure_directional_pattern(radar: Any, fov_deg: float) -> None:
+    """Author a forward antenna taper matching the placement FOV."""
+    half = float(fov_deg) / 2.0
+    angles = [-half, -half / 2.0, 0.0, half / 2.0, half]
+    gains = [0.0, 0.5, 1.0, 0.5, 0.0]
+    radar.use_default = False
+    radar.pattern_kind = "separable"
+    radar.x_angles_deg = angles
+    radar.y_angles_deg = angles
+    radar.x_values = gains
+    radar.y_values = gains
+
+
 def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -1884,6 +1897,12 @@ def register(ctx: Any) -> None:
             "target_motion_sampling": radar.target_motion_sampling,
             "target_site_budget": radar.target_site_budget,
             "fov": radar.fov,
+            "use_default": radar.use_default,
+            "pattern_kind": radar.pattern_kind,
+            "x_angles_deg": list(radar.x_angles_deg),
+            "y_angles_deg": list(radar.y_angles_deg),
+            "x_values": list(radar.x_values),
+            "y_values": list(radar.y_values),
             "view": radar.view,
             "static_clutter_removal": radar.static_clutter_removal,
             "show_cfar": radar.show_cfar,
@@ -1899,6 +1918,7 @@ def register(ctx: Any) -> None:
             radar.target_motion_sampling = str(args.get("target_motion_sampling") or "chirp")
             radar.target_site_budget = int(args.get("target_site_budget", 24))
             radar.fov = float(args.get("fov_deg", 60.0))
+            _configure_directional_pattern(radar, radar.fov)
             # The existing animation adapter requires these review controls.
             radar.view = "range_doppler"
             radar.static_clutter_removal = False
@@ -1912,7 +1932,9 @@ def register(ctx: Any) -> None:
                 for key in (
                     "snapshot_target_id", "t0", "animation_duration_s", "animation_fps",
                     "target_multipath", "target_motion_sampling", "target_site_budget",
-                    "fov", "view", "static_clutter_removal", "show_cfar",
+                    "fov", "use_default", "pattern_kind", "x_angles_deg",
+                    "y_angles_deg", "x_values", "y_values", "view",
+                    "static_clutter_removal", "show_cfar",
                 ):
                     setattr(radar, key, previous[key])
                 scene.update_transform(

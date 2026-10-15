@@ -255,7 +255,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     from .library_items import _settings_object
     from .adapter.studio_motion import StudioSkinSampler
     from .adapter.animation import animation_preflight, animation_request, AnimationTopologyError
-    from .agent_tools import _look_at_euler
+    from .agent_tools import _configure_directional_pattern, _look_at_euler
 
     detached = load_scene_ref(copy.deepcopy(make_scene_ref(scene)))
     sensor = detached.get_object(radar_object_id) if radar_object_id else None
@@ -271,6 +271,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     radar.target_motion_sampling = str(args.get('target_motion_sampling', 'chirp'))
     radar.target_site_budget = int(args.get('target_site_budget', 24))
     radar.fov = float(args.get('fov_deg', 60.))
+    _configure_directional_pattern(radar, radar.fov)
     radar.view, radar.static_clutter_removal, radar.show_cfar = 'range_doppler', False, False
     sampler = StudioSkinSampler(
         detached, args['target_object_id'], site_budget=radar.target_site_budget,

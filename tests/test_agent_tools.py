@@ -442,6 +442,12 @@ def test_ensure_sensor_creates_once_and_aims_local_minus_z(harness):
     assert radar.snapshot_target_id == "catstray"
     assert radar.animation_duration_s == pytest.approx(5.0)
     assert radar.animation_fps == pytest.approx(10.0)
+    assert radar.use_default is False
+    assert radar.pattern_kind == "separable"
+    assert list(radar.x_angles_deg) == pytest.approx([-30.0, -15.0, 0.0, 15.0, 30.0])
+    assert list(radar.y_angles_deg) == pytest.approx([-30.0, -15.0, 0.0, 15.0, 30.0])
+    assert list(radar.x_values) == pytest.approx([0.0, 0.5, 1.0, 0.5, 0.0])
+    assert list(radar.y_values) == pytest.approx([0.0, 0.5, 1.0, 0.5, 0.0])
     pose = SensorSpec.from_component(radar)
     actual = np.asarray(pose.target) - np.asarray(pose.position)
     expected = np.asarray(args["aim_point_m"]) - np.asarray(args["position_m"])
