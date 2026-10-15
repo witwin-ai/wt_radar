@@ -57,7 +57,7 @@ export function recordingFrameAtTime(manifest, time) {
   return low - 1;
 }
 
-export function recordingFramePlot(manifest, samples, frame, view = manifest.view ?? "range_doppler") {
+export function recordingFramePlot(manifest, samples, frame) {
   if (!Number.isInteger(frame) || frame < 0 || frame >= manifest.timesS.length
       || samples.length !== manifest.timesS.length * manifest.frameStride) {
     throw new Error("Invalid Radar recording frame.");
@@ -65,7 +65,7 @@ export function recordingFramePlot(manifest, samples, frame, view = manifest.vie
   const offset = frame * manifest.frameStride;
   const rangeCount = manifest.rangeM.length;
   const title = `${manifest.sourceLabel} | measurement ${manifest.timesS[frame].toFixed(3)} s | frame ${frame + 1}/${manifest.timesS.length}`;
-  if (view === "range_profile") {
+  if ((manifest.view ?? "range_doppler") === "range_profile") {
     return {
       type: "line",
       title,
@@ -118,15 +118,8 @@ function createRecordingWidget(host, React) {
     const [time, setTime] = useState(() => manifest && host.playback
       ? host.playback.getTime(manifest.sceneId) : null);
     const [loaded, setLoaded] = useState();
-    const [view, setView] = useState(() => manifest?.view ?? "range_doppler");
-    const [followTimeline, setFollowTimeline] = useState(true);
-    const [manualFrame, setManualFrame] = useState(0);
-
-    useEffect(() => {
-      setView(manifest?.view ?? "range_doppler");
-      setFollowTimeline(true);
-      setManualFrame(0);
-    }, [manifest?.asset?.contentHash]);
+    const [manualFrame, setManualFrame] = useState(null);
+    const [playing, setPlaying] = useState(false);
 
     useEffect(() => {
       if (!manifest || !host.playback) return undefined;
@@ -152,53 +145,88 @@ function createRecordingWidget(host, React) {
       return () => { disposed = true; lease?.release(); };
     }, [manifest?.asset?.uri, manifest?.asset?.contentHash, manifest?.asset?.byteLength]);
 
+    useEffect(() => {
+      setManualFrame(null);
+      setPlaying(false);
+    }, [manifest?.asset?.contentHash, manifest?.view]);
+
+    useEffect(() => {
+      if (!playing || !manifest || manualFrame === null) return undefined;
+      if (manualFrame >= manifest.timesS.length - 1) {
+        setPlaying(false);
+        return undefined;
+      }
+      const measuredDelay = 1000 * (manifest.timesS[manualFrame + 1] - manifest.timesS[manualFrame]);
+      const timer = globalThis.setTimeout(
+        () => setManualFrame((frame) => frame === null ? 0 : Math.min(frame + 1, manifest.timesS.length - 1)),
+        Math.max(16, Math.min(measuredDelay, 1000)),
+      );
+      return () => globalThis.clearTimeout(timer);
+    }, [playing, manualFrame, manifest]);
+
     let value;
     if (parsed.error) value = textPlot("Invalid Radar recording", parsed.error);
     else if (loaded?.error) value = textPlot(manifest.sourceLabel, `Radar replay unavailable: ${loaded.error}`);
     else if (!loaded?.samples) value = textPlot(manifest.sourceLabel, "Loading and verifying recorded Radar frames…");
     else {
-      const frame = followTimeline
-        ? recordingFrameAtTime(manifest, time)
-        : Math.min(manualFrame, manifest.timesS.length - 1);
+      const frame = manualFrame ?? recordingFrameAtTime(manifest, time);
       value = frame === null
         ? textPlot(manifest.sourceLabel, `No recorded Radar frame at scene time ${Number(time).toFixed(3)} s.`)
-        : recordingFramePlot(manifest, loaded.samples, frame, view);
+        : recordingFramePlot(manifest, loaded.samples, frame);
     }
     const plot = host.ui.renderWidget(
       { ...props.config, widget_type: "plot" },
       { ...props, value },
     );
-    if (!manifest) return plot;
-    const controlStyle = {
-      display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8,
-      padding: "6px 8px", marginBottom: 6, borderRadius: 4,
-      border: "1px solid var(--border-default)", background: "var(--bg-tertiary)",
-      color: "var(--text-primary)", fontSize: 12,
+    if (!manifest || !loaded?.samples) return plot;
+
+    const timelineFrame = recordingFrameAtTime(manifest, time);
+    const frame = manualFrame ?? timelineFrame ?? 0;
+    const playLabel = playing ? "Pause" : (frame >= manifest.timesS.length - 1 ? "Replay" : "Play");
+    const startOrPause = () => {
+      if (playing) {
+        setPlaying(false);
+        return;
+      }
+      setManualFrame(frame >= manifest.timesS.length - 1 ? 0 : frame);
+      setPlaying(true);
     };
-    const viewSelect = React.createElement("select", {
-      value: view,
-      "aria-label": "Radar replay view",
-      onChange: (event) => setView(event.target.value),
-    },
-    React.createElement("option", { value: "range_profile" }, "Range Profile (line)"),
-    React.createElement("option", { value: "range_doppler" }, "Range-Doppler"));
-    const followControl = React.createElement("label", null,
-      React.createElement("input", {
-        type: "checkbox", checked: followTimeline,
-        onChange: (event) => setFollowTimeline(event.target.checked),
-      }), " Follow Timeline");
-    const frameControl = React.createElement("label", {
-      style: { display: "flex", alignItems: "center", gap: 5, opacity: followTimeline ? 0.55 : 1 },
-    }, "Frame",
-    React.createElement("input", {
-      type: "range", min: 0, max: manifest.timesS.length - 1, step: 1,
-      value: Math.min(manualFrame, manifest.timesS.length - 1), disabled: followTimeline,
-      "aria-label": "Radar replay frame",
-      onChange: (event) => setManualFrame(Number(event.target.value)),
-    }), `${Math.min(manualFrame, manifest.timesS.length - 1) + 1}/${manifest.timesS.length}`);
-    return React.createElement("div", null,
-      React.createElement("div", { style: controlStyle }, viewSelect, followControl, frameControl),
-      plot);
+    return React.createElement(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: "8px", minWidth: 0 } },
+      plot,
+      React.createElement(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: "8px", padding: "0 8px 8px" } },
+        React.createElement("button", { type: "button", onClick: startOrPause }, playLabel),
+        React.createElement("input", {
+          type: "range",
+          min: 0,
+          max: manifest.timesS.length - 1,
+          step: 1,
+          value: frame,
+          onChange: (event) => {
+            setPlaying(false);
+            setManualFrame(Number(event.target.value));
+          },
+          style: { flex: 1 },
+          "aria-label": "Recorded Radar frame",
+        }),
+        React.createElement(
+          "span",
+          { style: { whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" } },
+          `${frame + 1}/${manifest.timesS.length} · ${manifest.timesS[frame].toFixed(3)} s`,
+        ),
+        React.createElement("button", {
+          type: "button",
+          onClick: () => {
+            setPlaying(false);
+            setManualFrame(null);
+          },
+          disabled: manualFrame === null,
+        }, "Follow Timeline"),
+      ),
+    );
   };
 }
 

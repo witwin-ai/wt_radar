@@ -89,6 +89,45 @@ Studio can load a metadata-bearing exported result without rerunning the solver.
 Replay uses the official Radar 0.4 processing API and the existing numeric
 LineChart/Heatmap widgets.
 
+For an exported or measured `.npz` recording, the existing **Radar Replay**
+figure is the single review surface. **All Frames** is enabled by default and
+adds an in-figure Play/Pause button and frame scrubber for Range Profile and
+Range-Doppler. The same **Result Display** selector also provides:
+
+- **Micro-Doppler**: time x closing velocity, integrated across range.
+- **Range-Time**: time x range, integrated across Doppler velocity.
+- **Motion Energy**: normalized energy outside the zero-Doppler bin.
+
+The complete-recording heatmaps show relative amplitude in dB against the
+recording peak and retain every saved frame and physical bin. Hardware timestamp
+jitter is rendered on uniform display bins between the measured start/end times
+because Studio heatmaps require uniform x spacing. Turn off **All Frames** only
+when a specific numeric frame/chirp needs inspection.
+
+### Motion-fidelity A/B evidence
+
+`submit_animation_measurement` optionally accepts the complete
+`final_motion_fidelity` object returned by Motion Matching. Radar binds its
+report ID to the current baked Timeline fingerprint and embeds the reduced
+provenance in the exported NPZ. A stale report cannot be attached after the
+Timeline changes.
+
+Compare two exports made with the same interval and Radar configuration:
+
+```powershell
+python tools/compare_motion_fidelity.py `
+  --before C:\path\before.npz `
+  --after C:\path\after.npz `
+  --output C:\path\motion-fidelity-ab.json
+```
+
+Without a separately identified trusted reference, the report describes
+micro-Doppler distribution and motion-energy changes but explicitly refuses to
+claim improvement. Add `--reference` and `--reference-id` to measure whether
+the repaired result is closer to that reference. These metrics are offline
+evidence and never replace the animation fidelity, collision, support, or
+Timeline commit gates.
+
 ## Runtime contract
 
 The plugin manifest and startup checks require:

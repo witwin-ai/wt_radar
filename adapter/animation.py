@@ -73,6 +73,10 @@ def animation_request(component):
         # solver request owns its copy after the transient component field is
         # removed.
         request["native_preflight"] = json.loads(json.dumps(native_preflight))
+    fidelity = getattr(component, "_motion_fidelity_provenance", None)
+    if fidelity is not None:
+        from .fidelity_ab import normalize_fidelity_provenance
+        request["motion_fidelity"] = normalize_fidelity_provenance(fidelity)
     frame_times(request, component)
     return request
 
@@ -632,6 +636,11 @@ def solve_animation(ctx, scene, request):
                 versions={name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")})
     if request.get("input_fingerprint"):
         meta["input_fingerprint"] = str(request["input_fingerprint"])
+    from .fidelity_ab import attach_fidelity_provenance
+    meta = attach_fidelity_provenance(
+        meta, request,
+        authored_motion_fingerprint=authored_motion_fingerprint,
+    )
     ctx.log(f"Studio skin animation model: {meta}")
     cubes = None
     poses = poses[:, active_ranks]

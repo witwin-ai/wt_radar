@@ -29,6 +29,19 @@ def test_current_controls_keep_simulation_replay_and_export():
         assert RadarComponent().target_motion_sampling == "chirp"
         assert fields["target_site_budget"]["group"] == "StudioAnimation"
         assert RadarComponent().target_site_budget == 24
+        assert "MeasuredOverview" not in groups
+        assert fields["micro_doppler_figure"]["hidden"] is True
+        assert fields["range_time_figure"]["hidden"] is True
+        assert fields["motion_energy_figure"]["hidden"] is True
+        assert "build_recording_overview" not in buttons
+        assert fields["saved_all_frames"]["group"] == "SavedResult"
+        assert fields["saved_frame_index"]["hide_if"] == {
+            "field_name": "saved_all_frames", "operator": "is_true", "value": True,
+        }
+        assert fields["view"]["widget"]["options"] == [
+            "range_profile", "range_spectrum", "range_doppler",
+            "micro_doppler", "range_time", "motion_energy",
+        ]
 
 
 def test_old_stream_and_timeline_settings_round_trip_without_ui_controls():
