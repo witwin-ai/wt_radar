@@ -364,8 +364,8 @@ class RadarComponent(Component):
         max=2400,
         group=_ANIMATION,
         description=(
-            "Maximum moving-target surface sites. Budgets through 64 use anatomical anchors; "
-            "larger budgets use deterministic spatial coverage of the skinned surface."
+            "Engineering override for non-SMPL targets. SMPL humans automatically use 2400 "
+            "deterministic skinned-surface sites in the backend."
         ),
     )
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,

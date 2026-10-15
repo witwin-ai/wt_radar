@@ -19,7 +19,7 @@ from wt_radar.adapter.saved_result import SavedRadarResult
 from wt_radar.adapter.snapshot import prepare_snapshot, snapshot_request
 from wt_radar.adapter.studio_motion import (
     MAX_TARGET_SITE_BUDGET, StudioSkinSampler, anatomically_prioritized_ranks,
-    spatially_spread_ranks,
+    resolved_target_site_budget, spatially_spread_ranks,
 )
 
 
@@ -88,6 +88,16 @@ def test_dense_surface_sampler_supports_2400_deterministic_sites():
 
     assert len(first) == len(np.unique(first)) == 2400
     np.testing.assert_array_equal(first, second)
+
+
+def test_smpl_human_uses_backend_dense_budget_without_authored_override():
+    target = SimpleNamespace(
+        get_component=lambda name: object() if name == "SMPLBody" else None,
+    )
+    scene = SimpleNamespace(get_object=lambda object_id: target if object_id == "human" else None)
+
+    assert resolved_target_site_budget(scene, "human", 24) == 2400
+    assert resolved_target_site_budget(scene, "missing", 24) == 24
 
 
 def test_anatomical_budget_prefers_major_cat_motion_sites():

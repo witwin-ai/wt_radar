@@ -24,10 +24,11 @@ official Radar 0.4 error-controlled **Adaptive** policy remains available for
 comparison, but is not assumed to outperform chirp sampling. Path topology is
 still rediscovered at Studio-frame boundaries.
 
-**Target Site Budget** caps the one-surface-site-per-influenced-bone model at
-1..2400 sites. The default 24 prioritizes head, neck, spine, shoulders, major leg
-and foot joints, plus representative tail segments; cosmetic face, ear and claw
-micro-bones rank last. The declared total target RCS remains constant.
+**Target Site Budget** is an engineering override for non-SMPL skinned targets.
+Budgets through 64 use anatomically prioritized bone anchors; larger values use
+deterministic full-surface coverage. SMPL humans use the backend's fixed 2400-site
+surface policy automatically, without requiring an Agent or prompt parameter.
+The declared total target RCS remains constant.
 
 ## Supported physical model
 

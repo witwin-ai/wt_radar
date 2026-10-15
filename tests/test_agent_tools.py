@@ -217,6 +217,8 @@ def test_registers_narrow_domain_tools(harness):
     assert not tools["ensure_sensor"].requires_confirmation
     assert tools["ensure_sensor"].idempotent
     assert not tools["ensure_sensor"].durable_confirmation
+    assert "target_site_budget" not in tools["plan_sensor_placement"].input_schema["properties"]
+    assert "target_site_budget" not in tools["ensure_sensor"].input_schema["properties"]
     assert tools["cancel_simulation"].permission_tier == "soft_write"
     assert not tools["cancel_simulation"].requires_confirmation
     for name, tier in (

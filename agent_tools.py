@@ -547,6 +547,17 @@ def _scene_input_fingerprint(scene: Any) -> str:
     return str(_scene_input_evidence(scene)["fingerprint"])
 
 
+def _effective_target_site_budget(obj: Any) -> int:
+    from .adapter.studio_motion import resolved_target_site_budget
+
+    radar = obj.get_component("Radar")
+    return resolved_target_site_budget(
+        getattr(obj, "scene", None),
+        str(radar.snapshot_target_id or ""),
+        int(radar.target_site_budget),
+    )
+
+
 def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
     """Durable authored Radar inputs actually consumed by the native adapter."""
     from dataclasses import asdict
@@ -571,7 +582,7 @@ def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
             "motion_sampling": str(radar.motion_sampling),
             "target_multipath": bool(radar.target_multipath),
             "target_motion_sampling": str(radar.target_motion_sampling),
-            "target_site_budget": int(radar.target_site_budget),
+            "target_site_budget": _effective_target_site_budget(obj),
         },
     })
     # SensorSpec is derived from the exact float32 world matrix consumed by
@@ -596,7 +607,7 @@ def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
                 "components": ["los"] + (["reflection"] if radar.target_multipath else []),
                 "max_depth": 1 if radar.target_multipath else 0,
                 "motion_sampling": str(radar.target_motion_sampling),
-                "site_budget": int(radar.target_site_budget),
+                "site_budget": _effective_target_site_budget(obj),
             },
             "environment": {"components": ["reflection"], "max_depth": 1},
             "device": "cuda",
@@ -761,7 +772,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "view": str(radar.view),
             "target_multipath": bool(radar.target_multipath),
             "target_motion_sampling": str(radar.target_motion_sampling),
-            "target_site_budget": int(radar.target_site_budget),
+            "target_site_budget": _effective_target_site_budget(obj),
         },
         "result": {
             "running": bool(getattr(radar, "_snapshot_running", False)),
@@ -782,7 +793,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
             "target_multipath": bool(radar.target_multipath),
             "target_max_depth": 1 if radar.target_multipath else 0,
             "target_motion_sampling": str(radar.target_motion_sampling),
-            "target_site_budget": int(radar.target_site_budget),
+            "target_site_budget": _effective_target_site_budget(obj),
             "target_model": (
                 "interval-visible stable skinned surface sites; uncalibrated equal-RCS "
                 "shares are based on all declared sites and are not renormalized"
@@ -1556,13 +1567,6 @@ def register(ctx: Any) -> None:
                     "default": "chirp",
                     "description": "Use measured-default chirp sampling, or official error-controlled adaptive probes for comparison.",
                 },
-                "target_site_budget": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 2400,
-                    "default": 24,
-                    "description": "Maximum moving-target surface sites; values above 64 enable dense skinned-surface sampling.",
-                },
                 "max_range_m": {
                     "type": "number",
                     "minimum": 2.0,
@@ -1658,7 +1662,6 @@ def register(ctx: Any) -> None:
             "height_m": float(args.get("height_m", 1.0)),
             "target_multipath": bool(args.get("target_multipath", False)),
             "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
-            "target_site_budget": int(args.get("target_site_budget", 24)),
         }
         if "max_range_m" in args:
             proposed["max_range_m"] = float(args["max_range_m"])
@@ -1705,7 +1708,6 @@ def register(ctx: Any) -> None:
                 "fov_deg": float(current_radar.fov),
                 "target_multipath": bool(current_radar.target_multipath),
                 "target_motion_sampling": str(current_radar.target_motion_sampling),
-                "target_site_budget": int(current_radar.target_site_budget),
             })
         if "distance_m" in args:
             proposed["distance_m"] = float(args["distance_m"])
@@ -1811,13 +1813,6 @@ def register(ctx: Any) -> None:
                     "enum": ["chirp", "adaptive"],
                     "default": "chirp",
                     "description": "Chirp-by-chirp target motion by default, or official Radar 0.4 adaptive probes.",
-                },
-                "target_site_budget": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 2400,
-                    "default": 24,
-                    "description": "Maximum moving-target surface sites; values above 64 enable dense skinned-surface sampling.",
                 },
                 "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
                 "max_range_m": {
@@ -2017,7 +2012,6 @@ def register(ctx: Any) -> None:
             radar.animation_fps = float(args.get("fps", 10.0))
             radar.target_multipath = bool(args.get("target_multipath", False))
             radar.target_motion_sampling = str(args.get("target_motion_sampling") or "chirp")
-            radar.target_site_budget = int(args.get("target_site_budget", 24))
             radar.fov = float(args.get("fov_deg", 60.0))
             if "max_range_m" in args:
                 radar.slope = Derived.slope_for_max_range(radar, float(args["max_range_m"]))

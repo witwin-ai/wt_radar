@@ -15,7 +15,9 @@ import torch
 
 from .snapshot import (MODEL as SNAPSHOT_MODEL, SnapshotResult, prepare_snapshot,
                        processing_cube, snapshot_request, snapshot_view)
-from .studio_motion import MAX_TARGET_SITE_BUDGET, StudioSkinSampler
+from .studio_motion import (
+    MAX_TARGET_SITE_BUDGET, StudioSkinSampler, resolved_target_site_budget,
+)
 from .memory_budget import MAX_RESULT_BYTES, require_result_memory
 from .timebase import aligned_frame_count
 
@@ -51,12 +53,17 @@ class AnimationTopologyError(ValueError):
 
 
 def animation_request(component):
+    site_budget = resolved_target_site_budget(
+        getattr(component, "scene", None),
+        str(getattr(component, "snapshot_target_id", "") or ""),
+        int(component.target_site_budget),
+    )
     request = snapshot_request(component)
     request.update(adapter=MODEL, duration_s=float(component.animation_duration_s),
                    fps=float(component.animation_fps),
                    target_multipath=bool(component.target_multipath),
                    target_motion_sampling=str(component.target_motion_sampling),
-                   target_site_budget=int(component.target_site_budget))
+                   target_site_budget=site_budget)
     fingerprint = str(getattr(component, "_agent_input_fingerprint", "") or "")
     if not fingerprint and getattr(component, "scene", None) is not None:
         # Component-button and Agent execution must publish the same immutable
