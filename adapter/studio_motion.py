@@ -12,6 +12,10 @@ import torch
 from .snapshot import _hierarchy
 
 
+LEGACY_ANATOMICAL_SITE_LIMIT = 64
+MAX_TARGET_SITE_BUDGET = 2400
+
+
 def spatially_spread_ranks(points, count):
     """Select a deterministic, spatially spread subset of bind-pose sites."""
     points = np.asarray(points, dtype=np.float64)
@@ -132,8 +136,10 @@ class StudioSkinSampler:
         if not self.tracks:
             raise ValueError("No baked target/bone motion tracks. Run Motion Matching in the room first.")
         self.knots = np.unique(knots)
-        # One representative surface vertex per influenced bone, fixed in bind
-        # geometry. Prefer high-influence vertices nearest the weighted centroid.
+        # Keep the established anatomical sampler for ordinary (<=64-site)
+        # scenes.  Dense human runs select actual bind-pose surface vertices,
+        # so increasing the budget adds spatial samples instead of duplicating
+        # the same one-per-bone representatives.
         chosen, names = [], []
         for bone, oid in enumerate(self.bone_ids):
             influence = np.where(indices == bone, weights, 0).sum(1)
@@ -145,17 +151,28 @@ class StudioSkinSampler:
             if vertex not in chosen:
                 chosen.append(vertex)
                 names.append(str(scene.get_object(oid).name))
-        if not 1 <= len(chosen) <= 64:
-            raise ValueError("Animation supports 1..64 influenced-bone surface sites.")
-        if isinstance(site_budget, (bool, np.bool_)) or not 1 <= int(site_budget) <= 64:
-            raise ValueError("Target site budget must be an integer from 1 to 64.")
-        self.available_site_count = len(chosen)
+        if not 1 <= len(chosen) <= LEGACY_ANATOMICAL_SITE_LIMIT:
+            raise ValueError("Animation requires 1..64 influenced-bone anatomical anchors.")
+        if (isinstance(site_budget, (bool, np.bool_)) or int(site_budget) != site_budget
+                or not 1 <= int(site_budget) <= MAX_TARGET_SITE_BUDGET):
+            raise ValueError(
+                f"Target site budget must be an integer from 1 to {MAX_TARGET_SITE_BUDGET}."
+            )
         self.site_budget = int(site_budget)
-        ranks = anatomically_prioritized_ranks(
-            vertices[np.asarray(chosen)], names, min(self.site_budget, len(chosen)),
-        )
-        chosen = [chosen[rank] for rank in ranks]
-        names = [names[rank] for rank in ranks]
+        if self.site_budget <= LEGACY_ANATOMICAL_SITE_LIMIT:
+            self.available_site_count = len(chosen)
+            ranks = anatomically_prioritized_ranks(
+                vertices[np.asarray(chosen)], names, min(self.site_budget, len(chosen)),
+            )
+            chosen = [chosen[rank] for rank in ranks]
+            names = [names[rank] for rank in ranks]
+        else:
+            self.available_site_count = len(vertices)
+            dense_count = min(self.site_budget, self.available_site_count)
+            chosen = spatially_spread_ranks(vertices, dense_count).tolist()
+            dominant_slots = np.argmax(weights[chosen], axis=1)
+            dominant_bones = indices[np.asarray(chosen), dominant_slots]
+            names = [str(scene.get_object(self.bone_ids[bone]).name) for bone in dominant_bones]
         self.vertex_ids, self.site_names = np.asarray(chosen), names
         selected = self.vertex_ids
         self._base_vertices = torch.as_tensor(vertices[selected], dtype=torch.float32).contiguous()

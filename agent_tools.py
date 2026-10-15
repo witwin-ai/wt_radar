@@ -1559,9 +1559,9 @@ def register(ctx: Any) -> None:
                 "target_site_budget": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 64,
+                    "maximum": 2400,
                     "default": 24,
-                    "description": "Maximum anatomically prioritized moving-target surface sites.",
+                    "description": "Maximum moving-target surface sites; values above 64 enable dense skinned-surface sampling.",
                 },
                 "max_range_m": {
                     "type": "number",
@@ -1815,9 +1815,9 @@ def register(ctx: Any) -> None:
                 "target_site_budget": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 64,
+                    "maximum": 2400,
                     "default": 24,
-                    "description": "Maximum moving-target surface sites selected by anatomical priority then spatial coverage.",
+                    "description": "Maximum moving-target surface sites; values above 64 enable dense skinned-surface sampling.",
                 },
                 "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
                 "max_range_m": {

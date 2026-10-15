@@ -15,7 +15,7 @@ import torch
 
 from .snapshot import (MODEL as SNAPSHOT_MODEL, SnapshotResult, prepare_snapshot,
                        processing_cube, snapshot_request, snapshot_view)
-from .studio_motion import StudioSkinSampler
+from .studio_motion import MAX_TARGET_SITE_BUDGET, StudioSkinSampler
 from .memory_budget import MAX_RESULT_BYTES, require_result_memory
 from .timebase import aligned_frame_count
 
@@ -106,8 +106,11 @@ def target_motion_policy(Motion, request):
 
 def target_site_budget(request):
     value = request.get("target_site_budget", 24)
-    if isinstance(value, (bool, np.bool_)) or int(value) != value or not 1 <= int(value) <= 64:
-        raise ValueError("target_site_budget must be an integer from 1 to 64.")
+    if (isinstance(value, (bool, np.bool_)) or int(value) != value
+            or not 1 <= int(value) <= MAX_TARGET_SITE_BUDGET):
+        raise ValueError(
+            f"target_site_budget must be an integer from 1 to {MAX_TARGET_SITE_BUDGET}."
+        )
     return int(value)
 
 

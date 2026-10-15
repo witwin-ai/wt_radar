@@ -361,11 +361,11 @@ class RadarComponent(Component):
     target_site_budget = int_field(
         24,
         min=1,
-        max=64,
+        max=2400,
         group=_ANIMATION,
         description=(
-            "Maximum moving-target surface sites. Anatomically important head, trunk, limb, "
-            "foot and representative tail sites rank above cosmetic micro-bones."
+            "Maximum moving-target surface sites. Budgets through 64 use anatomical anchors; "
+            "larger budgets use deterministic spatial coverage of the skinned surface."
         ),
     )
     animation_frame_index = int_field(0, min=0, group=_ANIMATION,

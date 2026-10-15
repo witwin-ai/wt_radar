@@ -17,7 +17,10 @@ from wt_radar.adapter.animation import (
 )
 from wt_radar.adapter.saved_result import SavedRadarResult
 from wt_radar.adapter.snapshot import prepare_snapshot, snapshot_request
-from wt_radar.adapter.studio_motion import StudioSkinSampler, anatomically_prioritized_ranks
+from wt_radar.adapter.studio_motion import (
+    MAX_TARGET_SITE_BUDGET, StudioSkinSampler, anatomically_prioritized_ranks,
+    spatially_spread_ranks,
+)
 
 
 class AnimationContext(Context):
@@ -71,6 +74,20 @@ def test_sampler_site_budget_uses_stable_spatial_coverage(scene):
     assert sampler.available_site_count == 2
     assert sampler.site_budget == 1
     assert len(sampler.vertex_ids) == len(sampler.site_names) == 1
+
+
+def test_dense_surface_sampler_supports_2400_deterministic_sites():
+    points = np.column_stack((
+        np.linspace(-1.0, 1.0, 2600),
+        np.sin(np.linspace(0.0, 17.0, 2600)),
+        np.cos(np.linspace(0.0, 11.0, 2600)),
+    ))
+
+    first = spatially_spread_ranks(points, MAX_TARGET_SITE_BUDGET)
+    second = spatially_spread_ranks(points, MAX_TARGET_SITE_BUDGET)
+
+    assert len(first) == len(np.unique(first)) == 2400
+    np.testing.assert_array_equal(first, second)
 
 
 def test_anatomical_budget_prefers_major_cat_motion_sites():
