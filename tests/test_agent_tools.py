@@ -454,6 +454,30 @@ def test_ensure_sensor_creates_once_and_aims_local_minus_z(harness):
     np.testing.assert_allclose(actual / np.linalg.norm(actual), expected / np.linalg.norm(expected), atol=1e-6)
 
 
+def test_plan_and_ensure_sensor_can_narrow_native_fmcw_range(harness):
+    scene, tools = harness
+    planned = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id,
+        "target_object_id": "catstray",
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+        "max_range_m": 6.0,
+    })
+    assert planned["proposed_ensure_sensor_arguments"]["max_range_m"] == 6.0
+
+    ensured = run(tools, "ensure_sensor", {
+        **planned["proposed_ensure_sensor_arguments"],
+        "operation_id": "focused-range",
+    })
+    sensor = scene.get_object(ensured["radar"]["object_id"])
+    radar = sensor.get_component("Radar")
+    waveform = ensured["radar"]["waveform"]
+    assert waveform["max_range_m"] == pytest.approx(6.0)
+    assert waveform["range_bin_count"] == 256
+    assert waveform["range_resolution_m"] == pytest.approx(6.0 / 256)
+    assert waveform["slope_mhz_per_us"] == pytest.approx(radar.slope)
+
+
 def test_ensure_sensor_never_guesses_when_multiple_exist(harness):
     scene, tools = harness
     for name in ("Radar A", "Radar B"):

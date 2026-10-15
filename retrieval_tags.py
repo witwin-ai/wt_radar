@@ -57,13 +57,17 @@ SENSOR_PLAN_TAGS = hints(
     "point radar", "closer radar", "farther radar", "whole path visible",
     "approaching and receding", "stronger doppler", "side view", "opposite side",
     "雷达位置", "规划雷达位置", "雷达摆位", "靠近", "远离", "完整路径可见",
-    "接近和远离", "更强多普勒", "侧面", "另一侧", boost=20,
+    "shorter radar range", "lower max range", "more range bins on target",
+    "range resolution", "接近和远离", "更强多普勒", "侧面", "另一侧",
+    "降低最远距离", "更多距离格", "距离分辨率", boost=20,
 )
 ENSURE_TAGS = actions(
     "place radar", "configure radar", "move radar", "closer radar", "farther radar",
     "whole path visible", "approaching and receding", "stronger doppler", "side view",
     "opposite side", "放置雷达", "配置雷达", "移动雷达", "靠近", "远离",
-    "完整路径可见", "接近和远离", "更强多普勒", "侧面", "另一侧", boost=19,
+    "shorter radar range", "lower max range", "more range bins on target",
+    "range resolution", "完整路径可见", "接近和远离", "更强多普勒", "侧面",
+    "另一侧", "降低最远距离", "更多距离格", "距离分辨率", boost=19,
 )
 SUBMIT_TAGS = actions(
     "run only radar", "run radar simulation", "start radar simulation",

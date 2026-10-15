@@ -25,6 +25,7 @@ from scipy.spatial.transform import Rotation
 from witwin_server.tools.base import ToolError, tool
 
 from .adapter.memory_budget import MAX_RESULT_BYTES, available_memory_bytes
+from .adapter.common import Derived
 from .adapter.specs import SensorSpec
 from .library_items import _settings_object
 from .retrieval_tags import (
@@ -732,6 +733,7 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
         except Exception:
             current_fingerprint = None
     recorded_fingerprint = str(getattr(radar, "_last_result_input_fingerprint", "") or "") or None
+    waveform = Derived.compute(radar)
     return {
         "object_id": str(obj.id),
         "name": str(obj.name),
@@ -740,6 +742,13 @@ def _sensor_summary(obj: Any) -> dict[str, Any]:
         "look_at_point_m": _jsonable(pose.target),
         "up": _jsonable(pose.up),
         "fov_deg": float(radar.fov),
+        "waveform": {
+            "slope_mhz_per_us": float(radar.slope),
+            "sample_rate_ksps": float(radar.sample_rate),
+            "range_bin_count": int(radar.num_range_bins),
+            "range_resolution_m": float(waveform["range_resolution_m"]),
+            "max_range_m": float(waveform["max_range_m"]),
+        },
         "target_object_id": target_id or None,
         # Read-only current authored measurement identity.  Orchestrators use
         # this to distinguish harmless Radar UI/runtime-state normalization
@@ -830,6 +839,7 @@ def _sensor_configuration_state(obj: Any) -> dict[str, Any]:
         "target_motion_sampling": str(radar.target_motion_sampling),
         "target_site_budget": int(radar.target_site_budget),
         "fov_deg": float(radar.fov),
+        "slope_mhz_per_us": float(radar.slope),
         "position_m": _jsonable(transform.position),
         "rotation_rad": _jsonable(transform.rotation),
     }
@@ -849,6 +859,14 @@ def _configuration_matches(current: dict[str, Any], expected: dict[str, Any]) ->
     for key in ("start_s", "duration_s", "fps", "fov_deg"):
         if not math.isclose(float(current.get(key, math.nan)), float(expected.get(key, math.nan)), abs_tol=1e-9):
             return False
+    # Receipts written before range focusing did not record waveform slope.
+    # Keep those retries compatible; every new receipt binds this field.
+    if "slope_mhz_per_us" in expected and not math.isclose(
+        float(current.get("slope_mhz_per_us", math.nan)),
+        float(expected["slope_mhz_per_us"]),
+        abs_tol=1e-9,
+    ):
+        return False
     for key in ("position_m", "rotation_rad"):
         lhs = np.asarray(current.get(key), dtype=np.float64)
         rhs = np.asarray(expected.get(key), dtype=np.float64)
@@ -1540,6 +1558,16 @@ def register(ctx: Any) -> None:
                     "default": 24,
                     "description": "Maximum anatomically prioritized moving-target surface sites.",
                 },
+                "max_range_m": {
+                    "type": "number",
+                    "minimum": 2.0,
+                    "maximum": 20.0,
+                    "description": (
+                        "Requested FMCW unambiguous range. Keeps the native range-bin count and "
+                        "sample rate, and derives the chirp slope so a shorter span gives finer "
+                        "physical range bins. Use a span that still covers the full room path."
+                    ),
+                },
                 "distance_m": {
                     "type": "number", "minimum": 0.25, "maximum": 10,
                     "description": "Requested world-space distance from the animated target, for automatic placement only.",
@@ -1620,6 +1648,8 @@ def register(ctx: Any) -> None:
             "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
             "target_site_budget": int(args.get("target_site_budget", 24)),
         }
+        if "max_range_m" in args:
+            proposed["max_range_m"] = float(args["max_range_m"])
 
         automatic_interval = None
         if placement_mode == "automatic":
@@ -1747,6 +1777,15 @@ def register(ctx: Any) -> None:
                     "description": "Maximum moving-target surface sites selected by anatomical priority then spatial coverage.",
                 },
                 "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
+                "max_range_m": {
+                    "type": "number",
+                    "minimum": 2.0,
+                    "maximum": 20.0,
+                    "description": (
+                        "Requested FMCW unambiguous range. The Radar plugin derives chirp slope "
+                        "while preserving native sample rate and range-bin count."
+                    ),
+                },
                 "reuse_existing": {"type": "boolean", "default": True},
             },
             "additionalProperties": False,
@@ -1897,6 +1936,7 @@ def register(ctx: Any) -> None:
             "target_motion_sampling": radar.target_motion_sampling,
             "target_site_budget": radar.target_site_budget,
             "fov": radar.fov,
+            "slope": radar.slope,
             "use_default": radar.use_default,
             "pattern_kind": radar.pattern_kind,
             "x_angles_deg": list(radar.x_angles_deg),
@@ -1918,6 +1958,8 @@ def register(ctx: Any) -> None:
             radar.target_motion_sampling = str(args.get("target_motion_sampling") or "chirp")
             radar.target_site_budget = int(args.get("target_site_budget", 24))
             radar.fov = float(args.get("fov_deg", 60.0))
+            if "max_range_m" in args:
+                radar.slope = Derived.slope_for_max_range(radar, float(args["max_range_m"]))
             _configure_directional_pattern(radar, radar.fov)
             # The existing animation adapter requires these review controls.
             radar.view = "range_doppler"
@@ -1932,7 +1974,7 @@ def register(ctx: Any) -> None:
                 for key in (
                     "snapshot_target_id", "t0", "animation_duration_s", "animation_fps",
                     "target_multipath", "target_motion_sampling", "target_site_budget",
-                    "fov", "use_default", "pattern_kind", "x_angles_deg",
+                    "fov", "slope", "use_default", "pattern_kind", "x_angles_deg",
                     "y_angles_deg", "x_values", "y_values", "view",
                     "static_clutter_removal", "show_cfar",
                 ):
