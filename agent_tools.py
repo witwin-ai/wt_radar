@@ -1528,7 +1528,12 @@ def register(ctx: Any) -> None:
                 "scene_id": SCENE_ID_PROPERTY,
                 "radar_object_id": {"type": "string"},
                 "target_object_id": {"type": "string", "minLength": 1},
-                "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
+                "placement_mode": {
+                    "type": "string",
+                    "enum": ["fixed", "automatic", "current"],
+                    "default": "fixed",
+                    "description": "Use explicit fixed coordinates, automatic placement, or preserve the selected Radar's current pose.",
+                },
                 "placement_objective": {
                     "type": "string",
                     "enum": [
@@ -1637,6 +1642,13 @@ def register(ctx: Any) -> None:
                 "Fixed placement is defined by explicit coordinates and cannot also request distance_m.",
                 code="conflicting_sensor_placement",
             )
+        if placement_mode == "current" and any(
+            key in args for key in ("position_m", "aim_point_m", "distance_m")
+        ):
+            raise ToolError(
+                "Current placement preserves the authored Radar pose and cannot override coordinates.",
+                code="conflicting_sensor_placement",
+            )
 
         proposed = {
             "scene_id": str(scene.scene_id),
@@ -1675,8 +1687,26 @@ def register(ctx: Any) -> None:
             proposed.update(automatic_interval)
         requested_radar = str(args.get("radar_object_id") or "").strip()
         if requested_radar:
-            _select_radar(scene, requested_radar)
+            selected_radar = _select_radar(scene, requested_radar)
             proposed["radar_object_id"] = requested_radar
+        else:
+            selected_radar = None
+        if placement_mode == "current":
+            if selected_radar is None:
+                raise ToolError(
+                    "Current placement requires an exact existing radar_object_id.",
+                    code="missing_radar",
+                )
+            current_radar = selected_radar.get_component("Radar")
+            proposed.update({
+                "start_s": float(current_radar.t0),
+                "duration_s": float(current_radar.animation_duration_s),
+                "fps": float(current_radar.animation_fps),
+                "fov_deg": float(current_radar.fov),
+                "target_multipath": bool(current_radar.target_multipath),
+                "target_motion_sampling": str(current_radar.target_motion_sampling),
+                "target_site_budget": int(current_radar.target_site_budget),
+            })
         if "distance_m" in args:
             proposed["distance_m"] = float(args["distance_m"])
         if placement_mode == "fixed":
@@ -1691,13 +1721,21 @@ def register(ctx: Any) -> None:
                 "aim_point_m": aim.tolist(),
                 "rotation_euler_zxy_rad": rotation,
             }
-        else:
+        elif placement_mode == "automatic":
             placement = {
                 "mode": "automatic",
                 "height_m": proposed["height_m"],
                 "distance_m": proposed.get("distance_m"),
                 "timeline_interval": automatic_interval,
                 "verification": "deferred_to_native_preflight_after_motion_exists",
+            }
+        else:
+            pose = SensorSpec.from_component(selected_radar.get_component("Radar"))
+            placement = {
+                "mode": "current",
+                "position_m": _jsonable(pose.position),
+                "aim_point_m": _jsonable(pose.target),
+                "verification": "authored_pose_preserved",
             }
         return {
             "ok": True,
@@ -1733,7 +1771,12 @@ def register(ctx: Any) -> None:
                 "operation_id": {"type": "string", "minLength": 1},
                 "radar_object_id": {"type": "string"},
                 "target_object_id": {"type": "string", "minLength": 1},
-                "placement_mode": {"type": "string", "enum": ["fixed", "automatic"], "default": "fixed"},
+                "placement_mode": {
+                    "type": "string",
+                    "enum": ["fixed", "automatic", "current"],
+                    "default": "fixed",
+                    "description": "Use current to preserve the exact authored pose while changing non-pose Radar configuration.",
+                },
                 "placement_objective": {
                     "type": "string",
                     "enum": [
@@ -1870,18 +1913,30 @@ def register(ctx: Any) -> None:
                 code="target_not_skinned",
                 detail={"scene_id": str(scene.scene_id), "target_object_id": target_id},
             )
-        automatic = args.get("placement_mode", "fixed") == "automatic"
+        placement_mode = str(args.get("placement_mode") or "fixed")
+        automatic = placement_mode == "automatic"
+        current = placement_mode == "current"
         if automatic and ("position_m" in args or "aim_point_m" in args):
             raise ToolError("Automatic placement cannot override explicit coordinates; use fixed mode.",
                             code="conflicting_sensor_placement")
-        if not automatic and not all(key in args for key in ("position_m", "aim_point_m")):
+        if placement_mode == "fixed" and not all(key in args for key in ("position_m", "aim_point_m")):
             raise ToolError("Fixed placement requires position_m and aim_point_m.", code="missing_sensor_pose")
-        if not automatic and "distance_m" in args:
+        if placement_mode == "fixed" and "distance_m" in args:
             raise ToolError(
                 "Fixed placement is defined by explicit coordinates and cannot also request distance_m.",
                 code="conflicting_sensor_placement",
             )
+        if current and any(key in args for key in ("position_m", "aim_point_m", "distance_m")):
+            raise ToolError(
+                "Current placement preserves the authored Radar pose and cannot override coordinates.",
+                code="conflicting_sensor_placement",
+            )
         requested = str(args.get("radar_object_id") or "").strip()
+        if current and not requested:
+            raise ToolError(
+                "Current placement requires an exact existing radar_object_id.",
+                code="missing_radar",
+            )
         created = False
         if requested:
             obj = _select_radar(scene, requested)
@@ -1912,9 +1967,6 @@ def register(ctx: Any) -> None:
         if automatic:
             from .sensor_placement import choose_sensor_placement
             placement = choose_sensor_placement(scene, args, radar_object_id=None if created else str(obj.id))
-        position = _as_vector3(placement["position_m"] if placement else args["position_m"], "position_m")
-        aim = _as_vector3(placement["aim_point_m"] if placement else args["aim_point_m"], "aim_point_m")
-        rotation = _look_at_euler(position, aim)
         if created:
             scene.add_object(obj)
         radar = obj.get_component("Radar")
@@ -1927,6 +1979,15 @@ def register(ctx: Any) -> None:
                 code="parented_radar_unsupported",
                 detail={"radar_object_id": str(obj.id)},
             )
+        if current:
+            authored_pose = SensorSpec.from_component(radar)
+            position = _as_vector3(authored_pose.position, "position_m")
+            aim = _as_vector3(authored_pose.target, "aim_point_m")
+            rotation = list(transform.rotation)
+        else:
+            position = _as_vector3(placement["position_m"] if placement else args["position_m"], "position_m")
+            aim = _as_vector3(placement["aim_point_m"] if placement else args["aim_point_m"], "aim_point_m")
+            rotation = _look_at_euler(position, aim)
         previous = {
             "snapshot_target_id": radar.snapshot_target_id,
             "t0": radar.t0,
@@ -1960,12 +2021,13 @@ def register(ctx: Any) -> None:
             radar.fov = float(args.get("fov_deg", 60.0))
             if "max_range_m" in args:
                 radar.slope = Derived.slope_for_max_range(radar, float(args["max_range_m"]))
-            _configure_directional_pattern(radar, radar.fov)
+            if not current:
+                _configure_directional_pattern(radar, radar.fov)
             # The existing animation adapter requires these review controls.
             radar.view = "range_doppler"
             radar.static_clutter_removal = False
             radar.show_cfar = False
-            if not scene.update_transform(str(obj.id), position=position.tolist(), rotation=rotation):
+            if not current and not scene.update_transform(str(obj.id), position=position.tolist(), rotation=rotation):
                 raise ToolError("Could not update Radar transform.", code="sensor_configuration_failed")
         except Exception:
             if created:
@@ -1984,7 +2046,8 @@ def register(ctx: Any) -> None:
                 )
             raise
         public_placement = copy.deepcopy(placement) if placement else {
-            "mode": "fixed", "position_m": position.tolist(), "aim_point_m": aim.tolist(),
+            "mode": "current" if current else "fixed",
+            "position_m": position.tolist(), "aim_point_m": aim.tolist(),
         }
         if isinstance(public_placement.get("native_preflight"), dict):
             public_placement["native_preflight"] = _public_preflight(

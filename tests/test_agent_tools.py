@@ -478,6 +478,46 @@ def test_plan_and_ensure_sensor_can_narrow_native_fmcw_range(harness):
     assert waveform["slope_mhz_per_us"] == pytest.approx(radar.slope)
 
 
+def test_current_placement_changes_range_without_moving_or_rewriting_pattern(harness):
+    scene, tools = harness
+    initial = run(tools, "ensure_sensor", {
+        "scene_id": scene.scene_id,
+        "operation_id": "current-range-initial",
+        "target_object_id": "catstray",
+        "position_m": [1.0, 1.0, 2.0],
+        "aim_point_m": [0.0, 0.4, 0.0],
+        "target_motion_sampling": "adaptive",
+    })
+    sensor = scene.get_object(initial["radar"]["object_id"])
+    radar = sensor.get_component("Radar")
+    transform = sensor.get_component("Transform")
+    before_position = list(transform.position)
+    before_rotation = list(transform.rotation)
+    radar.x_values = [0.0, 0.25, 1.0, 0.25, 0.0]
+    before_pattern = list(radar.x_values)
+
+    planned = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id,
+        "radar_object_id": sensor.id,
+        "target_object_id": "catstray",
+        "placement_mode": "current",
+        "max_range_m": 6.0,
+    })
+    proposed = planned["proposed_ensure_sensor_arguments"]
+    assert proposed["placement_mode"] == "current"
+    assert proposed["target_motion_sampling"] == "adaptive"
+    ensured = run(tools, "ensure_sensor", {
+        **proposed,
+        "operation_id": "current-range-update",
+    })
+
+    assert ensured["placement"]["mode"] == "current"
+    assert list(transform.position) == before_position
+    assert list(transform.rotation) == before_rotation
+    assert list(radar.x_values) == before_pattern
+    assert ensured["radar"]["waveform"]["max_range_m"] == pytest.approx(6.0)
+
+
 def test_ensure_sensor_never_guesses_when_multiple_exist(harness):
     scene, tools = harness
     for name in ("Radar A", "Radar B"):
