@@ -57,7 +57,7 @@ export function recordingFrameAtTime(manifest, time) {
   return low - 1;
 }
 
-export function recordingFramePlot(manifest, samples, frame) {
+export function recordingFramePlot(manifest, samples, frame, requestedView = manifest.view ?? "range_doppler") {
   if (!Number.isInteger(frame) || frame < 0 || frame >= manifest.timesS.length
       || samples.length !== manifest.timesS.length * manifest.frameStride) {
     throw new Error("Invalid Radar recording frame.");
@@ -65,7 +65,10 @@ export function recordingFramePlot(manifest, samples, frame) {
   const offset = frame * manifest.frameStride;
   const rangeCount = manifest.rangeM.length;
   const title = `${manifest.sourceLabel} | measurement ${manifest.timesS[frame].toFixed(3)} s | frame ${frame + 1}/${manifest.timesS.length}`;
-  if ((manifest.view ?? "range_doppler") === "range_profile") {
+  if (!["range_profile", "range_doppler"].includes(requestedView)) {
+    throw new Error("Unsupported Radar replay view.");
+  }
+  if (requestedView === "range_profile") {
     return {
       type: "line",
       title,
@@ -120,6 +123,7 @@ function createRecordingWidget(host, React) {
     const [loaded, setLoaded] = useState();
     const [manualFrame, setManualFrame] = useState(null);
     const [playing, setPlaying] = useState(false);
+    const [selectedView, setSelectedView] = useState(() => manifest?.view ?? "range_doppler");
 
     useEffect(() => {
       if (!manifest || !host.playback) return undefined;
@@ -151,6 +155,10 @@ function createRecordingWidget(host, React) {
     }, [manifest?.asset?.contentHash, manifest?.view]);
 
     useEffect(() => {
+      setSelectedView(manifest?.view ?? "range_doppler");
+    }, [manifest?.asset?.contentHash, manifest?.view]);
+
+    useEffect(() => {
       if (!playing || !manifest || manualFrame === null) return undefined;
       if (manualFrame >= manifest.timesS.length - 1) {
         setPlaying(false);
@@ -172,7 +180,7 @@ function createRecordingWidget(host, React) {
       const frame = manualFrame ?? recordingFrameAtTime(manifest, time);
       value = frame === null
         ? textPlot(manifest.sourceLabel, `No recorded Radar frame at scene time ${Number(time).toFixed(3)} s.`)
-        : recordingFramePlot(manifest, loaded.samples, frame);
+        : recordingFramePlot(manifest, loaded.samples, frame, selectedView);
     }
     const plot = host.ui.renderWidget(
       { ...props.config, widget_type: "plot" },
@@ -195,6 +203,30 @@ function createRecordingWidget(host, React) {
       "div",
       { style: { display: "flex", flexDirection: "column", gap: "8px", minWidth: 0 } },
       plot,
+      React.createElement(
+        "div",
+        {
+          role: "group",
+          "aria-label": "Result Display",
+          style: {
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            padding: "0 8px",
+          },
+        },
+        React.createElement("span", { style: { whiteSpace: "nowrap" } }, "Result Display"),
+        React.createElement(
+          "select",
+          {
+            value: selectedView,
+            onChange: (event) => setSelectedView(event.target.value),
+            "aria-label": "Radar replay result display",
+          },
+          React.createElement("option", { value: "range_doppler" }, "Range-Doppler"),
+          React.createElement("option", { value: "range_profile" }, "Range Profile"),
+        ),
+      ),
       React.createElement(
         "div",
         {

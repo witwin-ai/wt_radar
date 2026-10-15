@@ -49,11 +49,22 @@ test("range-doppler plot slices the selected frame rather than frame zero", () =
 });
 
 test("the component-selected replay view renders a range-profile line", () => {
-  const manifest = validateRecordingManifest({ ...fixture(), view: "range_profile" });
+  const manifest = validateRecordingManifest(fixture());
   const samples = Float32Array.from({ length: 18 }, (_, index) => index);
-  const profile = recordingFramePlot(manifest, samples, 1);
+  const profile = recordingFramePlot(manifest, samples, 1, "range_profile");
   assert.equal(profile.type, "line");
   assert.deepEqual(Array.from(profile.data.y), [6, 7]);
+});
+
+test("the same recording can switch between both replay result displays", () => {
+  const manifest = validateRecordingManifest(fixture());
+  const samples = Float32Array.from({ length: 18 }, (_, index) => index);
+  assert.equal(recordingFramePlot(manifest, samples, 1, "range_doppler").type, "imshow");
+  assert.equal(recordingFramePlot(manifest, samples, 1, "range_profile").type, "line");
+  assert.throws(
+    () => recordingFramePlot(manifest, samples, 1, "range_time"),
+    /Unsupported Radar replay view/,
+  );
 });
 
 test("manifest rejects a payload whose byte length cannot hold every frame", () => {
