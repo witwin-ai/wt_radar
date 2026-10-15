@@ -326,6 +326,15 @@ class RadarComponent(Component):
                                   display_name="Snapshot diagnostic model", group=_SNAPSHOT, transient=True)
     snapshot_target_id = string_field("", group=_SNAPSHOT,
                                      description="Exact existing target ID. Snapshot uses one local point; Animation samples this object's skin.")
+    animation_targets_json = string_field(
+        "",
+        hidden=True,
+        group=_ANIMATION,
+        description=(
+            "Backend-owned JSON target list for multi-actor animation measurements. "
+            "The legacy Snapshot Target ID remains the first target for old projects."
+        ),
+    )
     snapshot_local_point = vector3_field([0.0, 0.0, 0.0], group=_SNAPSHOT,
                                         description="Authored local point in metres before object/parent scale; NOT an automatically sampled skin point.")
     snapshot_rcs_m2 = float_field(0.1, min=0.0, group=_SNAPSHOT,

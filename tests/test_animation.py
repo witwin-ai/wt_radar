@@ -21,6 +21,7 @@ from wt_radar.adapter.studio_motion import (
     MAX_TARGET_SITE_BUDGET, StudioSkinSampler, anatomically_prioritized_ranks,
     resolved_target_site_budget, spatially_spread_ranks,
 )
+from wt_radar.adapter.target_contract import component_target_specs, normalize_target_specs
 
 
 class AnimationContext(Context):
@@ -98,6 +99,41 @@ def test_smpl_human_uses_backend_dense_budget_without_authored_override():
 
     assert resolved_target_site_budget(scene, "human", 24) == 720
     assert resolved_target_site_budget(scene, "missing", 24) == 24
+
+
+def test_multi_target_contract_resolves_each_budget_and_rejects_duplicates():
+    human = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "SMPLBody"} else None)
+    dog = SimpleNamespace(get_component=lambda name: object() if name == "SkinnedMesh" else None)
+    targets = {"human": human, "dog": dog}
+    scene = SimpleNamespace(get_object=lambda object_id: targets.get(object_id))
+
+    specs = normalize_target_specs(scene, [
+        {"object_id": "human", "site_budget": 24},
+        {"object_id": "dog", "site_budget": 720},
+    ])
+
+    assert specs == [
+        {"object_id": "human", "site_budget": 720},
+        {"object_id": "dog", "site_budget": 720},
+    ]
+    with pytest.raises(ValueError, match="duplicated"):
+        normalize_target_specs(scene, [
+            {"object_id": "dog", "site_budget": 24},
+            {"object_id": "dog", "site_budget": 24},
+        ])
+
+
+def test_component_target_contract_keeps_legacy_single_target_compatible():
+    target = SimpleNamespace(get_component=lambda name: object() if name == "SkinnedMesh" else None)
+    scene = SimpleNamespace(get_object=lambda object_id: target if object_id == "dog" else None)
+    component = SimpleNamespace(
+        scene=scene,
+        animation_targets_json="",
+        snapshot_target_id="dog",
+        target_site_budget=24,
+    )
+
+    assert component_target_specs(component) == [{"object_id": "dog", "site_budget": 24}]
 
 
 def test_anatomical_budget_prefers_major_cat_motion_sites():
