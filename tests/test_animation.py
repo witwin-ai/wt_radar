@@ -18,7 +18,7 @@ from wt_radar.adapter.animation import (
 from wt_radar.adapter.saved_result import SavedRadarResult
 from wt_radar.adapter.snapshot import prepare_snapshot, snapshot_request
 from wt_radar.adapter.studio_motion import (
-    MAX_TARGET_SITE_BUDGET, StudioSkinSampler, anatomically_prioritized_ranks,
+    MAX_TARGET_SITE_BUDGET, MultiTargetSkinSampler, StudioSkinSampler, anatomically_prioritized_ranks,
     resolved_target_site_budget, spatially_spread_ranks,
 )
 from wt_radar.adapter.target_contract import component_target_specs, normalize_target_specs
@@ -75,6 +75,38 @@ def test_sampler_site_budget_uses_stable_spatial_coverage(scene):
     assert sampler.available_site_count == 2
     assert sampler.site_budget == 1
     assert len(sampler.vertex_ids) == len(sampler.site_names) == 1
+
+
+def test_multi_target_sampler_combines_two_animated_skinned_actors(scene):
+    original, component = scene
+    _, vertices = make_rig(original, component)
+    dog = SceneObject(id="dog", name="Dog", mesh_type="Empty")
+    original.add_object(dog)
+    skin = dog.add_component(SkinnedMeshComponent())
+    skin.set_mesh_data(vertices, np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint32))
+    for oid in ("dog-bone0", "dog-bone1"):
+        original.add_object(SceneObject(id=oid, name=oid, mesh_type="Empty"))
+        original.set_parent(oid, "dog", keep_local_transform=True)
+    indices = np.zeros((6, 4), dtype=np.int64)
+    indices[3:, 0] = 1
+    weights = np.zeros((6, 4), dtype=np.float32)
+    weights[:, 0] = 1
+    skin.set_skinning_data(
+        ["dog-bone0", "dog-bone1"], indices, weights,
+        np.tile(np.eye(4, dtype=np.float32), (2, 1, 1)), root_bone_id="dog-bone0",
+    )
+    add_track(original, "dog-bone0", "position", [(0., [0., 0., 0.]), (2., [1., 0., 0.])])
+
+    sampler = MultiTargetSkinSampler(original, [
+        {"object_id": "target", "site_budget": 2},
+        {"object_id": "dog", "site_budget": 2},
+    ])
+    positions, velocities = sampler.sample(.5)
+
+    assert positions.shape == velocities.shape == (4, 3)
+    assert [item["object_id"] for item in sampler.target_slices] == ["target", "dog"]
+    assert sampler.target_slices[0]["site_end"] == sampler.target_slices[1]["site_start"]
+    assert all(name.startswith(("target:", "dog:")) for name in sampler.site_names)
 
 
 def test_dense_surface_sampler_supports_2400_deterministic_sites():

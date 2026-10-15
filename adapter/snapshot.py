@@ -128,7 +128,16 @@ def prepare_snapshot(scene, request):
         raise ValueError(f"Snapshot Target ID {target_id!r} must name a separate existing object.")
     if not visible[target_id] or not visible[str(sensor_obj.id)]:
         raise ValueError("Snapshot target and radar must be visible through their whole parent hierarchy.")
-    excluded = {str(sensor_obj.id), target_id} | {oid for oid, enabled in visible.items() if not enabled}
+    dynamic_target_ids = {
+        str(item.get("object_id") or "").strip()
+        for item in (request.get("targets") or [])
+        if isinstance(item, dict) and str(item.get("object_id") or "").strip()
+    }
+    excluded = (
+        {str(sensor_obj.id), target_id}
+        | dynamic_target_ids
+        | {oid for oid, enabled in visible.items() if not enabled}
+    )
     for obj in scene.objects.values():
         if str(obj.id) in excluded:
             continue

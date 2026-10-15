@@ -16,8 +16,10 @@ import torch
 from .snapshot import (MODEL as SNAPSHOT_MODEL, SnapshotResult, prepare_snapshot,
                        processing_cube, snapshot_request, snapshot_view)
 from .studio_motion import (
-    MAX_TARGET_SITE_BUDGET, StudioSkinSampler, resolved_target_site_budget,
+    MAX_TARGET_SITE_BUDGET, MultiTargetSkinSampler, StudioSkinSampler,
+    resolved_target_site_budget,
 )
+from .target_contract import component_target_specs
 from .memory_budget import MAX_RESULT_BYTES, require_result_memory
 from .timebase import aligned_frame_count
 
@@ -53,17 +55,14 @@ class AnimationTopologyError(ValueError):
 
 
 def animation_request(component):
-    site_budget = resolved_target_site_budget(
-        getattr(component, "scene", None),
-        str(getattr(component, "snapshot_target_id", "") or ""),
-        int(component.target_site_budget),
-    )
+    targets = component_target_specs(component)
+    site_budget = sum(spec["site_budget"] for spec in targets)
     request = snapshot_request(component)
     request.update(adapter=MODEL, duration_s=float(component.animation_duration_s),
                    fps=float(component.animation_fps),
                    target_multipath=bool(component.target_multipath),
                    target_motion_sampling=str(component.target_motion_sampling),
-                   target_site_budget=site_budget)
+                   target_site_budget=site_budget, targets=targets)
     fingerprint = str(getattr(component, "_agent_input_fingerprint", "") or "")
     if not fingerprint and getattr(component, "scene", None) is not None:
         # Component-button and Agent execution must publish the same immutable
@@ -220,25 +219,24 @@ def prepare_animation(scene, request):
     if component is None:
         raise ValueError("Radar object no longer exists.")
     times = frame_times(request, component)
-    sampler = StudioSkinSampler(
-        scene,
-        str(component.snapshot_target_id).strip(),
-        site_budget=target_site_budget(request),
-    )
+    targets = request.get("targets") or component_target_specs(component)
+    sampler = MultiTargetSkinSampler(scene, targets)
     from .replay import motion_fingerprint
     authored_motion_fingerprint = motion_fingerprint(scene)
     if str(sensor.id) in sampler.moving_ids:
         raise ValueError("Radar must be static and outside the animated target hierarchy.")
     animated_ids = {track.object_id for track in sampler.tracks}
     for obj in scene.objects.values():
-        if obj is sampler.target:
+        if obj in sampler.targets:
             continue
         chain, ancestor = {str(obj.id)}, obj
         while ancestor.parent_id:
             chain.add(str(ancestor.parent_id))
             ancestor = scene.get_object(ancestor.parent_id)
         has_mesh = obj.get_component("Mesh") is not None
-        if ((has_mesh or obj is sensor) and chain & animated_ids) or (has_mesh and str(sampler.target.id) in chain):
+        if ((has_mesh or obj is sensor) and chain & animated_ids) or (
+            has_mesh and any(target_id in chain for target_id in sampler.target_ids)
+        ):
             raise ValueError(f"Animated/attached geometry outside the selected skin is unsupported: {obj.id}")
     # The static export also validates legacy settings, material support and pose.
     world, config, meta = prepare_snapshot(scene, {**request, "adapter": SNAPSHOT_MODEL})
@@ -309,11 +307,22 @@ def animation_preflight(scene, request):
         times_s=times,
         target_reflections=target_reflection_depth(request),
     )
+    target_evidence = []
+    active_ranks = set(topology["active_site_ranks"])
+    for target in sampler.target_slices:
+        target_evidence.append({
+            **target,
+            "active_site_count": sum(
+                rank in active_ranks
+                for rank in range(target["site_start"], target["site_end"])
+            ),
+        })
     return {
         "frame_count": int(len(times)),
         "site_count": int(topology["active_site_count"]),
         "declared_site_count": int(topology["declared_site_count"]),
         "moving_object_ids": sorted(str(value) for value in sampler.moving_ids),
+        "targets": target_evidence,
         "radar_device": str(radar.device),
         "radar_position_m": list(meta["radar_position_m"]),
         "radar_target_m": list(meta["radar_target_m"]),
@@ -605,8 +614,17 @@ def solve_animation(ctx, scene, request):
     target_reflections = target_reflection_depth(request)
     motion_sampling = target_motion_sampling(request)
     target_components = ["los"] + (["reflection"] if target_reflections else [])
+    active_rank_set = set(active_ranks.tolist())
+    target_evidence = [{
+        **target,
+        "active_site_count": sum(
+            rank in active_rank_set
+            for rank in range(target["site_start"], target["site_end"])
+        ),
+    } for target in sampler.target_slices]
     meta.update(model=MODEL, motion_fingerprint=authored_motion_fingerprint, frame_count=len(times), fps=float(request["fps"]),
                 duration_s=float(request["duration_s"]),
+                targets=target_evidence,
                 declared_site_vertex_indices=sampler.vertex_ids.tolist(),
                 declared_site_bone_names=sampler.site_names,
                 available_bone_site_count=sampler.available_site_count,

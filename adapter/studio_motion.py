@@ -88,7 +88,7 @@ def anatomically_prioritized_ranks(points, names, count):
 
 
 class StudioSkinSampler:
-    def __init__(self, scene, target_id, *, site_budget=64):
+    def __init__(self, scene, target_id, *, site_budget=64, allow_unrelated_tracks=False):
         self.scene = scene
         self.target = scene.get_object(target_id)
         self.skin = self.target.get_component("SkinnedMesh") if self.target else None
@@ -130,6 +130,8 @@ class StudioSkinSampler:
         self.tracks = []
         for track in self.manager.clip.tracks.values():
             if not track.keyframes:
+                continue
+            if track.object_id not in self.moving_ids and allow_unrelated_tracks:
                 continue
             if (track.object_id not in self.moving_ids or track.component_name != "Transform"
                     or track.field_name not in {"position", "rotation", "scale"}):
@@ -188,6 +190,7 @@ class StudioSkinSampler:
         self._bone_indices = torch.as_tensor(indices[selected], dtype=torch.int64).contiguous()
         self._bone_weights = torch.as_tensor(weights[selected], dtype=torch.float32).contiguous()
         self._inverse_bind_matrices = torch.as_tensor(ibm, dtype=torch.float32).contiguous()
+
 
     def _bone_world_transforms_once(self):
         """Use Studio's exact transform math while memoizing each hierarchy node."""
@@ -264,3 +267,58 @@ class StudioSkinSampler:
                             - self.positions(time_s + 2 * dt)) / (2 * dt)
         self.manager.set_time(float(time_s), apply_to_scene=True)
         return positions, velocity
+
+
+class MultiTargetSkinSampler:
+    """Expose several independently skinned actors as one native point-target set."""
+
+    def __init__(self, scene, specs):
+        self.scene = scene
+        self.specs = list(specs)
+        self.samplers = [
+            StudioSkinSampler(
+                scene,
+                spec["object_id"],
+                site_budget=spec["site_budget"],
+                allow_unrelated_tracks=True,
+            )
+            for spec in self.specs
+        ]
+        self.targets = [sampler.target for sampler in self.samplers]
+        self.target = self.targets[0]
+        self.target_ids = [str(target.id) for target in self.targets]
+        self.moving_ids = set().union(*(sampler.moving_ids for sampler in self.samplers))
+        self.tracks = [track for sampler in self.samplers for track in sampler.tracks]
+        manager = scene.timeline_manager
+        for track in manager.clip.tracks.values():
+            if track.keyframes and track.object_id not in self.moving_ids:
+                raise ValueError(
+                    f"Only declared target/bone Transform animation is supported; unsupported track {track.path}"
+                )
+        self.vertex_ids = np.concatenate([sampler.vertex_ids for sampler in self.samplers])
+        self.site_names = [
+            f"{spec['object_id']}:{name}"
+            for spec, sampler in zip(self.specs, self.samplers)
+            for name in sampler.site_names
+        ]
+        self.available_site_count = sum(sampler.available_site_count for sampler in self.samplers)
+        self.site_budget = sum(sampler.site_budget for sampler in self.samplers)
+        self.target_slices = []
+        offset = 0
+        for spec, sampler in zip(self.specs, self.samplers):
+            end = offset + len(sampler.vertex_ids)
+            self.target_slices.append({
+                "object_id": spec["object_id"],
+                "site_budget": sampler.site_budget,
+                "site_start": offset,
+                "site_end": end,
+                "declared_site_count": len(sampler.vertex_ids),
+            })
+            offset = end
+
+    def sample(self, time_s):
+        samples = [sampler.sample(time_s) for sampler in self.samplers]
+        return (
+            np.concatenate([sample[0] for sample in samples], axis=0),
+            np.concatenate([sample[1] for sample in samples], axis=0),
+        )
