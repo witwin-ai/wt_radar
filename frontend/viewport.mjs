@@ -197,7 +197,15 @@ function createRecordingWidget(host, React) {
       plot,
       React.createElement(
         "div",
-        { style: { display: "flex", alignItems: "center", gap: "8px", padding: "0 8px 8px" } },
+        {
+          style: {
+            display: "flex",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "8px",
+            padding: "0 8px 8px",
+          },
+        },
         React.createElement("button", { type: "button", onClick: startOrPause }, playLabel),
         React.createElement("input", {
           type: "range",
@@ -209,7 +217,7 @@ function createRecordingWidget(host, React) {
             setPlaying(false);
             setManualFrame(Number(event.target.value));
           },
-          style: { flex: 1 },
+          style: { flex: "1 1 112px", minWidth: "88px" },
           "aria-label": "Recorded Radar frame",
         }),
         React.createElement(
