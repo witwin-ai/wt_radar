@@ -872,6 +872,7 @@ class RadarComponent(Component):
                     self._clear_query_cache()
                     self.signal_figure.clear()
                     self.animation_status = f"Animation failed: {exc}"
+                    Notifications.error("Radar animation failed", str(exc))
                 else:
                     self._snapshot_solver_result_handle = ""
                     self._snapshot_solver_run_id = ""

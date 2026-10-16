@@ -582,7 +582,7 @@ def solve_animation(ctx, scene, request):
     cached_motion = validated_cached_motion(request, times, sampler)
     motion_samples_reused = cached_motion is not None
     if cached_motion is None:
-        with progress_heartbeat(ctx, 0.03, "Sampling authored cat motion"):
+        with progress_heartbeat(ctx, 0.03, "Sampling authored target motion"):
             poses, velocities = sample_authored_motion(times, sampler)
     else:
         poses, velocities = cached_motion

@@ -133,6 +133,7 @@ def stub_solve_transport(component, monkeypatch, solve, *, status=None, cancel=N
         cancel=cancel or (lambda *_args, **_kwargs: False),
     )))
     monkeypatch.setattr(radar.Notifications, "success", lambda *args: None)
+    monkeypatch.setattr(radar.Notifications, "error", lambda *args: None)
 
 
 def test_initial_preview_query_is_not_on_asyncio_loop(component, monkeypatch):
@@ -381,6 +382,9 @@ def test_nonresult_solver_completion_cannot_publish_previous_animation(
     run = SimpleNamespace(status=status, outputs=outputs,
                           error={"message": message}, run_id="new-run")
     stub_solve_transport(component, monkeypatch, lambda *args, **kwargs: run)
+    notifications = []
+    from wt_radar.components import radar
+    monkeypatch.setattr(radar.Notifications, "error", lambda *args: notifications.append(args))
     component.signal_figure.line([0, 1], [2, 3])
     with pytest.raises(RuntimeError, match=message):
         asyncio.run(component._simulate_async(animation=True))
@@ -389,6 +393,9 @@ def test_nonresult_solver_completion_cannot_publish_previous_animation(
     assert not component._solver_result_handle
     assert not component.signal_figure._series
     assert message in component.animation_status
+    assert len(notifications) == 1
+    assert notifications[0][0] == "Radar animation failed"
+    assert message in notifications[0][1]
 
 
 @pytest.fixture
