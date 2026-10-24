@@ -327,6 +327,10 @@ def test_plan_sensor_placement_is_read_only_and_resolves_single_skinned_target(h
     assert result["target_object_id"] == "catstray"
     assert result["placement"]["position_m"] == [3.0, 1.0, 2.0]
     assert result["proposed_ensure_sensor_arguments"]["aim_point_m"] == [0.0, 0.4, 0.0]
+    assert all(
+        set(target) <= {"object_id", "site_budget"}
+        for target in result["proposed_ensure_sensor_arguments"]["targets"]
+    )
 
 
 def test_plan_sensor_placement_preserves_natural_measurement_objective(harness):

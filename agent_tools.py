@@ -616,6 +616,18 @@ def _target_specs_from_args(scene: Any, args: dict[str, Any], *, infer_single: b
         raise ToolError(message, code=code) from exc
 
 
+def _target_input_args(target_specs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project resolved target evidence back onto the public input schema."""
+    return [
+        {
+            key: spec[key]
+            for key in ("object_id", "site_budget")
+            if key in spec
+        }
+        for spec in target_specs
+    ]
+
+
 def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
     """Durable authored Radar inputs actually consumed by the native adapter."""
     from dataclasses import asdict
@@ -1707,7 +1719,7 @@ def register(ctx: Any) -> None:
 
         proposed = {
             "scene_id": str(scene.scene_id),
-            "targets": target_specs,
+            "targets": _target_input_args(target_specs),
             "placement_mode": placement_mode,
             "placement_objective": str(args.get("placement_objective") or "balanced"),
             "height_m": float(args.get("height_m", 1.0)),
