@@ -27,28 +27,52 @@ PLACEMENT_OBJECTIVES = (
 # and room edges instead of hugging one actor.
 WHOLE_PATH_OBJECTIVES = frozenset({'whole_path_visible', 'closer_with_full_path_visible'})
 FOV_MARGIN_DEG = 5.
+# Share of the requested frames whose root must sit inside the FOV margin.
+MIN_PATH_FOV_FRACTION = .7
 FURNITURE_CLEARANCE_M = .3
 ROOM_EDGE_CLEARANCE_M = .3
 MIN_SITE_RANGE_M = 1.
 PREFERRED_RANGE_M = 3.
 _MARGIN_PREFERENCE_CAP_DEG = 10.
+FLOOR_GRID_STEP_M = .5
+# Native preflight compiles the full-room trace; bound it for whole-path search.
+MAX_WHOLE_PATH_NATIVE_PREFLIGHTS = 12
 
 
-def joint_candidate_positions(root_points, height_m):
-    """Rings around the centre of the union bounding box of all root trajectories."""
+def joint_candidate_positions(root_points, height_m, *, floor=None):
+    """Rings around the joint root-trajectory centre plus a grid over the floor.
+
+    Actors standing near a wall leave most ring samples outside the room, so
+    the open floor is sampled too; distance to every actor is enforced later.
+    """
     points = np.asarray(root_points, dtype=np.float64).reshape(-1, 3)
     lo, hi = points.min(axis=0), points.max(axis=0)
     centre = (lo + hi) / 2.
-    half_extent = float(np.hypot(hi[0] - lo[0], hi[2] - lo[2]) / 2.)
-    radii = sorted({
-        round(max(radius, half_extent + MIN_SITE_RANGE_M), 3)
-        for radius in (1.5, 2., 2.5, 3., 3.5, 4., 4.5, 5.)
-    })
-    for radius in radii:
+    seen = set()
+
+    def emit(x, z):
+        key = (round(float(x), 2), round(float(z), 2))
+        if key in seen:
+            return None
+        seen.add(key)
+        return [float(x), float(height_m), float(z)]
+
+    for radius in (1.5, 2., 2.5, 3., 3.5, 4., 4.5, 5.):
         for direction in range(24):
             angle = direction * math.pi / 12
-            yield [float(centre[0] + radius * math.cos(angle)), float(height_m),
-                   float(centre[2] + radius * math.sin(angle))]
+            point = emit(centre[0] + radius * math.cos(angle), centre[2] + radius * math.sin(angle))
+            if point is not None:
+                yield point
+    if floor is None:
+        return
+    inset = ROOM_EDGE_CLEARANCE_M
+    xs = np.arange(float(floor[2][0]) + inset, float(floor[3][0]) - inset + 1e-9, FLOOR_GRID_STEP_M)
+    zs = np.arange(float(floor[2][2]) + inset, float(floor[3][2]) - inset + 1e-9, FLOOR_GRID_STEP_M)
+    for x in xs:
+        for z in zs:
+            point = emit(x, z)
+            if point is not None:
+                yield point
 
 
 def candidate_positions(aim, height_m, distance_m=None):
@@ -326,13 +350,13 @@ def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg,
 
 
 def _target_coverage(position, aim, positions_by_frame, target_slices, *, fov_deg,
-                     margin_deg=FOV_MARGIN_DEG):
+                     margin_deg=FOV_MARGIN_DEG, min_path_fraction=MIN_PATH_FOV_FRACTION):
     """Per-target FOV evidence over the full interval.
 
     A target's root trajectory (its per-frame site centroid) must stay
-    ``margin_deg`` inside the FOV in every frame and at least one of its own
-    skin sites must stay in the FOV throughout. One visible actor never stands
-    in for another one.
+    ``margin_deg`` inside the FOV for at least ``min_path_fraction`` of the
+    requested frames. Every target is judged on its own path; one visible actor
+    never stands in for another one.
     """
     position = np.asarray(position, dtype=np.float64)
     points = np.asarray(positions_by_frame, dtype=np.float64)
@@ -360,6 +384,8 @@ def _target_coverage(position, aim, positions_by_frame, target_slices, *, fov_de
             'site_end': end,
             'frame_count': int(len(points)),
             'root_frames_in_fov': int(root_in_fov.sum()),
+            'path_fov_fraction': float(root_in_fov.mean()),
+            'required_path_fov_fraction': float(min_path_fraction),
             'min_root_margin_deg': float(half - root_angles.max()),
             'site_envelope_margin_deg': float(half - site_angles.max()),
             'continuous_fov_site_ranks': continuous,
@@ -368,12 +394,13 @@ def _target_coverage(position, aim, positions_by_frame, target_slices, *, fov_de
             'max_site_range_m': float(site_ranges.max()),
             'root_path_length_m': float(np.linalg.norm(np.diff(root, axis=0), axis=1).sum()),
             'root_bounds_m': {'min': root.min(axis=0).tolist(), 'max': root.max(axis=0).tolist()},
-            'fov_whole_path': bool(root_in_fov.all() and continuous),
+            'fov_whole_path': bool(root_in_fov.mean() >= float(min_path_fraction) - 1e-9),
         })
     return {
         'targets': targets,
         'all_targets_whole_path_in_fov': all(item['fov_whole_path'] for item in targets),
         'min_root_margin_deg': min(item['min_root_margin_deg'] for item in targets),
+        'min_path_fov_fraction': min(item['path_fov_fraction'] for item in targets),
         'site_envelope_margin_deg': min(item['site_envelope_margin_deg'] for item in targets),
         'min_site_range_m': min(item['min_site_range_m'] for item in targets),
     }
@@ -423,14 +450,14 @@ def _apply_native_evidence(metrics, evidence, target_slices=None):
         for item in coverage['targets']:
             item = dict(item)
             in_slice = {rank for rank in native_set if item['site_start'] <= rank < item['site_end']}
-            if item['object_id'] in per_target_counts and not has_native_ranks:
+            # The native solver only simulates sites reachable on every frame;
+            # a target without any such site contributes no Radar return.
+            if item['object_id'] in per_target_counts:
                 native_count = per_target_counts[item['object_id']]
-                joint = item['continuous_fov_site_count'] if native_count else 0
             else:
-                native_count = per_target_counts.get(item['object_id'], len(in_slice))
-                if item['object_id'] in per_target_counts and native_count == 0:
-                    in_slice = set()
-                joint = len(in_slice & set(item['continuous_fov_site_ranks']))
+                native_count = len(in_slice) if has_native_ranks else (
+                    item['site_end'] - item['site_start'] if active_sites else 0)
+            joint = native_count
             item['native_active_site_count'] = int(native_count)
             item['joint_continuous_site_count'] = int(joint)
             item['whole_path_visible'] = bool(item['fov_whole_path'] and joint > 0)
@@ -488,14 +515,16 @@ def _objective_score(objective, metrics, *, position, aim, baseline_position):
     if objective == 'whole_path_visible':
         if 'coverage' not in metrics:
             return physically_valid, whole_path, value, -metrics['mean_range_m']
-        # Every target fully covered first, then the whole site envelope inside
-        # the margin, then a larger root margin (capped so it does not simply
-        # push the Radar to the farthest ring), then the preferred range.
+        # Every target covered first, then the larger worst per-target path
+        # share, then the whole site envelope inside the margin, then a larger
+        # root margin (capped so it does not simply push the Radar to the
+        # farthest ring), then the preferred range.
         joint_coverage = metrics['coverage']
+        path_share = round(float(joint_coverage['min_path_fov_fraction']), 2)
         envelope = 1. if joint_coverage['site_envelope_margin_deg'] >= FOV_MARGIN_DEG else 0.
         margin = round(min(joint_coverage['min_root_margin_deg'], _MARGIN_PREFERENCE_CAP_DEG), 1)
         preferred = -abs(float(metrics['joint_centre_range_m']) - PREFERRED_RANGE_M)
-        return physically_valid, joint_whole_path, envelope, margin, preferred
+        return physically_valid, joint_whole_path, path_share, envelope, margin, preferred
     return physically_valid, coverage, value, -metrics['mean_range_m']
 
 
@@ -607,7 +636,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
     joint_centre = (root_points.min(axis=0) + root_points.max(axis=0)) / 2.
     static_bounds = _static_bounds(detached, excluded_ids={str(sensor.id), *target_ids})
     floor = _floor_bounds(static_bounds, height)
-    positions = (joint_candidate_positions(root_points, height)
+    positions = (joint_candidate_positions(root_points, height, floor=floor)
                  if whole_path and distance is None
                  else candidate_positions(aim, height, distance))
 
@@ -713,6 +742,8 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         for candidate in ranked:
             if best_score is not None and candidate['optimistic_score'] <= best_score:
                 break
+            if whole_path and native_preflight_count >= MAX_WHOLE_PATH_NATIVE_PREFLIGHTS:
+                break
             position = candidate['position_m']
             detached.update_transform(
                 str(sensor.id), position=position,
@@ -768,8 +799,8 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         elif whole_path and 'coverage' in selected_metrics and not selected_metrics.get(
                 'all_targets_whole_path_visible', False):
             impossible_reason = (
-                'No single Radar pose keeps the whole authored path of every dynamic target '
-                'inside the FOV margin with native LOS coverage.')
+                f'No single Radar pose keeps at least {MIN_PATH_FOV_FRACTION:.0%} of every dynamic '
+                'target path inside the FOV margin while native LOS keeps sites of every target.')
             per_target = _per_target_failure_detail(
                 ranked, positions_by_frame, target_slices, fov_deg=float(radar.fov))
             extra_detail = {
@@ -844,9 +875,10 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
                       'visibility': 'FOV prediction ranks poses; native preflight remains authoritative',
                       'whole_path_visible': (
                           'every declared target keeps its root trajectory inside the FOV minus '
-                          f'{FOV_MARGIN_DEG:g} degrees on every requested frame and native preflight '
-                          'retains at least one of its own skin sites across the entire interval; '
-                          'site coverage reports additional signal-quality margin'),
+                          f'{FOV_MARGIN_DEG:g} degrees on at least {MIN_PATH_FOV_FRACTION:.0%} of the '
+                          'requested frames and native preflight retains at least one of its own '
+                          'skin sites across the entire interval (the solver only simulates such '
+                          'sites); site coverage reports additional signal-quality margin'),
                       'trajectory_sampling': 'every requested baked Radar frame',
                   },
                   'native_preflight': selected['native_preflight'],

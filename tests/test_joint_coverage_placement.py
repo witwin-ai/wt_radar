@@ -191,3 +191,61 @@ def test_whole_path_does_not_count_one_target_for_another_occluded_target(scene,
         }, radar_object_id="radar")
     assert caught.value.code == "sensor_placement_objective_unavailable"
     assert "cat" in caught.value.detail["targets_without_whole_path"]
+
+
+def test_joint_candidates_cover_the_whole_room_floor_not_only_rings():
+    # Actors near one wall: rings around their centre mostly leave the room, so
+    # the search must also sample the open floor (R47 v7: 3 ranked candidates).
+    floor = ("floor", "Floor", np.array([0., -.1, 0.]), np.array([5.7, 0., 4.9]))
+    roots = np.array([[1.8, 1., 2.1], [3.1, .3, 4.3]])
+    positions = list(sensor_placement.joint_candidate_positions(roots, 1., floor=floor))
+    inside = [p for p in positions if .3 <= p[0] <= 5.4 and .3 <= p[2] <= 4.6]
+    assert len(inside) >= 80
+    # Every 0.5 m cell of the inset floor has a candidate, including the far west side.
+    for x in np.arange(.3, 5.4, .5):
+        for z in np.arange(.3, 4.6, .5):
+            assert any(abs(p[0] - x) <= .26 and abs(p[2] - z) <= .26 for p in inside)
+    assert len({(round(p[0], 2), round(p[2], 2)) for p in positions}) == len(positions)
+
+
+def test_whole_path_native_preflights_are_bounded(scene, monkeypatch):
+    original, component = scene
+    targets = human_and_cat(original, component)
+    calls = []
+
+    def occluded_cat(_detached, request):
+        calls.append(1)
+        return {
+            "frame_count": 2, "site_count": 2, "radar_device": "cuda",
+            "targets": [
+                {"object_id": "target", "site_start": 0, "site_end": 2, "active_site_count": 2},
+                {"object_id": "cat", "site_start": 2, "site_end": 4, "active_site_count": 0},
+            ],
+            "topology": {
+                "declared_site_count": 4, "active_site_count": 2, "active_site_ranks": [0, 1],
+                "visibility_coverage": .5, "frames": [{"reachable_site_count": 2}],
+            },
+        }
+
+    monkeypatch.setattr(animation, "animation_preflight", occluded_cat)
+    with pytest.raises(ToolError):
+        sensor_placement.choose_sensor_placement(original, {
+            "targets": targets, "duration_s": 2., "fps": 10, "height_m": 1.,
+            "placement_objective": "whole_path_visible",
+        }, radar_object_id="radar")
+    assert 1 < len(calls) <= sensor_placement.MAX_WHOLE_PATH_NATIVE_PREFLIGHTS
+
+
+def test_a_target_needs_seventy_percent_of_its_path_inside_the_fov():
+    # Radar at the origin looking along +X with a 60 degree FOV (5 degree margin).
+    position, aim = [0., 0., 0.], [1., 0., 0.]
+    inside, outside = [3., 0., 0.], [0., 0., 3.]
+    def frames(inside_count, total=10):
+        return np.array([[inside if index < inside_count else outside] for index in range(total)])
+    slices = [{"object_id": "cat", "site_start": 0, "site_end": 1}]
+    seventy = sensor_placement._target_coverage(position, aim, frames(7), slices, fov_deg=60.)
+    sixty = sensor_placement._target_coverage(position, aim, frames(6), slices, fov_deg=60.)
+    assert seventy["targets"][0]["path_fov_fraction"] == pytest.approx(.7)
+    assert seventy["targets"][0]["fov_whole_path"] is True
+    assert sixty["targets"][0]["fov_whole_path"] is False
+    assert sensor_placement.MIN_PATH_FOV_FRACTION == .7

@@ -139,9 +139,12 @@ def test_explicit_objectives_rank_all_candidates_and_report_full_trajectory(scen
 
     assert result['placement_objective'] == objective
     # Whole-path objectives search 8 rings x 24 bearings around the joint
-    # trajectory; the other objectives keep the historical 5 x 16 rings.
+    # trajectory plus a grid over the floor; the others keep the 5 x 16 rings.
     whole_path = objective in sensor_placement.WHOLE_PATH_OBJECTIVES
-    assert result['tested_candidates'] == (192 if whole_path else 80)
+    if whole_path:
+        assert result['tested_candidates'] > 192
+    else:
+        assert result['tested_candidates'] == 80
     assert result['valid_candidate_count'] == 1
     assert result['native_preflight_count'] == 1
     assert result['predicted_metrics']['sampled_frame_count'] == 2
