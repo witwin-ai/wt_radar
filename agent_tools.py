@@ -1152,6 +1152,60 @@ def _expected_result_evidence(scene: Any, radar: Any, native_preflight: dict[str
     }
 
 
+# Receipts in these states represent a measurement that already ran or is
+# still running for its inputs; re-submitting those inputs must resolve to it.
+_LIVE_MEASUREMENT_STATUSES = frozenset({
+    "queued", "running", "simulated", "verified", "replay_ready", "exported",
+})
+
+
+def _is_measurement_receipt(receipt: Any) -> bool:
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("kind", "animation_measurement") == "animation_measurement"
+        and "input_fingerprint" in receipt
+    )
+
+
+def _live_measurement(
+    ctx: Any, *, scene_id: str, radar_object_id: str, input_fingerprint: str,
+) -> dict[str, Any] | None:
+    """The existing measurement of exactly these inputs, oldest first."""
+    matches = [
+        receipt for receipt in _operation_map(ctx).values()
+        if _is_measurement_receipt(receipt)
+        and str(receipt.get("scene_id") or "") == str(scene_id)
+        and str(receipt.get("radar_object_id") or "") == str(radar_object_id)
+        and str(receipt.get("input_fingerprint") or "") == str(input_fingerprint)
+        and receipt.get("status") in _LIVE_MEASUREMENT_STATUSES
+    ]
+    if not matches:
+        return None
+    first = min(matches, key=lambda receipt: (str(receipt.get("created_at") or ""), str(receipt["operation_id"])))
+    return _get_operation(ctx, str(first["operation_id"]))
+
+
+def _measurement_operation_id(
+    ctx: Any, *, scene_id: str, radar_object_id: str, input_fingerprint: str,
+) -> str:
+    """Deterministic operation id of the one measurement of these inputs.
+
+    A live measurement keeps its id; after a failed, interrupted or cancelled
+    attempt the next retry suffix is used so a real retry stays possible.
+    """
+    live = _live_measurement(
+        ctx, scene_id=scene_id, radar_object_id=radar_object_id, input_fingerprint=input_fingerprint,
+    )
+    if live is not None:
+        return str(live["operation_id"])
+    base = f"radar-measure-{str(input_fingerprint)[:24]}"
+    candidate, attempt = base, 0
+    while _get_operation(ctx, candidate) is not None:
+        attempt += 1
+        candidate = f"{base}-retry-{attempt}"
+    return candidate
+
+
 def _require_matching_operation(
     ctx: Any,
     operation_id: str,
@@ -2342,10 +2396,27 @@ def register(ctx: Any) -> None:
                 "visibility_quality": str(evidence.get("visibility_quality", "unknown")),
             })
         target_results[0]["moving_object_ids"] = native_preflight["moving_object_ids"]
+        measurement_operation_id = _measurement_operation_id(
+            ctx,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+            input_fingerprint=input_fingerprint,
+        )
         return {
             "ok": True,
             "status": "ready",
             "scene_id": str(scene.scene_id),
+            "measurement_operation_id": measurement_operation_id,
+            "next_step": {
+                "tool": "witwin.radar.submit_animation_measurement",
+                "arguments": {
+                    "scene_id": str(scene.scene_id),
+                    "radar_object_id": str(obj.id),
+                    "operation_id": measurement_operation_id,
+                    "expected_input_fingerprint": input_fingerprint,
+                },
+                "requires_confirmation": False,
+            },
             "radar": _sensor_summary(obj),
             "target": target_results[0],
             "targets": target_results,
@@ -2442,6 +2513,35 @@ def register(ctx: Any) -> None:
                 detail={"expected_input_fingerprint": expected, "current_input_fingerprint": current},
             )
         existing = _get_operation(ctx, operation_id)
+        if existing is not None and not _is_measurement_receipt(existing):
+            raise ToolError(
+                "operation_id already names a "
+                f"{existing.get('kind') or 'non-measurement'} operation; submit the measurement "
+                "with the operation_id from plan_animation_measurement next_step.",
+                code="operation_id_reserved",
+                detail={
+                    "operation_id": operation_id,
+                    "reserved_by": existing.get("kind"),
+                    "measurement_operation_id": _measurement_operation_id(
+                        ctx, scene_id=str(scene.scene_id), radar_object_id=str(obj.id),
+                        input_fingerprint=expected,
+                    ),
+                },
+            )
+        deduplicated_from = None
+        if existing is None:
+            # The same authored inputs are measured once. A second submit under
+            # another operation_id resolves to the existing measurement instead
+            # of starting a duplicate GPU simulation.
+            live = _live_measurement(
+                ctx, scene_id=str(scene.scene_id), radar_object_id=str(obj.id),
+                input_fingerprint=expected,
+            )
+            if live is not None and str(live.get("motion_fidelity_report_id") or "") == str(
+                    motion_fidelity["report_id"] if motion_fidelity else ""):
+                deduplicated_from = operation_id
+                operation_id = str(live["operation_id"])
+                existing = live
         if existing is not None:
             _require_matching_operation(
                 ctx,
@@ -2457,7 +2557,10 @@ def register(ctx: Any) -> None:
                 if task is not None:
                     await task
                     existing = _get_operation(ctx, operation_id) or existing
-            return _operation_result(existing, obj)
+            result = _operation_result(existing, obj)
+            if deduplicated_from is not None:
+                result["deduplicated_from_operation_id"] = deduplicated_from
+            return result
         radar = obj.get_component("Radar")
         from .adapter.snapshot import validate_options
         try:
@@ -2492,6 +2595,7 @@ def register(ctx: Any) -> None:
             )
         receipt = _put_operation(ctx, {
             "operation_id": operation_id,
+            "kind": "animation_measurement",
             "scene_id": str(scene.scene_id),
             "radar_object_id": str(obj.id),
             "input_fingerprint": expected,
