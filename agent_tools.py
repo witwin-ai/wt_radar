@@ -1504,12 +1504,52 @@ def _export_evidence(ctx: Any, path: Path) -> dict[str, Any]:
     }
 
 
+MAX_SOLVE_SITE_EXCLUSIONS = 16
+
+
+def _expected_after_solve_exclusions(
+    manifest: dict[str, Any], expected: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Apply the native solve's recorded site exclusions to the preflight evidence.
+
+    The solve removes, for the whole interval, a preflight-active site its own
+    frozen topology cannot reach. Each exclusion must name a distinct
+    preflight-active site; the active set, counts and coverage are then judged
+    against the preflight set minus exactly those sites.
+    """
+    exclusions = list(manifest.get("solve_exclusions") or [])
+    if not exclusions:
+        return expected, True
+    preflight_ids = [int(value) for value in (expected.get("active_site_ids") or [])]
+    excluded_ids = [int(item.get("site_id", -1)) for item in exclusions if isinstance(item, dict)]
+    valid = (
+        len(excluded_ids) == len(exclusions) <= MAX_SOLVE_SITE_EXCLUSIONS
+        and len(set(excluded_ids)) == len(excluded_ids)
+        and set(excluded_ids) <= set(preflight_ids)
+        and len(excluded_ids) < len(preflight_ids)
+    )
+    if not valid:
+        return expected, False
+    remaining = [value for value in preflight_ids if value not in set(excluded_ids)]
+    declared = int(expected.get("declared_site_count", 0) or 0)
+    return {
+        **expected,
+        "site_count": len(remaining),
+        "active_site_count": len(remaining),
+        "occluded_site_count": int(expected.get("occluded_site_count", 0)) + len(excluded_ids),
+        "active_site_ids": remaining,
+        "visibility_coverage": len(remaining) / declared if declared else float("nan"),
+        "visibility_quality": "degraded_interval_global_subset",
+    }, True
+
+
 def _native_manifest_checks(
     manifest: dict[str, Any],
     receipt: dict[str, Any],
     expected: dict[str, Any],
 ) -> dict[str, bool]:
     """Validate native result evidence without performing RF/DSP work."""
+    expected, solve_exclusions_valid = _expected_after_solve_exclusions(manifest, expected)
     frame_count = int(expected.get("frame_count", 0) or 0)
     required_evidence_frames = max(2, int(math.ceil(frame_count * 0.1)))
     checks = {
@@ -1587,6 +1627,7 @@ def _native_manifest_checks(
             str(manifest.get("solver_completion_contract") or "")
             == str(expected.get("solver_completion_contract") or "")
         ),
+        "solve_exclusions_are_preflight_active_sites": solve_exclusions_valid,
         "result_handle_present": bool(receipt.get("result_handle")),
         "run_id_present": bool(receipt.get("run_id")),
     }

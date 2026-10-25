@@ -115,6 +115,7 @@ def animation_manifest(ctx, result, params):
         "active_site_count": active_site_count,
         "occluded_site_count": occluded_site_count,
         "active_site_ids": active_site_ids,
+        "solve_exclusions": list(topology.get("solve_exclusions") or []),
         "visibility_coverage": float(topology.get("visibility_coverage", 0.0)),
         "visibility_quality": str(topology.get("visibility_quality") or "unknown"),
         "rcs_policy": str(topology.get("rcs_policy") or ""),

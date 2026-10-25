@@ -1521,3 +1521,46 @@ def test_submit_rejects_scene_changed_after_preflight(harness):
         assert error.value.code == "stale_preflight"
 
     asyncio.run(exercise())
+
+
+def _clean_manifest_case(**manifest_patch):
+    fingerprint = "a" * 64
+    versions = {"witwin-radar": "0.3.0", "witwin-channel": "0.5.0", "witwin": "0.4.0"}
+    expected = {
+        "scene_id": "bedroom_004", "model": "studio_visible_skinned_surface_sites_v2", "frame_count": 2,
+        "cube_shape": [2, 3, 4, 128, 256], "site_count": 4, **topology_manifest(), "versions": versions,
+        "start_s": 1.0, "fps": 10.0,
+    }
+    receipt = {"input_fingerprint": fingerprint, "result_handle": "result", "run_id": "run"}
+    manifest = {
+        **expected, "device": "cuda", "all_finite": True, "timebase_finite": True, "motion_arrays_finite": True,
+        "signal_nonzero": True, "signal_abs_max": 1e-6, "moving_site_count": 4, "motion_speed_max_mps": 0.8,
+        "motion_position_extent_m": 1.0, "nonzero_return_frames": 2, "dynamic_delay_rate_frames": 2,
+        "coupled_dynamic_return_frames": 2, "input_fingerprint": fingerprint, "times_s": [1.0, 1.1],
+        **manifest_patch,
+    }
+    return radar_tools._native_manifest_checks(manifest, receipt, expected)
+
+
+_ONE_SOLVE_EXCLUSION = {
+    "solve_exclusions": [{"site_id": 3_000_003, "site_rank": 3, "frame_index": 1}],
+    "site_count": 3, "active_site_count": 3, "occluded_site_count": 1,
+    "active_site_ids": [3_000_000, 3_000_001, 3_000_002], "visibility_coverage": 0.75,
+    "visibility_quality": "degraded_interval_global_subset",
+}
+
+
+def test_manifest_checks_accept_sites_the_native_solve_excluded_from_the_preflight_set():
+    checks = _clean_manifest_case(**_ONE_SOLVE_EXCLUSION)
+    assert all(checks.values()), {name: ok for name, ok in checks.items() if not ok}
+
+
+def test_manifest_checks_reject_a_solve_exclusion_outside_the_preflight_active_set():
+    checks = _clean_manifest_case(**{**_ONE_SOLVE_EXCLUSION, "solve_exclusions": [
+        {"site_id": 3_000_009, "site_rank": 9, "frame_index": 1}]})
+    assert checks["solve_exclusions_are_preflight_active_sites"] is False
+
+
+def test_manifest_checks_reject_a_dropped_site_without_a_recorded_solve_exclusion():
+    checks = _clean_manifest_case(**{**_ONE_SOLVE_EXCLUSION, "solve_exclusions": []})
+    assert checks["active_site_ids_match"] is False and checks["active_site_count_matches"] is False
