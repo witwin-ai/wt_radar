@@ -82,3 +82,12 @@ def test_solve_still_fails_when_an_unrelated_native_error_occurs(scene, cuda_rea
     monkeypatch.setattr(anim, "prepare_animation", prepare_broken)
     with pytest.raises(Exception, match="unrelated native failure"):
         anim.solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+
+def test_an_empty_scene_exports_free_space_for_a_line_of_sight_measurement():
+    from witwin_server.core.scene import Scene
+    from wt_radar.adapter.studio_geometry import export_static_mesh_scene
+
+    exported = export_static_mesh_scene(Scene(scene_id="void"))
+    assert exported.mesh_count == 0 and exported.face_count == 0
+    assert exported.object_to_structure_id == {}

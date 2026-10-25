@@ -45,7 +45,7 @@ def export_static_mesh_scene(scene, *, excluded_object_ids=()):
             surface_id=sid + 300_000, metadata={"studio_object_id": oid}))
         mapping[oid] = sid
         faces_count += len(faces)
-    if not structures:
-        raise ValueError("Studio scene contains no exportable static room meshes.")
+    # An empty Scene is a valid free-space measurement: the target is then
+    # observed by line of sight only, with no room reflections.
     return SimpleNamespace(scene=wc.Scene(structures=tuple(structures)), mesh_count=len(structures),
                            face_count=faces_count, object_to_structure_id=mapping)
