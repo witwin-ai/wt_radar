@@ -580,8 +580,64 @@ def _target_specs(obj: Any) -> list[dict[str, Any]]:
     return component_target_specs(radar)
 
 
+def _dynamic_skinned_object_ids(scene: Any) -> list[str]:
+    """Skinned actors moved by keyframed Timeline tracks, in scene order.
+
+    An actor moves when a track drives the actor itself, one of its skin bones,
+    a descendant, or an ancestor; the native sampler treats exactly that set as
+    the actor's moving geometry.
+    """
+    objects = getattr(scene, "objects", {}) or {}
+    manager = getattr(scene, "timeline_manager", None)
+    clip = getattr(manager, "clip", None)
+    moving = {
+        str(track.object_id)
+        for track in (getattr(clip, "tracks", {}) or {}).values()
+        if getattr(track, "keyframes", None)
+    }
+    if not moving:
+        return []
+    children: dict[str, list[str]] = {}
+    for object_id, obj in objects.items():
+        parent = getattr(obj, "parent_id", None)
+        if parent:
+            children.setdefault(str(parent), []).append(str(object_id))
+    dynamic = []
+    for object_id, obj in objects.items():
+        if not callable(getattr(obj, "get_component", None)):
+            continue
+        skin = obj.get_component("SkinnedMesh")
+        if skin is None:
+            continue
+        members = {str(object_id)}
+        try:
+            members.update(str(bone) for bone in (skin.get_skinning_data() or {}).get("bone_ids", ()))
+        except Exception:  # an unhydrated skin still owns its descendants
+            pass
+        pending = [str(object_id)]
+        while pending:
+            for child in children.get(pending.pop(), ()):
+                if child not in members:
+                    members.add(child)
+                    pending.append(child)
+        parent = getattr(obj, "parent_id", None)
+        while parent:
+            members.add(str(parent))
+            parent_obj = scene.get_object(parent)
+            parent = getattr(parent_obj, "parent_id", None) if parent_obj is not None else None
+        if members & moving:
+            dynamic.append(str(object_id))
+    return dynamic
+
+
 def _target_specs_from_args(scene: Any, args: dict[str, Any], *, infer_single: bool) -> list[dict[str, Any]]:
-    """Resolve the new target list or the legacy single target argument."""
+    """Resolve the new target list or the legacy single target argument.
+
+    Omitted targets resolve to every moving skinned actor. A declared list must
+    include every moving actor: the native sampler cannot treat an undeclared
+    moving actor as static room geometry, so a partial list fails explicitly
+    with the complete suggested list instead of measuring only one actor.
+    """
     from .adapter.target_contract import normalize_target_specs
 
     has_targets = "targets" in args
@@ -594,26 +650,44 @@ def _target_specs_from_args(scene: Any, args: dict[str, Any], *, infer_single: b
     values = args.get("targets") if has_targets else (
         [{"object_id": legacy_id}] if legacy_id else None
     )
+    dynamic_ids = _dynamic_skinned_object_ids(scene)
     if values is None and infer_single:
         candidates = [
             obj for obj in (getattr(scene, "objects", {}) or {}).values()
             if callable(getattr(obj, "get_component", None))
             and obj.get_component("SkinnedMesh") is not None
         ]
-        if len(candidates) == 1:
+        if dynamic_ids:
+            values = [{"object_id": object_id} for object_id in dynamic_ids]
+        elif len(candidates) == 1:
             values = [{"object_id": str(candidates[0].id)}]
         else:
             return []
     if values is None:
         raise ToolError("Radar requires at least one animated target.", code="missing_target")
     try:
-        return normalize_target_specs(scene, values)
+        specs = normalize_target_specs(scene, values)
     except ValueError as exc:
         message = str(exc)
         code = "target_not_skinned" if "SkinnedMesh" in message else "missing_target"
         if "duplicated" in message:
             code = "duplicate_target"
         raise ToolError(message, code=code) from exc
+    declared = {spec["object_id"] for spec in specs}
+    missing = [object_id for object_id in dynamic_ids if object_id not in declared]
+    if missing:
+        raise ToolError(
+            "Every moving actor must be a Radar target; the target list omits "
+            + ", ".join(missing) + ". Declare all dynamic objects together.",
+            code="undeclared_dynamic_target",
+            detail={
+                "missing_object_ids": missing,
+                "dynamic_object_ids": dynamic_ids,
+                "suggested_targets": _target_input_args(specs) + [
+                    {"object_id": object_id} for object_id in missing],
+            },
+        )
+    return specs
 
 
 def _target_input_args(target_specs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1808,6 +1882,7 @@ def register(ctx: Any) -> None:
             "scene_id": str(scene.scene_id),
             "target_object_id": target_id,
             "targets": target_specs,
+            "dynamic_object_ids": _dynamic_skinned_object_ids(scene),
             "placement": placement,
             "proposed_ensure_sensor_arguments": proposed,
             "next_step": {

@@ -21,6 +21,35 @@ PLACEMENT_OBJECTIVES = (
     'closer_with_full_path_visible',
 )
 
+# Whole-path objectives plan for the union of every declared target over the
+# full requested interval: each target's root trajectory must stay this far
+# inside the FOV cone, and the pose keeps a tripod footprint clear of furniture
+# and room edges instead of hugging one actor.
+WHOLE_PATH_OBJECTIVES = frozenset({'whole_path_visible', 'closer_with_full_path_visible'})
+FOV_MARGIN_DEG = 5.
+FURNITURE_CLEARANCE_M = .3
+ROOM_EDGE_CLEARANCE_M = .3
+MIN_SITE_RANGE_M = 1.
+PREFERRED_RANGE_M = 3.
+_MARGIN_PREFERENCE_CAP_DEG = 10.
+
+
+def joint_candidate_positions(root_points, height_m):
+    """Rings around the centre of the union bounding box of all root trajectories."""
+    points = np.asarray(root_points, dtype=np.float64).reshape(-1, 3)
+    lo, hi = points.min(axis=0), points.max(axis=0)
+    centre = (lo + hi) / 2.
+    half_extent = float(np.hypot(hi[0] - lo[0], hi[2] - lo[2]) / 2.)
+    radii = sorted({
+        round(max(radius, half_extent + MIN_SITE_RANGE_M), 3)
+        for radius in (1.5, 2., 2.5, 3., 3.5, 4., 4.5, 5.)
+    })
+    for radius in radii:
+        for direction in range(24):
+            angle = direction * math.pi / 12
+            yield [float(centre[0] + radius * math.cos(angle)), float(height_m),
+                   float(centre[2] + radius * math.sin(angle))]
+
 
 def candidate_positions(aim, height_m, distance_m=None):
     # World Y is up. A bounded ring search around the authored motion avoids
@@ -73,8 +102,34 @@ def _angular_centre_aim(position, positions_by_frame):
     return position + direction / length * float(np.mean(ranges))
 
 
-def _static_candidate_constraint(scene, position, *, excluded_ids=()):
-    """Conservative room-footprint and furniture-AABB check before native LOS."""
+def _minimax_aim(position, positions_by_frame, iterations=64):
+    """Aim at the centre of the smallest cone holding every target site.
+
+    Averaging directions weights each actor by its site count, so a densely
+    sampled person pulls the boresight away from a sparsely sampled cat. The
+    Badoiu-Clarkson iteration instead converges to the direction minimising the
+    largest off-axis angle of the joint trajectory, deterministically.
+    """
+    position = np.asarray(position, dtype=np.float64)
+    points = np.asarray(positions_by_frame, dtype=np.float64).reshape(-1, 3)
+    rays = points - position
+    ranges = np.linalg.norm(rays, axis=1)
+    if (ranges <= 1e-8).any():
+        raise ValueError('Radar candidate intersects the animated target trajectory.')
+    units = rays / ranges[:, None]
+    direction = units.mean(axis=0)
+    if np.linalg.norm(direction) <= 1e-12:
+        return points.mean(axis=0)
+    direction /= np.linalg.norm(direction)
+    for step in range(1, iterations + 1):
+        farthest = units[int(np.argmin(units @ direction))]
+        direction = direction + (farthest - direction) / (step + 1)
+        direction /= np.linalg.norm(direction)
+    return position + direction * float(np.mean(ranges))
+
+
+def _static_bounds(scene, *, excluded_ids=()):
+    """World AABBs of static solid meshes (actors and excluded ids skipped)."""
     from .adapter.snapshot import _hierarchy
 
     matrices, visible = _hierarchy(scene)
@@ -95,18 +150,31 @@ def _static_candidate_constraint(scene, position, *, excluded_ids=()):
         world = (np.column_stack((vertices, np.ones(len(vertices)))) @ matrices[object_id].T)[:, :3]
         lo, hi = world.min(axis=0), world.max(axis=0)
         bounds.append((object_id, str(obj.name), lo, hi))
-    point = np.asarray(position, dtype=np.float64)
+    return bounds
+
+
+def _floor_bounds(bounds, height_m):
     floor_candidates = [
         item for item in bounds
         if (item[3][1] - item[2][1]) <= .25
-        and item[3][1] <= point[1] + .1
+        and item[3][1] <= float(height_m) + .1
         and (item[3][0] - item[2][0]) * (item[3][2] - item[2][2]) >= 1.
     ]
-    if floor_candidates:
-        floor = max(
-            floor_candidates,
-            key=lambda item: (item[3][0] - item[2][0]) * (item[3][2] - item[2][2]),
-        )
+    if not floor_candidates:
+        return None
+    return max(
+        floor_candidates,
+        key=lambda item: (item[3][0] - item[2][0]) * (item[3][2] - item[2][2]),
+    )
+
+
+def _static_candidate_constraint(scene, position, *, excluded_ids=(), bounds=None):
+    """Conservative room-footprint and furniture-AABB check before native LOS."""
+    if bounds is None:
+        bounds = _static_bounds(scene, excluded_ids=excluded_ids)
+    point = np.asarray(position, dtype=np.float64)
+    floor = _floor_bounds(bounds, point[1])
+    if floor is not None:
         if not (floor[2][0] - .05 <= point[0] <= floor[3][0] + .05
                 and floor[2][2] - .05 <= point[2] <= floor[3][2] + .05):
             return {
@@ -123,6 +191,54 @@ def _static_candidate_constraint(scene, position, *, excluded_ids=()):
                 'object_id': object_id,
                 'object_name': name,
             }
+    return None
+
+
+def _clearance(bounds, floor, position):
+    """Horizontal tripod clearance to furniture and to the room footprint edge.
+
+    A floor-standing Radar occupies the column from just above the floor to its
+    own height, so rugs below that column and ceilings above it do not block it.
+    """
+    point = np.asarray(position, dtype=np.float64)
+    floor_top = float(floor[3][1]) if floor is not None else min(
+        (float(item[2][1]) for item in bounds), default=float(point[1]) - 1.)
+    nearest = None
+    for object_id, name, lo, hi in bounds:
+        if floor is not None and object_id == floor[0]:
+            continue
+        if hi[1] <= floor_top + .1 or lo[1] >= point[1] + .2:
+            continue
+        dx = max(lo[0] - point[0], 0., point[0] - hi[0])
+        dz = max(lo[2] - point[2], 0., point[2] - hi[2])
+        distance = float(math.hypot(dx, dz))
+        if nearest is None or distance < nearest[0]:
+            nearest = (distance, object_id, name)
+    room_edge = None
+    if floor is not None:
+        room_edge = float(min(point[0] - floor[2][0], floor[3][0] - point[0],
+                              point[2] - floor[2][2], floor[3][2] - point[2]))
+    return {
+        'nearest_furniture_m': nearest[0] if nearest else None,
+        'nearest_furniture_id': nearest[1] if nearest else None,
+        'nearest_furniture_name': nearest[2] if nearest else None,
+        'room_edge_m': room_edge,
+        'required_furniture_clearance_m': FURNITURE_CLEARANCE_M,
+        'required_room_edge_clearance_m': ROOM_EDGE_CLEARANCE_M,
+    }
+
+
+def _whole_path_constraint(clearance):
+    if clearance['room_edge_m'] is not None and clearance['room_edge_m'] < ROOM_EDGE_CLEARANCE_M:
+        return {'code': 'room_edge_clearance', 'room_edge_m': clearance['room_edge_m']}
+    if (clearance['nearest_furniture_m'] is not None
+            and clearance['nearest_furniture_m'] < FURNITURE_CLEARANCE_M):
+        return {
+            'code': 'radar_furniture_clearance',
+            'object_id': clearance['nearest_furniture_id'],
+            'object_name': clearance['nearest_furniture_name'],
+            'distance_m': clearance['nearest_furniture_m'],
+        }
     return None
 
 
@@ -209,6 +325,125 @@ def _trajectory_metrics(position, aim, positions_by_frame, times, *, fov_deg,
     }
 
 
+def _target_coverage(position, aim, positions_by_frame, target_slices, *, fov_deg,
+                     margin_deg=FOV_MARGIN_DEG):
+    """Per-target FOV evidence over the full interval.
+
+    A target's root trajectory (its per-frame site centroid) must stay
+    ``margin_deg`` inside the FOV in every frame and at least one of its own
+    skin sites must stay in the FOV throughout. One visible actor never stands
+    in for another one.
+    """
+    position = np.asarray(position, dtype=np.float64)
+    points = np.asarray(positions_by_frame, dtype=np.float64)
+    forward = np.asarray(aim, dtype=np.float64) - position
+    forward /= np.linalg.norm(forward)
+    half = float(fov_deg) / 2.
+
+    def off_axis(vectors):
+        norms = np.linalg.norm(vectors, axis=-1)
+        cosine = np.sum(vectors * forward, axis=-1) / np.maximum(norms, 1e-12)
+        return np.degrees(np.arccos(np.clip(cosine, -1., 1.))), norms
+
+    targets = []
+    for item in target_slices:
+        start, end = int(item['site_start']), int(item['site_end'])
+        sites = points[:, start:end]
+        site_angles, site_ranges = off_axis(sites - position)
+        root = sites.mean(axis=1)
+        root_angles, _ = off_axis(root - position)
+        continuous = (np.flatnonzero((site_angles <= half).all(axis=0)) + start).tolist()
+        root_in_fov = root_angles <= half - float(margin_deg)
+        targets.append({
+            'object_id': str(item['object_id']),
+            'site_start': start,
+            'site_end': end,
+            'frame_count': int(len(points)),
+            'root_frames_in_fov': int(root_in_fov.sum()),
+            'min_root_margin_deg': float(half - root_angles.max()),
+            'site_envelope_margin_deg': float(half - site_angles.max()),
+            'continuous_fov_site_ranks': continuous,
+            'continuous_fov_site_count': len(continuous),
+            'min_site_range_m': float(site_ranges.min()),
+            'max_site_range_m': float(site_ranges.max()),
+            'root_path_length_m': float(np.linalg.norm(np.diff(root, axis=0), axis=1).sum()),
+            'root_bounds_m': {'min': root.min(axis=0).tolist(), 'max': root.max(axis=0).tolist()},
+            'fov_whole_path': bool(root_in_fov.all() and continuous),
+        })
+    return {
+        'targets': targets,
+        'all_targets_whole_path_in_fov': all(item['fov_whole_path'] for item in targets),
+        'min_root_margin_deg': min(item['min_root_margin_deg'] for item in targets),
+        'site_envelope_margin_deg': min(item['site_envelope_margin_deg'] for item in targets),
+        'min_site_range_m': min(item['min_site_range_m'] for item in targets),
+    }
+
+
+def _apply_native_evidence(metrics, evidence, target_slices=None):
+    """Fold one native preflight into a candidate's kinematic metrics."""
+    metrics = dict(metrics)
+    topology = evidence.get('topology') if isinstance(evidence, dict) else None
+    metrics['native_visibility_coverage'] = float(
+        topology.get('visibility_coverage', 1.) if isinstance(topology, dict) else 1.
+    )
+    frame_visibility = topology.get('frames', ()) if isinstance(topology, dict) else ()
+    declared_sites = int(topology.get('declared_site_count', 0) or 0) if isinstance(topology, dict) else 0
+    active_sites = int(topology.get('active_site_count', 0) or 0) if isinstance(topology, dict) else 0
+    if not active_sites and metrics['native_visibility_coverage'] > 0.:
+        active_sites = max(1, round(metrics['native_visibility_coverage'] * declared_sites)) if declared_sites else 1
+    has_native_ranks = isinstance(topology, dict) and 'active_site_ranks' in topology
+    native_ranks = list(topology.get('active_site_ranks', ())) if isinstance(topology, dict) else []
+    if not native_ranks and active_sites:
+        native_ranks = list(range(active_sites))
+    fov_ranks = metrics.get('fov_continuous_site_ranks')
+    if fov_ranks is None:
+        fov_ranks = (range(int(metrics.get('sampled_site_count', 0)))
+                     if metrics.get('whole_path_in_fov') else ())
+    joint_ranks = sorted(set(native_ranks) & set(fov_ranks))
+    metrics['native_continuous_site_count'] = active_sites
+    metrics['joint_continuous_site_count'] = len(joint_ranks)
+    metrics['native_whole_path_visible'] = bool(joint_ranks)
+    metrics['occluded_frame_count'] = sum(
+        int(frame.get('reachable_site_count', declared_sites)) == 0
+        for frame in frame_visibility
+    ) if frame_visibility else 0
+    metrics['partially_occluded_frame_count'] = sum(
+        0 < int(frame.get('reachable_site_count', declared_sites)) < declared_sites
+        for frame in frame_visibility
+    ) if declared_sites else 0
+
+    coverage = metrics.get('coverage')
+    if coverage is not None:
+        per_target_counts = {
+            str(item.get('object_id')): int(item.get('active_site_count', 0) or 0)
+            for item in (evidence.get('targets') or ()) if isinstance(item, dict)
+        } if isinstance(evidence, dict) else {}
+        native_set = set(int(rank) for rank in native_ranks)
+        targets = []
+        for item in coverage['targets']:
+            item = dict(item)
+            in_slice = {rank for rank in native_set if item['site_start'] <= rank < item['site_end']}
+            if item['object_id'] in per_target_counts and not has_native_ranks:
+                native_count = per_target_counts[item['object_id']]
+                joint = item['continuous_fov_site_count'] if native_count else 0
+            else:
+                native_count = per_target_counts.get(item['object_id'], len(in_slice))
+                if item['object_id'] in per_target_counts and native_count == 0:
+                    in_slice = set()
+                joint = len(in_slice & set(item['continuous_fov_site_ranks']))
+            item['native_active_site_count'] = int(native_count)
+            item['joint_continuous_site_count'] = int(joint)
+            item['whole_path_visible'] = bool(item['fov_whole_path'] and joint > 0)
+            targets.append(item)
+        coverage = {**coverage, 'targets': targets}
+        coverage['targets_without_whole_path'] = [
+            item['object_id'] for item in targets if not item['whole_path_visible']]
+        coverage['all_targets_whole_path_visible'] = not coverage['targets_without_whole_path']
+        metrics['coverage'] = coverage
+        metrics['all_targets_whole_path_visible'] = coverage['all_targets_whole_path_visible']
+    return metrics
+
+
 def _objective_score(objective, metrics, *, position, aim, baseline_position):
     native_coverage = float(metrics.get('native_visibility_coverage', 1.))
     fov_coverage = float(metrics.get(
@@ -243,11 +478,52 @@ def _objective_score(objective, metrics, *, position, aim, baseline_position):
     native_whole_path = bool(metrics.get(
         'native_whole_path_visible', native_coverage > 0.))
     whole_path = 1. if metrics['whole_path_in_fov'] and native_whole_path else 0.
+    joint = metrics.get('all_targets_whole_path_visible')
+    if joint is None:
+        # Before native preflight only the FOV half of the contract is known.
+        joint = metrics.get('all_targets_whole_path_in_fov', metrics['whole_path_in_fov']) and native_whole_path
+    joint_whole_path = 1. if joint else 0.
     if objective == 'closer_with_full_path_visible':
-        return physically_valid, whole_path, coverage, value
+        return physically_valid, joint_whole_path, coverage, value
     if objective == 'whole_path_visible':
-        return physically_valid, whole_path, value, -metrics['mean_range_m']
+        if 'coverage' not in metrics:
+            return physically_valid, whole_path, value, -metrics['mean_range_m']
+        # Every target fully covered first, then the whole site envelope inside
+        # the margin, then a larger root margin (capped so it does not simply
+        # push the Radar to the farthest ring), then the preferred range.
+        joint_coverage = metrics['coverage']
+        envelope = 1. if joint_coverage['site_envelope_margin_deg'] >= FOV_MARGIN_DEG else 0.
+        margin = round(min(joint_coverage['min_root_margin_deg'], _MARGIN_PREFERENCE_CAP_DEG), 1)
+        preferred = -abs(float(metrics['joint_centre_range_m']) - PREFERRED_RANGE_M)
+        return physically_valid, joint_whole_path, envelope, margin, preferred
     return physically_valid, coverage, value, -metrics['mean_range_m']
+
+
+def _per_target_failure_detail(ranked, positions_by_frame, target_slices, *, fov_deg):
+    """Best kinematic pose for each target alone, aimed at that target only.
+
+    It justifies a multiple-Radar suggestion; each such pose still needs its own
+    native preflight once a second Radar is actually configured.
+    """
+    per_target = []
+    for item in target_slices:
+        own = positions_by_frame[:, item['site_start']:item['site_end']]
+        local = [{**item, 'site_start': 0, 'site_end': own.shape[1]}]
+        best = None
+        for candidate in ranked:
+            own_aim = _minimax_aim(candidate['position_m'], own)
+            coverage = _target_coverage(candidate['position_m'], own_aim, own, local, fov_deg=fov_deg)
+            target = coverage['targets'][0]
+            if target['fov_whole_path'] and (best is None or target['min_root_margin_deg'] > best[1]):
+                best = (candidate['position_m'], target['min_root_margin_deg'], own_aim.tolist())
+        per_target.append({
+            'object_id': str(item['object_id']),
+            'best_single_target_pose_m': best[0] if best else None,
+            'best_single_target_aim_m': best[2] if best else None,
+            'best_single_target_root_margin_deg': best[1] if best else None,
+            'verification': 'kinematic_fov_only_native_preflight_pending',
+        })
+    return per_target
 
 
 def choose_sensor_placement(scene, args, *, radar_object_id=None):
@@ -319,28 +595,67 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
         live_transform = live_sensor.get_component('Transform') if live_sensor else None
         if live_transform is not None:
             baseline_position = np.asarray(live_transform.position, dtype=np.float64).tolist()
+
+    whole_path = objective in WHOLE_PATH_OBJECTIVES
+    target_slices = list(getattr(sampler, 'target_slices', ()) or [{
+        'object_id': target_ids[0], 'site_start': 0, 'site_end': int(positions_by_frame.shape[1]),
+    }])
+    root_points = np.concatenate([
+        positions_by_frame[:, item['site_start']:item['site_end']].mean(axis=1)
+        for item in target_slices
+    ])
+    joint_centre = (root_points.min(axis=0) + root_points.max(axis=0)) / 2.
+    static_bounds = _static_bounds(detached, excluded_ids={str(sensor.id), *target_ids})
+    floor = _floor_bounds(static_bounds, height)
+    positions = (joint_candidate_positions(root_points, height)
+                 if whole_path and distance is None
+                 else candidate_positions(aim, height, distance))
+
     failures = []
     valid = []
     ranked = []
     tested_candidate_count = 0
     native_preflight_count = 0
-    for position in candidate_positions(aim, height, distance):
+    for position in positions:
         tested_candidate_count += 1
-        constraint = _static_candidate_constraint(
-            detached,
-            position,
-            excluded_ids={str(sensor.id), *target_ids},
-        )
+        constraint = _static_candidate_constraint(detached, position, bounds=static_bounds)
+        clearance = _clearance(static_bounds, floor, position) if whole_path else None
+        if constraint is None and clearance is not None:
+            constraint = _whole_path_constraint(clearance)
         if constraint is not None:
             failures.append({'position_m': position, 'reason': constraint['code'], 'detail': constraint})
             continue
-        candidate_aim = (aim if distance is not None
-                         else _angular_centre_aim(position, positions_by_frame))
+        if distance is not None:
+            candidate_aim = aim
+        elif whole_path:
+            candidate_aim = _minimax_aim(position, positions_by_frame)
+        else:
+            candidate_aim = _angular_centre_aim(position, positions_by_frame)
         metrics = _trajectory_metrics(
             position, candidate_aim, positions_by_frame, times,
             fov_deg=float(radar.fov), max_doppler_mps=max_doppler_mps,
             velocities_by_frame=velocities_by_frame,
         )
+        if whole_path:
+            coverage = _target_coverage(
+                position, candidate_aim, positions_by_frame, target_slices, fov_deg=float(radar.fov))
+            coverage['clearance'] = clearance
+            coverage['fov_deg'] = float(radar.fov)
+            coverage['required_root_margin_deg'] = FOV_MARGIN_DEG
+            coverage['joint_trajectory_bounds_m'] = {
+                'min': root_points.min(axis=0).tolist(), 'max': root_points.max(axis=0).tolist()}
+            coverage['joint_trajectory_centre_m'] = joint_centre.tolist()
+            coverage['aim'] = 'minimax angular centre of every target site over the full interval'
+            metrics['coverage'] = coverage
+            metrics['all_targets_whole_path_in_fov'] = coverage['all_targets_whole_path_in_fov']
+            metrics['joint_centre_range_m'] = float(np.linalg.norm(np.asarray(position) - joint_centre))
+            if coverage['min_site_range_m'] < MIN_SITE_RANGE_M:
+                failures.append({
+                    'position_m': position,
+                    'reason': 'too_close_to_target',
+                    'detail': {'code': 'too_close_to_target', 'min_site_range_m': coverage['min_site_range_m']},
+                })
+                continue
         if not metrics['doppler_within_nyquist']:
             failures.append({
                 'position_m': position,
@@ -410,104 +725,63 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
             except AnimationTopologyError as exc:
                 failures.append({'position_m': position, 'reason': str(exc), 'detail': exc.detail})
                 continue
-            metrics = dict(candidate['metrics'])
-            topology = evidence.get('topology') if isinstance(evidence, dict) else None
-            metrics['native_visibility_coverage'] = float(
-                topology.get('visibility_coverage', 1.) if isinstance(topology, dict) else 1.
-            )
-            frame_visibility = topology.get('frames', ()) if isinstance(topology, dict) else ()
-            declared_sites = int(topology.get('declared_site_count', 0) or 0) if isinstance(topology, dict) else 0
-            active_sites = int(topology.get('active_site_count', 0) or 0) if isinstance(topology, dict) else 0
-            if not active_sites and metrics['native_visibility_coverage'] > 0.:
-                active_sites = max(1, round(metrics['native_visibility_coverage'] * declared_sites)) if declared_sites else 1
-            native_ranks = list(topology.get('active_site_ranks', ())) if isinstance(topology, dict) else []
-            if not native_ranks and active_sites:
-                native_ranks = list(range(active_sites))
-            fov_ranks = metrics.get('fov_continuous_site_ranks')
-            if fov_ranks is None:
-                fov_ranks = (range(int(metrics.get('sampled_site_count', 0)))
-                             if metrics.get('whole_path_in_fov') else ())
-            joint_ranks = sorted(set(native_ranks) & set(fov_ranks))
-            metrics['native_continuous_site_count'] = active_sites
-            metrics['joint_continuous_site_count'] = len(joint_ranks)
-            metrics['native_whole_path_visible'] = bool(joint_ranks)
-            metrics['occluded_frame_count'] = sum(
-                int(frame.get('reachable_site_count', declared_sites)) == 0
-                for frame in frame_visibility
-            ) if frame_visibility else 0
-            metrics['partially_occluded_frame_count'] = sum(
-                0 < int(frame.get('reachable_site_count', declared_sites)) < declared_sites
-                for frame in frame_visibility
-            ) if declared_sites else 0
-            candidate['metrics'] = metrics
+            candidate['metrics'] = _apply_native_evidence(candidate['metrics'], evidence)
             candidate['native_preflight'] = evidence
             candidate['score'] = _objective_score(
-                objective, metrics, position=position, aim=aim,
+                objective, candidate['metrics'], position=position, aim=aim,
                 baseline_position=baseline_position,
             )
             valid.append(candidate)
             if best_score is None or candidate['score'] > best_score:
                 best_score = candidate['score']
-            if (objective in {'whole_path_visible', 'closer_with_full_path_visible'}
-                    and candidate['score'][1] == 1.):
+            if objective in WHOLE_PATH_OBJECTIVES and candidate['score'][1] == 1.:
                 # Candidates are already sorted by their cheap full-trajectory
                 # FOV bound (and by distance for the closer objective). Once
-                # native LOS confirms a continuous in-FOV site, the requested
-                # hard guarantee is satisfied. Exhaustively compiling native
-                # propagation for every remaining pose made a 166-frame
-                # placement take many minutes without improving correctness.
+                # native LOS confirms every target's continuous in-FOV site,
+                # the requested hard guarantee is satisfied. Exhaustively
+                # compiling native propagation for every remaining pose made a
+                # 166-frame placement take many minutes without improving
+                # correctness.
                 break
 
     # Balanced candidates are validated inline and do not need the optimistic
     # score after their first native-visible pose is found.
     for candidate in valid:
         if 'score' not in candidate:
-            metrics = dict(candidate['metrics'])
-            evidence = candidate['native_preflight']
-            topology = evidence.get('topology') if isinstance(evidence, dict) else None
-            metrics['native_visibility_coverage'] = float(
-                topology.get('visibility_coverage', 1.) if isinstance(topology, dict) else 1.
-            )
-            frame_visibility = topology.get('frames', ()) if isinstance(topology, dict) else ()
-            declared_sites = int(topology.get('declared_site_count', 0) or 0) if isinstance(topology, dict) else 0
-            active_sites = int(topology.get('active_site_count', 0) or 0) if isinstance(topology, dict) else 0
-            if not active_sites and metrics['native_visibility_coverage'] > 0.:
-                active_sites = max(1, round(metrics['native_visibility_coverage'] * declared_sites)) if declared_sites else 1
-            native_ranks = list(topology.get('active_site_ranks', ())) if isinstance(topology, dict) else []
-            if not native_ranks and active_sites:
-                native_ranks = list(range(active_sites))
-            fov_ranks = metrics.get('fov_continuous_site_ranks')
-            if fov_ranks is None:
-                fov_ranks = (range(int(metrics.get('sampled_site_count', 0)))
-                             if metrics.get('whole_path_in_fov') else ())
-            joint_ranks = sorted(set(native_ranks) & set(fov_ranks))
-            metrics['native_continuous_site_count'] = active_sites
-            metrics['joint_continuous_site_count'] = len(joint_ranks)
-            metrics['native_whole_path_visible'] = bool(joint_ranks)
-            metrics['occluded_frame_count'] = sum(
-                int(frame.get('reachable_site_count', declared_sites)) == 0
-                for frame in frame_visibility
-            ) if frame_visibility else 0
-            metrics['partially_occluded_frame_count'] = sum(
-                0 < int(frame.get('reachable_site_count', declared_sites)) < declared_sites
-                for frame in frame_visibility
-            ) if declared_sites else 0
-            candidate['metrics'] = metrics
+            candidate['metrics'] = _apply_native_evidence(
+                candidate['metrics'], candidate['native_preflight'])
             candidate['score'] = _objective_score(
-                objective, metrics, position=candidate['position_m'], aim=aim,
+                objective, candidate['metrics'], position=candidate['position_m'], aim=aim,
                 baseline_position=baseline_position,
             )
     if valid:
         selected = max(valid, key=lambda item: item['score'])
         selected_metrics = selected['metrics']
         impossible_reason = None
+        extra_detail = {}
         if not selected_metrics['doppler_within_nyquist']:
             impossible_reason = 'Every visible candidate exceeds the Radar Doppler Nyquist boundary.'
         elif objective == 'bidirectional_radial_velocity' and (
                 selected_metrics['approaching_peak_mps'] <= 1e-4
                 or selected_metrics['receding_peak_mps'] <= 1e-4):
             impossible_reason = 'No visible candidate observes both approaching and receding radial motion.'
-        elif objective in {'whole_path_visible', 'closer_with_full_path_visible'} and not (
+        elif whole_path and 'coverage' in selected_metrics and not selected_metrics.get(
+                'all_targets_whole_path_visible', False):
+            impossible_reason = (
+                'No single Radar pose keeps the whole authored path of every dynamic target '
+                'inside the FOV margin with native LOS coverage.')
+            per_target = _per_target_failure_detail(
+                ranked, positions_by_frame, target_slices, fov_deg=float(radar.fov))
+            extra_detail = {
+                'targets_without_whole_path': selected_metrics['coverage'].get(
+                    'targets_without_whole_path', []),
+                'per_target_coverage': per_target,
+                'suggestion': (
+                    'multiple_radars'
+                    if len(target_specs) > 1 and all(item['best_single_target_pose_m'] for item in per_target)
+                    else 'relax_objective'),
+            }
+        elif objective in WHOLE_PATH_OBJECTIVES and not (
                 selected_metrics['whole_path_in_fov']
                 and selected_metrics.get('native_whole_path_visible', False)):
             impossible_reason = 'No candidate keeps the whole authored path in both FOV and native LOS coverage.'
@@ -523,6 +797,7 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
                     'best_candidate_metrics': selected_metrics,
                     'valid_candidate_count': len(valid),
                     'tradeoff_options': ['keep_current_pose', 'relax_objective', 'choose_explicit_pose'],
+                    **extra_detail,
                 },
             )
         baseline_metrics = None
@@ -552,28 +827,32 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
                 'mean_range_delta_m': float(
                     selected_metrics['mean_range_m'] - baseline_metrics['mean_range_m']),
             }
-        return {'position_m': selected['position_m'], 'aim_point_m': selected['aim_point_m'],
-                'mode': 'automatic', 'height_m': height,
-                'targets': target_specs,
-                'placement_objective': objective,
-                'requested_distance_m': distance,
-                'actual_distance_m': float(np.linalg.norm(np.asarray(selected['position_m']) - aim)),
-                'tested_candidates': tested_candidate_count,
-                'valid_candidate_count': len(valid),
-                'native_preflight_count': native_preflight_count,
-                'predicted_metrics': selected_metrics,
-                'baseline_metrics': baseline_metrics,
-                'predicted_improvement': improvement,
-                'metric_semantics': {
-                    'radial_velocity_sign': 'positive=receding, negative=approaching',
-                    'visibility': 'FOV prediction ranks poses; native preflight remains authoritative',
-                    'whole_path_visible': (
-                        'the target remains in FOV on every requested frame and native '
-                        'preflight retains at least one skin site across the entire interval; '
-                        'site coverage reports additional signal-quality margin'),
-                    'trajectory_sampling': 'every requested baked Radar frame',
-                },
-                'native_preflight': selected['native_preflight'],
-                'rejected_candidates': failures}
+        result = {'position_m': selected['position_m'], 'aim_point_m': selected['aim_point_m'],
+                  'mode': 'automatic', 'height_m': height,
+                  'targets': target_specs,
+                  'placement_objective': objective,
+                  'requested_distance_m': distance,
+                  'actual_distance_m': float(np.linalg.norm(np.asarray(selected['position_m']) - aim)),
+                  'tested_candidates': tested_candidate_count,
+                  'valid_candidate_count': len(valid),
+                  'native_preflight_count': native_preflight_count,
+                  'predicted_metrics': selected_metrics,
+                  'baseline_metrics': baseline_metrics,
+                  'predicted_improvement': improvement,
+                  'metric_semantics': {
+                      'radial_velocity_sign': 'positive=receding, negative=approaching',
+                      'visibility': 'FOV prediction ranks poses; native preflight remains authoritative',
+                      'whole_path_visible': (
+                          'every declared target keeps its root trajectory inside the FOV minus '
+                          f'{FOV_MARGIN_DEG:g} degrees on every requested frame and native preflight '
+                          'retains at least one of its own skin sites across the entire interval; '
+                          'site coverage reports additional signal-quality margin'),
+                      'trajectory_sampling': 'every requested baked Radar frame',
+                  },
+                  'native_preflight': selected['native_preflight'],
+                  'rejected_candidates': failures}
+        if 'coverage' in selected_metrics:
+            result['coverage'] = selected_metrics['coverage']
+        return result
     raise ToolError('No automatic sensor pose passed native visibility preflight; choose an explicit pose.',
                     code='sensor_placement_unavailable', detail={'candidates': failures})
