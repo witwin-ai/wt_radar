@@ -847,8 +847,8 @@ class RadarComponent(Component):
                         self.animation_status += f" Replay unavailable: {replay_error_message}"
                         Notifications.warning("Radar", self.animation_status)
                     else:
+                        # The completed status lives on the component; no toast for success.
                         self.animation_status += f" {replay_completion_status or self.replay_status}"
-                        Notifications.success("Radar", self.animation_status)
                 return self.animation_status
             self._snapshot_solver_result_handle = str(handle)
             self._snapshot_solver_run_id = run.run_id
@@ -857,7 +857,6 @@ class RadarComponent(Component):
             from ..adapter.snapshot import show_snapshot
             show_snapshot(self)
             self.snapshot_status = f"GPU snapshot complete, t={request['time_s']:.3f}s. One RCS point; velocity frozen to zero."
-            Notifications.success("Radar", "Native GPU snapshot complete (not animated-cat simulation)")
             return self.snapshot_status
         except Exception as exc:
             self._snapshot_result = False

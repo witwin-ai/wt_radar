@@ -661,3 +661,47 @@ def test_preview_does_not_publish_after_scene_replaced(monkeypatch):
         assert applied == []
 
     asyncio.run(exercise())
+
+
+def test_completed_animation_reports_on_the_component_without_a_toast(component, monkeypatch):
+    from wt_radar.components import radar
+    from wt_radar.adapter import animation
+
+    run = SimpleNamespace(status="succeeded", outputs={"resultHandle": "next"}, run_id="next-run")
+    stub_solve_transport(component, monkeypatch, lambda *args, **kwargs: run)
+    radar.api.server = SimpleNamespace(handlers={"binary_assets": object()})
+    monkeypatch.setattr(component, "_query_result", lambda *_: {})
+    monkeypatch.setattr(animation, "apply_animation_view", lambda *_: "preview")
+
+    async def prepare():
+        return "Replay ready"
+
+    monkeypatch.setattr(component, "prepare_synchronized_replay", prepare)
+    toasts = []
+    for level in ("success", "info", "warning"):
+        monkeypatch.setattr(radar.Notifications, level, lambda *args, level=level: toasts.append((level, args)))
+
+    asyncio.run(component._simulate_async(animation=True))
+
+    assert toasts == []
+    assert "Replay ready" in component.animation_status
+
+
+def test_completed_snapshot_reports_on_the_component_without_a_toast(component, monkeypatch):
+    from wt_radar.components import radar
+    from wt_radar.adapter import snapshot
+
+    run = SimpleNamespace(status="succeeded", outputs={"resultHandle": "snapshot-result"}, run_id="snapshot-run")
+    stub_solve_transport(component, monkeypatch, lambda *args, **kwargs: run)
+    monkeypatch.setattr(snapshot, "snapshot_request", lambda value: {"duration_s": 0.0, "fps": 1.0, "time_s": 0.5})
+    radar.api.solvers.query = lambda *_args, **_kwargs: {"data": {
+        "view": "range_profile", "tx": 0, "rx": 0, "range_m": [0.0, 1.0], "magnitude": [0.0, 1.0],
+        "metadata": {"target_object_id": "cat", "snapshot_time_s": 0.5},
+    }}
+    toasts = []
+    monkeypatch.setattr(radar.Notifications, "success", lambda *args: toasts.append(args))
+
+    asyncio.run(component._simulate_async(animation=False))
+
+    assert toasts == []
+    assert component.snapshot_status.startswith("GPU snapshot complete")
