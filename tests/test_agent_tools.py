@@ -867,7 +867,7 @@ def test_manual_radar_move_preflight_uses_current_pose_without_reconfiguration(h
     before = copy.deepcopy(scene.to_dict())
     observed = {}
 
-    def preflight(detached, request):
+    def preflight(detached, request, **_kwargs):
         observed["position"] = list(
             detached.get_object(sensor_id).get_component("Transform").position
         )
@@ -945,7 +945,7 @@ def test_plan_explicitly_marks_low_visibility_as_degraded(harness, monkeypatch):
         "visibility_quality": "degraded_interval_global_subset",
     })
     monkeypatch.setattr(
-        "wt_radar.adapter.animation.animation_preflight", lambda *_: copy.deepcopy(partial),
+        "wt_radar.adapter.animation.animation_preflight", lambda *_, **__: copy.deepcopy(partial),
     )
     monkeypatch.setattr(radar_tools, "_runtime_evidence", lambda: {
         "torch": {"cuda_available": True, "device_name": "test-gpu"}
@@ -1107,7 +1107,7 @@ def test_submit_observe_and_verify_requires_native_evidence(harness, monkeypatch
     sensor = scene.get_object(sensor_id)
     radar = sensor.get_component("Radar")
     monkeypatch.setattr(
-        "wt_radar.adapter.animation.animation_preflight", lambda *_: native_preflight(),
+        "wt_radar.adapter.animation.animation_preflight", lambda *_, **__: native_preflight(),
     )
 
     async def fake_simulate(*, animation=False, on_submitted=None):
@@ -1284,7 +1284,7 @@ def test_cancel_simulation_waits_for_interrupted_receipt(harness, monkeypatch):
     sensor = scene.get_object(sensor_id)
     radar = sensor.get_component("Radar")
     monkeypatch.setattr(
-        "wt_radar.adapter.animation.animation_preflight", lambda *_: native_preflight(),
+        "wt_radar.adapter.animation.animation_preflight", lambda *_, **__: native_preflight(),
     )
     started = asyncio.Event()
     never = asyncio.Event()
@@ -1334,7 +1334,7 @@ def test_verify_rejects_wrong_shape_scene_model_versions_and_sites(harness, monk
     sensor = scene.get_object(ensured["radar"]["object_id"])
     radar = sensor.get_component("Radar")
     monkeypatch.setattr(
-        "wt_radar.adapter.animation.animation_preflight", lambda *_: native_preflight(),
+        "wt_radar.adapter.animation.animation_preflight", lambda *_, **__: native_preflight(),
     )
 
     async def fake_simulate(*, animation=False, on_submitted=None):
@@ -1455,7 +1455,7 @@ def test_verify_rejects_noncanonical_cuda_device(harness, monkeypatch, fake_devi
     sensor = scene.get_object(ensured["radar"]["object_id"])
     radar = sensor.get_component("Radar")
     monkeypatch.setattr(
-        "wt_radar.adapter.animation.animation_preflight", lambda *_: native_preflight(),
+        "wt_radar.adapter.animation.animation_preflight", lambda *_, **__: native_preflight(),
     )
     async def fake_simulate(*, animation=False, on_submitted=None):
         radar._solver_run_id = "device-run"

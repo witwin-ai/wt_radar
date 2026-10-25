@@ -36,7 +36,7 @@ def test_automatic_placement_aims_and_preflights_all_declared_targets(scene, mon
     add_second_rig(original, vertices)
     requests = []
 
-    def preflight(_detached, request):
+    def preflight(_detached, request, **_kwargs):
         requests.append(request)
         assert [target["object_id"] for target in request["targets"]] == ["target", "dog"]
         return {"frame_count": 2, "site_count": 4, "radar_device": "cuda"}
@@ -65,7 +65,7 @@ def test_trials_are_detached_and_use_unchanged_native_preflight(scene, monkeypat
     make_rig(original, component)
     before = copy.deepcopy(original.to_dict())
     tried = []
-    def preflight(detached, request):
+    def preflight(detached, request, **_kwargs):
         assert detached is not original
         sensor = detached.get_object(request['radar_object_id'])
         tried.append(list(sensor.get_component('Transform').position))
@@ -85,7 +85,7 @@ def test_automatic_placement_accepts_float32_round_trip_full_motion_duration(sce
     original, component = scene
     make_rig(original, component)
     original.timeline_manager.clip.duration = 20.0
-    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_, **__: {
         'frame_count': 169, 'site_count': 2, 'radar_device': 'cuda',
     })
 
@@ -103,7 +103,7 @@ def test_requested_automatic_distance_is_preserved_in_world_space(scene, monkeyp
     original, component = scene
     make_rig(original, component)
     before = copy.deepcopy(original.to_dict())
-    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_, **__: {
         'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
     })
 
@@ -127,7 +127,7 @@ def test_explicit_objectives_rank_all_candidates_and_report_full_trajectory(scen
     original, component = scene
     make_rig(original, component)
     before = copy.deepcopy(original.to_dict())
-    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_, **__: {
         'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
         'topology': {'visibility_coverage': 1.},
     })
@@ -159,7 +159,7 @@ def test_explicit_objective_continues_when_the_best_kinematic_pose_is_occluded(s
     make_rig(original, component)
     calls = []
 
-    def preflight(*_args):
+    def preflight(*_args, **_kwargs):
         calls.append(1)
         if len(calls) == 1:
             raise animation.AnimationTopologyError('occluded', detail={'code': 'occluded'})
@@ -236,7 +236,7 @@ def test_automatic_placement_skips_site_velocity_alias_before_native_preflight(s
         return result
 
     monkeypatch.setattr(sensor_placement, '_trajectory_metrics', metrics)
-    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: preflight_calls.append(1) or {
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_, **__: preflight_calls.append(1) or {
         'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
     })
     result = sensor_placement.choose_sensor_placement(original, {
@@ -267,7 +267,7 @@ def test_whole_path_visibility_requires_target_presence_not_every_skin_site():
 def test_whole_path_objective_accepts_a_continuously_visible_native_subset(scene, monkeypatch):
     original, component = scene
     make_rig(original, component)
-    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_, **__: {
         'frame_count': 2, 'site_count': 1, 'radar_device': 'cuda',
         'topology': {
             'declared_site_count': 2, 'active_site_count': 1,
@@ -293,7 +293,7 @@ def test_whole_path_objective_accepts_a_continuously_visible_native_subset(scene
 def test_impossible_bidirectional_objective_reports_metrics_and_tradeoffs(scene, monkeypatch):
     original, component = scene
     make_rig(original, component)
-    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: {
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_, **__: {
         'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
         'topology': {'visibility_coverage': 1.},
     })
@@ -350,7 +350,7 @@ def test_non_visibility_failures_are_not_retried_or_downgraded(scene, monkeypatc
     before = copy.deepcopy(original.to_dict())
     calls = []
 
-    def preflight(detached, request):
+    def preflight(detached, request, **_kwargs):
         calls.append(request)
         raise RuntimeError('CUDA unavailable')
 
@@ -369,7 +369,7 @@ def test_all_occluded_candidates_stop_at_the_bound_without_mutation(scene, monke
     before = copy.deepcopy(original.to_dict())
     calls = []
 
-    def preflight(detached, request):
+    def preflight(detached, request, **_kwargs):
         calls.append(request)
         raise animation.AnimationTopologyError('occluded', detail={'code': 'occluded'})
 
@@ -395,7 +395,7 @@ def test_automatic_placement_rejects_candidate_inside_furniture_before_native_pr
     obstacle.get_component('Transform').scale = [.8, .8, .8]
     original.add_object(obstacle)
     calls = []
-    monkeypatch.setattr(animation, 'animation_preflight', lambda *_: calls.append(1) or {
+    monkeypatch.setattr(animation, 'animation_preflight', lambda *_, **__: calls.append(1) or {
         'frame_count': 2, 'site_count': 2, 'radar_device': 'cuda',
     })
 

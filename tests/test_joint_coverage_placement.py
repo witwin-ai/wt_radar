@@ -41,7 +41,7 @@ def add_walking_rig(scene, object_id, start, end, *, duration=2.):
 
 
 def fully_visible_preflight(calls=None):
-    def preflight(_detached, request):
+    def preflight(_detached, request, **_kwargs):
         if calls is not None:
             calls.append(request)
         sites = sum(int(target["site_budget"]) for target in request["targets"])
@@ -170,7 +170,7 @@ def test_whole_path_does_not_count_one_target_for_another_occluded_target(scene,
     original, component = scene
     targets = human_and_cat(original, component)
 
-    def person_only(_detached, request):
+    def person_only(_detached, request, **_kwargs):
         return {
             "frame_count": 2, "site_count": 2, "radar_device": "cuda",
             "targets": [
@@ -213,7 +213,7 @@ def test_whole_path_native_preflights_are_bounded(scene, monkeypatch):
     targets = human_and_cat(original, component)
     calls = []
 
-    def occluded_cat(_detached, request):
+    def occluded_cat(_detached, request, **_kwargs):
         calls.append(1)
         return {
             "frame_count": 2, "site_count": 2, "radar_device": "cuda",

@@ -296,10 +296,26 @@ def validate_unambiguous_velocity(radar, positions, velocities):
     }
 
 
-def animation_preflight(scene, request):
-    """Return solve evidence after native topology discovery, before synthesis."""
+def animation_preflight(scene, request, *, sampled_motion=None):
+    """Return solve evidence after native topology discovery, before synthesis.
+
+    ``sampled_motion`` is ``(times_s, positions_m, velocities_mps)`` the caller
+    already sampled for these targets (automatic placement does); it is reused
+    only when its timebase and site count match this request exactly.
+    """
     times, sampler, radar, world, _config, meta, _motion = prepare_animation(scene, request)
-    positions, velocities = sample_authored_motion(times, sampler)
+    positions = velocities = None
+    if sampled_motion is not None:
+        cached_times, cached_positions, cached_velocities = (
+            np.asarray(value, dtype=np.float64) for value in sampled_motion)
+        expected_shape = (len(times), len(sampler.vertex_ids), 3)
+        if (cached_times.shape == np.asarray(times).shape
+                and np.array_equal(cached_times, np.asarray(times, dtype=np.float64))
+                and cached_positions.shape == expected_shape
+                and cached_velocities.shape == expected_shape):
+            positions, velocities = cached_positions, cached_velocities
+    if positions is None:
+        positions, velocities = sample_authored_motion(times, sampler)
     velocity_evidence = validate_unambiguous_velocity(radar, positions, velocities)
     topology = visibility_preflight(
         radar, world, positions, sampler,
@@ -367,6 +383,28 @@ def visibility_preflight(
     if not positions_by_frame or len(positions_by_frame) != len(times_s):
         raise ValueError("Topology preflight requires one site array per requested frame.")
     declared_ids = tuple(3_000_000 + rank for rank in range(len(positions_by_frame[0])))
+    if not tuple(getattr(world, "structures", (None,))):
+        # Free space has no static geometry to occlude a leg, so every site
+        # keeps both paths for the whole interval; target self-occlusion is not
+        # modelled by either branch.
+        return {
+            "status": "reachable",
+            "method": "free_space_no_static_occluders",
+            "frame_count": len(times_s),
+            "declared_site_count": len(declared_ids),
+            "active_site_count": len(declared_ids),
+            "occluded_site_count": 0,
+            "active_site_ranks": list(range(len(declared_ids))),
+            "active_site_ids": [int(value) for value in declared_ids],
+            "occluded_sites": [],
+            "frames": [{"frame_index": index, "time_s": float(time_s), "reachable_site_count": len(declared_ids),
+                        "round_trip_rows": len(declared_ids), "path_set_complete": True}
+                       for index, time_s in enumerate(times_s)],
+            "rcs_policy": "total_rcs_divided_by_declared_sites_no_visible_renormalization",
+            "visibility_coverage": 1.0,
+            "visibility_quality": "complete",
+            "target_reflections": int(target_reflections),
+        }
     positions_by_frame = np.stack(positions_by_frame)
     timeline = np.asarray(times_s, dtype=np.float64)
     # Visibility is a propagation question at Studio frame instants, not a

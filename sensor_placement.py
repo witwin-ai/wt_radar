@@ -724,7 +724,8 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
             )
             native_preflight_count += 1
             try:
-                evidence = animation_preflight(detached, animation_request(radar))
+                evidence = animation_preflight(detached, animation_request(radar), sampled_motion=(
+                    times, positions_by_frame, velocities_by_frame))
             except AnimationTopologyError as exc:
                 failures.append({'position_m': position, 'reason': str(exc), 'detail': exc.detail})
                 continue
@@ -752,7 +753,8 @@ def choose_sensor_placement(scene, args, *, radar_object_id=None):
             )
             native_preflight_count += 1
             try:
-                evidence = animation_preflight(detached, animation_request(radar))
+                evidence = animation_preflight(detached, animation_request(radar), sampled_motion=(
+                    times, positions_by_frame, velocities_by_frame))
             except AnimationTopologyError as exc:
                 failures.append({'position_m': position, 'reason': str(exc), 'detail': exc.detail})
                 continue

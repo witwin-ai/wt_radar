@@ -91,3 +91,43 @@ def test_an_empty_scene_exports_free_space_for_a_line_of_sight_measurement():
     exported = export_static_mesh_scene(Scene(scene_id="void"))
     assert exported.mesh_count == 0 and exported.face_count == 0
     assert exported.object_to_structure_id == {}
+
+
+def test_free_space_preflight_keeps_every_site_without_a_native_trace():
+    import numpy as np
+    from types import SimpleNamespace
+    import witwin.core as wc
+
+    class _NoTrace:
+        device = "cpu"
+
+        def replace(self, **_kwargs):
+            return self
+
+        def trace(self, *_args, **_kwargs):
+            pytest.fail("free space has no occluder to trace")
+
+    sampler = SimpleNamespace(site_names=["head", "foot"], vertex_ids=np.array([1, 2]))
+    positions = [np.array([[0.0, 1.7, 0.0], [0.1, 0.0, 0.0]])] * 2
+    topology = anim.visibility_preflight(_NoTrace(), wc.Scene(structures=()), positions, sampler,
+                                         polarization=None, times_s=[0.0, 0.1])
+    assert topology["active_site_ranks"] == [0, 1] and topology["occluded_site_count"] == 0
+    assert topology["visibility_quality"] == "complete"
+    assert topology["method"] == "free_space_no_static_occluders"
+
+
+def test_preflight_reuses_motion_the_placement_already_sampled(scene, cuda_ready, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    request = anim.animation_request(component)
+    first = anim.animation_preflight(copy_for_solver(original), request)
+    sampled = first["sampled_motion"]
+
+    def resampled(*_args, **_kwargs):
+        pytest.fail("preflight sampled the authored motion again")
+
+    monkeypatch.setattr(anim, "sample_authored_motion", resampled)
+    again = anim.animation_preflight(copy_for_solver(original), request, sampled_motion=(
+        sampled["times_s"], sampled["positions_m"], sampled["velocities_mps"]))
+    assert again["sampled_motion"] == sampled
+    assert again["topology"]["active_site_ids"] == first["topology"]["active_site_ids"]
