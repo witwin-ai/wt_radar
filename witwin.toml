@@ -46,5 +46,5 @@ partials = true
 query = ["snapshot_view", "animation_view", "animation_export", "animation_replay", "animation_manifest"]
 
 [contributes.viewport.host]
-entry = "frontend/viewport.mjs"
+entry = "viewport.mjs"
 sdkVersion = "1.6.0"
