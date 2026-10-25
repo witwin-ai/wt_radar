@@ -84,3 +84,9 @@ test("frontend activation claims only WT Radar recording plots", () => {
   assert.equal(registrations[0].match({ value: { data: {} } }), false);
   delete globalThis.__witwin;
 });
+
+test("frontend activation leaves recording plots to Studio when the host has no widget decorators", () => {
+  globalThis.__witwin = { react: {} };
+  assert.doesNotThrow(() => activate({}));
+  delete globalThis.__witwin;
+});

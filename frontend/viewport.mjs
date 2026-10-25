@@ -273,6 +273,8 @@ function createRecordingWidget(host, React) {
 export function activate(host) {
   const React = globalThis.__witwin?.react;
   if (!React) throw new Error("WT Radar replay requires the Studio React singleton.");
+  // Studios without widget decorators render recording plots with their own widget.
+  if (typeof host.registerWidgetDecorator !== "function") return;
   host.registerWidgetDecorator({
     id: "witwin.radar.recordingPlot",
     widgetType: "plot",
