@@ -570,6 +570,67 @@ def validated_cached_motion(request, times, sampler):
     return positions, velocities
 
 
+MAX_SOLVE_SITE_EXCLUSIONS = 16
+_LEG_ROW_GAP = re.compile(r"site (\d+) has no (?:inbound|outbound) leg row")
+
+
+class _SolveTopologyGap(Exception):
+    """The native solve's frozen topology has no leg row for one active site."""
+
+    def __init__(self, site_id, frame_index):
+        super().__init__(f"site {site_id} lost at frame {frame_index}")
+        self.site_id = int(site_id)
+        self.frame_index = int(frame_index)
+
+
+def _topology_gap_site(exc, active_site_ids):
+    """Return the active site a native leg-row error names, if any."""
+    active = {int(value) for value in active_site_ids}
+    current, seen = exc, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        match = _LEG_ROW_GAP.search(str(current))
+        if match and int(match.group(1)) in active:
+            return int(match.group(1))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _exclude_solve_site(topology, sampler, site_id, frame_index):
+    """Move one site from the active set to the interval-global occluded set."""
+    rank = int(site_id) - 3_000_000
+    remaining = [int(value) for value in topology["active_site_ranks"] if int(value) != rank]
+    declared = int(topology["declared_site_count"])
+    occluded_sites = list(topology.get("occluded_sites", ())) + [{
+        "site_id": int(site_id),
+        "site_rank": rank,
+        "bone_name": str(sampler.site_names[rank]),
+        "vertex_index": int(sampler.vertex_ids[rank]),
+        "visible_frame_count": None,
+        "excluded_by": "native_solve_frozen_topology",
+    }]
+    if not remaining:
+        raise AnimationTopologyError(
+            "The native solve lost every skin site from its frozen topology. "
+            "No completed result published.",
+            detail={"code": "sensor_embedded_or_all_sites_occluded", "declared_site_count": declared,
+                    "occluded_sites": occluded_sites, "frames": topology.get("frames", [])},
+        )
+    return {
+        **topology,
+        "active_site_count": len(remaining),
+        "occluded_site_count": declared - len(remaining),
+        "active_site_ranks": remaining,
+        "active_site_ids": [3_000_000 + value for value in remaining],
+        "occluded_sites": occluded_sites,
+        "visibility_coverage": len(remaining) / declared,
+        "visibility_quality": "degraded_interval_global_subset",
+        "solve_exclusions": list(topology.get("solve_exclusions", ())) + [
+            {"site_id": int(site_id), "site_rank": rank, "frame_index": int(frame_index)},
+        ],
+    }
+
+
 def solve_animation(ctx, scene, request):
     from witwin.radar import Motion, PointTargets
     from .environment_clutter import (
@@ -606,152 +667,176 @@ def solve_animation(ctx, scene, request):
         environment = single_bounce_environment_cube(
             radar, world, polarization=meta["world_polarization"],
         )
-    active_ranks = np.asarray(topology["active_site_ranks"], dtype=np.int64)
-    active_site_ids = tuple(topology["active_site_ids"])
-    rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
-    for key in ("snapshot_time_s", "target_local_point", "target_world_point_m", "velocity_m_per_s"):
-        meta.pop(key, None)
-    target_reflections = target_reflection_depth(request)
-    motion_sampling = target_motion_sampling(request)
-    target_components = ["los"] + (["reflection"] if target_reflections else [])
-    active_rank_set = set(active_ranks.tolist())
-    target_evidence = [{
-        **target,
-        "active_site_count": sum(
-            rank in active_rank_set
-            for rank in range(target["site_start"], target["site_end"])
-        ),
-    } for target in sampler.target_slices]
-    meta.update(model=MODEL, motion_fingerprint=authored_motion_fingerprint, frame_count=len(times), fps=float(request["fps"]),
-                duration_s=float(request["duration_s"]),
-                targets=target_evidence,
-                declared_site_vertex_indices=sampler.vertex_ids.tolist(),
-                declared_site_bone_names=sampler.site_names,
-                available_bone_site_count=sampler.available_site_count,
-                target_site_budget=sampler.site_budget,
-                site_selection="anatomical_priority_then_bind_pose_coverage",
-                site_vertex_indices=sampler.vertex_ids[active_ranks].tolist(),
-                site_bone_names=[sampler.site_names[rank] for rank in active_ranks],
-                active_site_ids=list(active_site_ids),
-                topology_preflight=topology, rcs_per_site_m2=rcs_per_site,
-                components=["los", "reflection"], max_depth=1,
-                target_propagation={
-                    "components": target_components,
-                    "max_depth": target_reflections,
-                    "multipath_enabled": bool(target_reflections),
-                    "motion_sampling": motion_sampling,
-                },
-                environment_reflection={
-                    "model": "radar04_native_single_bounce",
-                    "max_depth": 1,
-                    "reflected_path_count": environment.reflected_path_count,
-                    "material_slot_count": environment.material_slot_count,
-                    "coherent_with_target": True,
-                },
-                native_preflight_reused=preflight_reused,
-                native_motion_samples_reused=motion_samples_reused,
-                **velocity_evidence,
-                velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
-                slow_time_model=f"Radar 0.4 public {motion_sampling} motion sampling per Studio frame",
-                limitations="Uncalibrated equal-RCS surface samples, not full electromagnetic skin. "
-                            "Only sites with native inbound+outbound paths throughout the interval are active; "
-                            "occluded sites keep their original RCS share and are not renormalized. "
-                            "Static room geometry contributes native single-bounce specular reflections; "
-                            + ("dynamic target-related single-bounce multipath is enabled; "
-                               if target_reflections else "dynamic target-related multipath is disabled; ")
-                            + "no diffuse or multi-bounce room clutter and no cat self-occlusion. "
-                            "Frozen weights within each CPI; no acceleration/range migration within CPI.",
-                versions={name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")})
-    if request.get("input_fingerprint"):
-        meta["input_fingerprint"] = str(request["input_fingerprint"])
-    from .fidelity_ab import attach_fidelity_provenance
-    meta = attach_fidelity_provenance(
-        meta, request,
-        authored_motion_fingerprint=authored_motion_fingerprint,
-    )
-    ctx.log(f"Studio skin animation model: {meta}")
-    cubes = None
-    poses = poses[:, active_ranks]
-    velocities = velocities[:, active_ranks]
-    timeline = np.asarray(times, dtype=np.float64)
+    all_poses, all_velocities, base_meta = poses, velocities, meta
 
-    def trajectory(sample_time):
-        value = float(sample_time)
-        if value <= timeline[0]:
-            index = 0
-        elif value >= timeline[-1]:
-            index = len(timeline) - 1
-        else:
-            index = int(np.searchsorted(timeline, value, side="right")) - 1
-        position = poses[index] + velocities[index] * (value - timeline[index])
-        return torch.as_tensor(position, dtype=torch.float32, device=radar.device).contiguous()
-
-    targets = PointTargets(
-        positions=torch.as_tensor(poses[0], dtype=torch.float32, device=radar.device).contiguous(),
-        rcs=float(rcs_per_site),
-        trajectory=trajectory,
-        ids=active_site_ids,
-    )
-    stream = iter(radar.stream(
-        world,
-        targets,
-        times=times,
-        los=True,
-        reflections=target_reflections,
-        motion=target_motion_policy(Motion, request),
-    ))
-    diagnostics = []
-    result = None
-    for index, time_s in enumerate(times):
-        ctx.throw_if_cancelled()
-        try:
-            pending_fraction = 0.15 + 0.8 * index / len(times)
-            with progress_heartbeat(
-                ctx,
-                pending_fraction,
-                f"Simulating Radar frame {index + 1}/{len(times)}",
-            ):
-                simulation = next(stream)
-            result = processing_cube(simulation, radar)
-            result = replace(
-                result,
-                data=add_environment_to_fmcw_result(radar, result.data, environment),
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Animation failed at frame {index}/{len(times)}, t={time_s:.6f}s: {exc}. "
-                               "No completed result published; native error retained.") from exc
-        p, v = poses[index], velocities[index]
-        radar_position = np.asarray(radar.position, dtype=np.float64)
-        displacement = p - radar_position
-        distance = np.linalg.norm(displacement, axis=1)
-        radial_speed = np.sum(v * displacement, axis=1) / np.maximum(distance, 1e-12)
-        stats = {
-            "delay_rate_abs_max": float(np.max(2.0 * np.abs(radial_speed) / 299_792_458.0)),
-            "path_count": int(simulation.last_radar_paths.path_count),
-            "sample_count": len(simulation.sample_times_s[0]),
-            "path_set_complete": bool(simulation.path_set_complete),
-            "motion_sampling": simulation.motion_sampling,
-            "chirp_change_max": float(
-                (simulation.cube - simulation.cube[..., :1, :]).abs().max()
+    def solve_active_sites(topology):
+        meta = dict(base_meta)
+        active_ranks = np.asarray(topology["active_site_ranks"], dtype=np.int64)
+        active_site_ids = tuple(topology["active_site_ids"])
+        rcs_per_site = meta["rcs_m2"] / topology["declared_site_count"]
+        for key in ("snapshot_time_s", "target_local_point", "target_world_point_m", "velocity_m_per_s"):
+            meta.pop(key, None)
+        target_reflections = target_reflection_depth(request)
+        motion_sampling = target_motion_sampling(request)
+        target_components = ["los"] + (["reflection"] if target_reflections else [])
+        active_rank_set = set(active_ranks.tolist())
+        target_evidence = [{
+            **target,
+            "active_site_count": sum(
+                rank in active_rank_set
+                for rank in range(target["site_start"], target["site_end"])
             ),
-            "nonzero_return": bool((simulation.cube.abs() > 0).any()),
-            "compile_count": int(simulation.compile_count),
-            "discovery_count": int(simulation.discovery_count),
-        }
-        if cubes is None:
-            cubes = torch.empty((len(times), *result.data.shape), dtype=result.data.dtype, device="cpu")
-        cubes[index].copy_(result.data)
-        diagnostics.append(stats)
-        completed_fraction = 0.15 + 0.8 * (index + 1) / len(times)
-        ctx.progress(completed_fraction, f"GPU frame {index+1}/{len(times)} | Studio t={time_s:.3f}s")
-    if result is None or cubes is None:
-        raise RuntimeError("Radar animation produced no frames.")
-    axes = replace(result.axes, range_m=result.axes.range_m.cpu(), velocity_mps=result.axes.velocity_mps.cpu())
-    meta["frame_diagnostics"] = diagnostics
-    meta["tx_positions_m"] = radar.tx_pos.detach().cpu().tolist()
-    meta["rx_positions_m"] = radar.rx_pos.detach().cpu().tolist()
-    meta["device"] = str(radar.device)
-    return AnimationResult(cubes, axes, times, poses, velocities, meta)
+        } for target in sampler.target_slices]
+        meta.update(model=MODEL, motion_fingerprint=authored_motion_fingerprint, frame_count=len(times), fps=float(request["fps"]),
+                    duration_s=float(request["duration_s"]),
+                    targets=target_evidence,
+                    declared_site_vertex_indices=sampler.vertex_ids.tolist(),
+                    declared_site_bone_names=sampler.site_names,
+                    available_bone_site_count=sampler.available_site_count,
+                    target_site_budget=sampler.site_budget,
+                    site_selection="anatomical_priority_then_bind_pose_coverage",
+                    site_vertex_indices=sampler.vertex_ids[active_ranks].tolist(),
+                    site_bone_names=[sampler.site_names[rank] for rank in active_ranks],
+                    active_site_ids=list(active_site_ids),
+                    topology_preflight=topology, rcs_per_site_m2=rcs_per_site,
+                    components=["los", "reflection"], max_depth=1,
+                    target_propagation={
+                        "components": target_components,
+                        "max_depth": target_reflections,
+                        "multipath_enabled": bool(target_reflections),
+                        "motion_sampling": motion_sampling,
+                    },
+                    environment_reflection={
+                        "model": "radar04_native_single_bounce",
+                        "max_depth": 1,
+                        "reflected_path_count": environment.reflected_path_count,
+                        "material_slot_count": environment.material_slot_count,
+                        "coherent_with_target": True,
+                    },
+                    native_preflight_reused=preflight_reused,
+                    native_motion_samples_reused=motion_samples_reused,
+                    **velocity_evidence,
+                    velocity_method="Studio LINEAR timeline + CPU skinning; finite difference <=1ms, right-hand at knots",
+                    slow_time_model=f"Radar 0.4 public {motion_sampling} motion sampling per Studio frame",
+                    limitations="Uncalibrated equal-RCS surface samples, not full electromagnetic skin. "
+                                "Only sites with native inbound+outbound paths throughout the interval are active; "
+                                "occluded sites keep their original RCS share and are not renormalized. "
+                                "Static room geometry contributes native single-bounce specular reflections; "
+                                + ("dynamic target-related single-bounce multipath is enabled; "
+                                   if target_reflections else "dynamic target-related multipath is disabled; ")
+                                + "no diffuse or multi-bounce room clutter and no cat self-occlusion. "
+                                "Frozen weights within each CPI; no acceleration/range migration within CPI.",
+                    versions={name: version(name) for name in ("witwin-radar", "witwin-channel", "witwin")})
+        if request.get("input_fingerprint"):
+            meta["input_fingerprint"] = str(request["input_fingerprint"])
+        from .fidelity_ab import attach_fidelity_provenance
+        meta = attach_fidelity_provenance(
+            meta, request,
+            authored_motion_fingerprint=authored_motion_fingerprint,
+        )
+        ctx.log(f"Studio skin animation model: {meta}")
+        cubes = None
+        poses = all_poses[:, active_ranks]
+        velocities = all_velocities[:, active_ranks]
+        timeline = np.asarray(times, dtype=np.float64)
+
+        def trajectory(sample_time):
+            value = float(sample_time)
+            if value <= timeline[0]:
+                index = 0
+            elif value >= timeline[-1]:
+                index = len(timeline) - 1
+            else:
+                index = int(np.searchsorted(timeline, value, side="right")) - 1
+            position = poses[index] + velocities[index] * (value - timeline[index])
+            return torch.as_tensor(position, dtype=torch.float32, device=radar.device).contiguous()
+
+        targets = PointTargets(
+            positions=torch.as_tensor(poses[0], dtype=torch.float32, device=radar.device).contiguous(),
+            rcs=float(rcs_per_site),
+            trajectory=trajectory,
+            ids=active_site_ids,
+        )
+        stream = iter(radar.stream(
+            world,
+            targets,
+            times=times,
+            los=True,
+            reflections=target_reflections,
+            motion=target_motion_policy(Motion, request),
+        ))
+        diagnostics = []
+        result = None
+        for index, time_s in enumerate(times):
+            ctx.throw_if_cancelled()
+            try:
+                pending_fraction = 0.15 + 0.8 * index / len(times)
+                with progress_heartbeat(
+                    ctx,
+                    pending_fraction,
+                    f"Simulating Radar frame {index + 1}/{len(times)}",
+                ):
+                    simulation = next(stream)
+                result = processing_cube(simulation, radar)
+                result = replace(
+                    result,
+                    data=add_environment_to_fmcw_result(radar, result.data, environment),
+                )
+            except Exception as exc:
+                gap_site = _topology_gap_site(exc, active_site_ids)
+                if gap_site is not None:
+                    raise _SolveTopologyGap(gap_site, index) from exc
+                raise RuntimeError(f"Animation failed at frame {index}/{len(times)}, t={time_s:.6f}s: {exc}. "
+                                   "No completed result published; native error retained.") from exc
+            p, v = poses[index], velocities[index]
+            radar_position = np.asarray(radar.position, dtype=np.float64)
+            displacement = p - radar_position
+            distance = np.linalg.norm(displacement, axis=1)
+            radial_speed = np.sum(v * displacement, axis=1) / np.maximum(distance, 1e-12)
+            stats = {
+                "delay_rate_abs_max": float(np.max(2.0 * np.abs(radial_speed) / 299_792_458.0)),
+                "path_count": int(simulation.last_radar_paths.path_count),
+                "sample_count": len(simulation.sample_times_s[0]),
+                "path_set_complete": bool(simulation.path_set_complete),
+                "motion_sampling": simulation.motion_sampling,
+                "chirp_change_max": float(
+                    (simulation.cube - simulation.cube[..., :1, :]).abs().max()
+                ),
+                "nonzero_return": bool((simulation.cube.abs() > 0).any()),
+                "compile_count": int(simulation.compile_count),
+                "discovery_count": int(simulation.discovery_count),
+            }
+            if cubes is None:
+                cubes = torch.empty((len(times), *result.data.shape), dtype=result.data.dtype, device="cpu")
+            cubes[index].copy_(result.data)
+            diagnostics.append(stats)
+            completed_fraction = 0.15 + 0.8 * (index + 1) / len(times)
+            ctx.progress(completed_fraction, f"GPU frame {index+1}/{len(times)} | Studio t={time_s:.3f}s")
+        if result is None or cubes is None:
+            raise RuntimeError("Radar animation produced no frames.")
+        axes = replace(result.axes, range_m=result.axes.range_m.cpu(), velocity_mps=result.axes.velocity_mps.cpu())
+        meta["frame_diagnostics"] = diagnostics
+        meta["tx_positions_m"] = radar.tx_pos.detach().cpu().tolist()
+        meta["rx_positions_m"] = radar.rx_pos.detach().cpu().tolist()
+        meta["device"] = str(radar.device)
+        return AnimationResult(cubes, axes, times, poses, velocities, meta)
+
+    # The native solve is the final authority on reachability. Adaptive motion
+    # freezes its topology on its own cadence, so a site the chirp preflight saw
+    # at every Studio frame (a foot grazing the floor) can still lose its leg
+    # row mid-solve. Drop that site for the whole interval, the same rule the
+    # preflight applies, and restart rather than fail the measurement.
+    while True:
+        try:
+            return solve_active_sites(topology)
+        except _SolveTopologyGap as gap:
+            if len(topology.get("solve_exclusions", ())) >= MAX_SOLVE_SITE_EXCLUSIONS:
+                raise RuntimeError(
+                    f"Animation failed: native solve lost more than {MAX_SOLVE_SITE_EXCLUSIONS} "
+                    "skin sites from its frozen topology. No completed result published."
+                ) from gap
+            topology = _exclude_solve_site(topology, sampler, gap.site_id, gap.frame_index)
+            ctx.progress(0.15, f"Excluding skin site {gap.site_id} lost by the native solve; restarting")
 
 
 def animation_view(result, params):
