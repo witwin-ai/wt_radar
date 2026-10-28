@@ -235,3 +235,50 @@ def test_real_gpu_repeat_and_moved_sensor(scene, cuda_ready):
         peak = np.unravel_index(np.asarray(payload["magnitude"]).argmax(), np.shape(payload["magnitude"]))
         assert abs(payload["range_m"][peak[1]] - expected_range) <= result.processing.axes.range_bin_m
         assert abs(payload["velocity_mps"][peak[0]]) < 1e-8
+
+
+def _floor_material(world_scene):
+    (floor,) = [s for s in world_scene.structures if s.metadata["studio_object_id"] == "floor"]
+    return floor.material
+
+
+def _set_material(scene, name, eps_r, sigma_e):
+    material = scene.get_object("floor").get_component("Material")
+    material.material_name = name
+    material.eps_r = [eps_r, 0.0]
+    material.sigma_e = sigma_e
+
+
+def test_itu_room_material_is_evaluated_at_the_radar_carrier(scene):
+    # Studio stores the ITU-R P.2040-1 nominal 1 GHz values; at 77 GHz the
+    # plasterboard conductivity is sigma = c * f^d = 0.0116 * 77^0.7076.
+    original, component = scene
+    _set_material(original, "Plasterboard", 2.94, 0.0116)
+    world, _, meta = prepare_snapshot(copy_for_solver(original), snapshot_request(component))
+    material = _floor_material(world)
+    assert material.eps_r == pytest.approx(2.94)
+    assert material.sigma_e == pytest.approx(0.0116 * 77.0 ** 0.7076, rel=1e-6)
+    assert meta["room_material_frequency_hz"] == component.fc
+    assert original.get_object("floor").get_component("Material").sigma_e == pytest.approx(0.0116)
+
+
+def test_itu_conversion_follows_the_carrier_not_a_fixed_band(scene):
+    original, component = scene
+    _set_material(original, "Floorboard", 3.66, 0.0044)
+    component.fc = 60e9
+    world, _, _ = prepare_snapshot(copy_for_solver(original), snapshot_request(component))
+    assert _floor_material(world).sigma_e == pytest.approx(0.0044 * 60.0 ** 1.3515, rel=1e-6)
+
+
+@pytest.mark.parametrize("name,eps_r,sigma_e", [
+    ("Custom", 10.0, 0.0),           # hand-authored: no coefficients to scale
+    ("Plasterboard", 2.5, 0.02),     # named but edited away from the nominal values
+    ("Wet ground", 30.0, 0.15),      # ITU ground models hold only from 1 to 10 GHz
+])
+def test_materials_without_a_valid_itu_model_keep_their_stored_values(scene, name, eps_r, sigma_e):
+    original, component = scene
+    _set_material(original, name, eps_r, sigma_e)
+    world, _, _ = prepare_snapshot(copy_for_solver(original), snapshot_request(component))
+    material = _floor_material(world)
+    assert material.eps_r == pytest.approx(eps_r)
+    assert material.sigma_e == pytest.approx(sigma_e)

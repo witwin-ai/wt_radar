@@ -145,7 +145,8 @@ def prepare_snapshot(scene, request):
             raise ValueError(f"Additional visible SkinnedMesh {obj.id} has no declared scattering model.")
         if obj.get_component("PlatformGeometry") is not None and obj.get_component("Mesh") is None:
             raise ValueError(f"PlatformGeometry-only object {obj.id} is not supported by this Mesh snapshot adapter.")
-    world = export_static_mesh_scene(scene, excluded_object_ids=excluded)
+    world = export_static_mesh_scene(scene, excluded_object_ids=excluded,
+                                     frequency_hz=float(component.fc))
     local_point = np.asarray(vec(component.snapshot_local_point), dtype=np.float32)
     point = (matrices[target_id] @ np.append(local_point, np.float32(1)))[:3]
     sensor_matrix = matrices[str(sensor_obj.id)]
@@ -170,6 +171,7 @@ def prepare_snapshot(scene, request):
         "velocity_m_per_s": [0.0, 0.0, 0.0], "components": ["los", "reflection"], "max_depth": 1,
         "room_mesh_count": world.mesh_count, "room_triangle_count": world.face_count,
         "room_object_ids": sorted(world.object_to_structure_id),
+        "room_material_frequency_hz": world.material_frequency_hz,
         "radar_config": config,
         "limitations": "One explicit RCS point, not skin scattering; frozen pose, no gait Doppler; "
                        "room geometry contributes native single-bounce specular reflections; no diffuse or "
