@@ -3,15 +3,18 @@
 This production adapter has no dependency on local experiment scripts. Meshes
 are baked with the full parent affine matrix, preserving scale and shear.
 """
+import dataclasses
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 
 
-def export_static_mesh_scene(scene, *, excluded_object_ids=()):
+def export_static_mesh_scene(scene, *, excluded_object_ids=(), frequency_hz=None):
+    """``frequency_hz`` evaluates nominal ITU materials at the radar carrier."""
     import witwin.core as wc
     from witwin_server.features.platform.bridge.material_map import MaterialMap
+    from .itu_frequency import itu_material_at
     from .snapshot import _hierarchy
 
     matrices, visible = _hierarchy(scene)
@@ -37,10 +40,16 @@ def export_static_mesh_scene(scene, *, excluded_object_ids=()):
             raise ValueError(f"Invalid room geometry: {oid}")
         vertices = (np.column_stack((vertices, np.ones(len(vertices)))) @ matrices[oid].T)[:, :3]
         sid = 10_000 + len(structures)
+        physical = MaterialMap.to_platform(material, material_id=sid + 100_000)
+        evaluated = (itu_material_at(material.material_name, physical.eps_r,
+                                     physical.sigma_e, frequency_hz)
+                     if frequency_hz is not None else None)
+        if evaluated is not None:
+            physical = dataclasses.replace(physical, eps_r=evaluated[0], sigma_e=evaluated[1])
         geometry = wc.Mesh(torch.tensor(vertices, dtype=torch.float32), torch.from_numpy(faces),
                            recenter=False, fill_mode="surface", topology_diagnostics=False)
         structures.append(wc.Structure(
-            geometry, MaterialMap.to_platform(material, material_id=sid + 100_000), name=str(obj.name),
+            geometry, physical, name=str(obj.name),
             structure_id=sid, material_id=sid + 100_000, assignment_id=sid + 200_000,
             surface_id=sid + 300_000, metadata={"studio_object_id": oid}))
         mapping[oid] = sid
@@ -48,4 +57,5 @@ def export_static_mesh_scene(scene, *, excluded_object_ids=()):
     # An empty Scene is a valid free-space measurement: the target is then
     # observed by line of sight only, with no room reflections.
     return SimpleNamespace(scene=wc.Scene(structures=tuple(structures)), mesh_count=len(structures),
-                           face_count=faces_count, object_to_structure_id=mapping)
+                           face_count=faces_count, object_to_structure_id=mapping,
+                           material_frequency_hz=frequency_hz)
