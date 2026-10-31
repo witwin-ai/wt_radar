@@ -166,3 +166,39 @@ def test_check_radar_output_runs_the_checks_on_a_project_result(scene, tmp_path)
         asyncio.run(run(tools, "check_radar_output", {
             "scene_id": original.scene_id, "radar_object_id": "radar", "result_path": str(outside)}))
     assert getattr(raised.value, "code", "") == "result_path_outside_project"
+
+
+def test_installation_plan_predicts_the_peak_radial_speed_from_the_baked_motion(scene):
+    original, component = scene
+    make_rig(original, component)
+    original.remove_object("radar")
+    tools = register(original)
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": original.scene_id, "placement_mode": "automatic", "placement_objective": "installation",
+        "target_object_id": "target", "install_rule": {"profile": "fall"},
+    })
+    assert result["ok"], result
+    velocity = result["placement"]["velocity"]
+    assert velocity["checked"] is True
+    assert 0. < velocity["peak_radial_mps"] <= velocity["limit_mps"] < velocity["max_unambiguous_speed_mps"]
+    assert result["placement"]["rule"]["profile"] == "fall"
+
+    blocked = run(tools, "plan_sensor_placement", {
+        "scene_id": original.scene_id, "placement_mode": "automatic", "placement_objective": "installation",
+        "target_object_id": "target", "install_rule": {"profile": "fall", "max_speed_fraction": .01},
+    })
+    assert blocked["status"] == "blocked"
+    assert blocked["blockers"][0]["code"] == "RADAR_VELOCITY_ALIASING"
+
+
+def test_a_fall_key_event_selects_the_fall_profile(room):
+    scene, tools = room
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id, "placement_mode": "automatic", "placement_objective": "installation",
+        "key_events": [{"id": "impact", "kind": "fall_impact", "actor_kind": "person",
+                        "position_m": [2.5, 0., 2.0], "test_height_m": .3}],
+    })
+    assert result["ok"], result
+    assert result["placement"]["rule"]["profile"] == "fall"
+    assert result["placement"]["mount"]["position_m"][1] <= 1.3 + 1e-9
+    assert result["proposed_ensure_sensor_arguments"]["height_m"] <= 1.3

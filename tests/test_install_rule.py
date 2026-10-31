@@ -225,3 +225,64 @@ def test_occluders_ignore_hits_at_the_segment_end():
     points = np.array([[3.5, .45, 3.0], [3.5, .2, 3.0], [2.0, .5, 2.0]])
     blocked = occluders.segments_blocked(origin, points)
     assert blocked.tolist() == [False, True, False]
+
+
+# ---------------------------------------------------------------- fall profile
+
+
+def fan_samples(centre, speed, *, frames=3):
+    """Sites at one point moving at ``speed`` in every direction (no mount escapes aliasing)."""
+    directions = np.array([[x, y, z] for x in (-1, 0, 1) for y in (-1, 0, 1) for z in (-1, 0, 1)
+                           if (x, y, z) != (0, 0, 0)], dtype=float)
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    positions = np.repeat(np.asarray(centre, float)[None, None], frames, axis=0).repeat(len(directions), axis=1)
+    velocities = np.repeat((directions * speed)[None], frames, axis=0)
+    return [{"object_id": "person", "times_s": np.arange(frames) / 10., "positions_m": positions,
+             "velocities_mps": velocities}]
+
+
+def test_fall_profile_mounts_at_torso_height_with_little_tilt():
+    rule = InstallRule.for_profile("fall")
+    assert rule.profile == "fall" and 1.0 <= rule.height_m <= 1.3
+    assert InstallRule.for_profile("fall", height_m=1.2).height_m == 1.2
+    result = install_rule.plan_installation(box_room(), rule=rule)
+    mount = result["mount"]
+    assert 1.0 - 1e-9 <= mount["position_m"][1] <= 1.3 + 1e-9
+    assert mount["tilt_deg"] < 20.
+    assert abs(mount["worst_normal_angle_deg"]) >= 35.
+    assert result["rule"]["profile"] == "fall"
+
+
+def test_profile_follows_the_key_event_kind():
+    assert install_rule.profile_for_events([{"id": "impact", "kind": "fall_impact"}]) == "fall"
+    assert install_rule.profile_for_events([{"id": "stop", "kind": "arrival"}]) == "default"
+    assert install_rule.profile_for_events([]) == "default"
+
+
+def test_mount_whose_line_of_sight_follows_a_fast_motion_is_rejected():
+    # A fall along +x in the middle of the room at 6 m/s: mounts looking along x alias.
+    samples = [{"object_id": "person", "times_s": np.array([0., .1]),
+                "positions_m": np.array([[[2.5, .6, 2.0]], [[2.6, .5, 2.0]]]),
+                "velocities_mps": np.array([[[6., -1., 0.]], [[6., -1., 0.]]])}]
+    rule = InstallRule.for_profile("fall")
+    result = install_rule.plan_installation(box_room(), rule=rule, motion_samples=samples,
+                                            max_radial_speed_mps=4.99)
+    velocity = result["velocity"]
+    assert velocity["limit_mps"] == pytest.approx(4.99 * rule.max_speed_fraction)
+    assert velocity["peak_radial_mps"] <= velocity["limit_mps"]
+    assert velocity["object_id"] == "person"
+    assert "velocity_aliasing" in result["rejected_counts"]
+    # The chosen mount looks across the motion: its line of sight is mostly along z.
+    x, _, z = result["mount"]["position_m"]
+    assert abs(z - 2.0) > abs(x - 2.55)
+
+
+def test_no_mount_below_the_unambiguous_speed_is_radar_velocity_aliasing():
+    with pytest.raises(InstallRuleError) as raised:
+        install_rule.plan_installation(box_room(), rule=InstallRule.for_profile("fall"),
+                                       motion_samples=fan_samples([2.5, .6, 2.], 8.), max_radial_speed_mps=4.99)
+    assert raised.value.code == "RADAR_VELOCITY_ALIASING"
+    detail = raised.value.detail
+    assert detail["best_peak_radial_mps"] > detail["limit_mps"]
+    assert detail["max_unambiguous_speed_mps"] == pytest.approx(4.99)
+    assert raised.value.next_step

@@ -23,6 +23,14 @@ from .los import LOS_METHOD, StaticMesh, StaticOccluders, static_meshes
 
 
 INSTALL_STYLES = ("auto", "wall", "corner")
+# Profile defaults; explicit rule fields override them. ``fall``: a falling body
+# moves mostly down and forward, so the Radar sits near torso height with little
+# tilt and is chosen to look across the motion (design addendum, 2026-10-31).
+INSTALL_PROFILES = {
+    "default": {},
+    "fall": {"height_m": 1.15, "height_span_m": .15, "aim_height_m": .5},
+}
+MOUNT_HEIGHT_STEP_M = .15
 WALL_STEP_M = .25
 CORNER_CLEARANCE_M = .3
 OPENING_CLEARANCE_M = .3
@@ -64,10 +72,17 @@ class InstallRule:
     normal_margin_deg: float = 5.
     range_m: tuple = (1., 6.)
     wall_standoff_m: float = .05
+    profile: str = "default"
+    # Mount heights tried: height_m +- this span in 0.15 m steps.
+    height_span_m: float = 0.
+    # Keep the predicted peak radial speed under this share of the unambiguous speed.
+    max_speed_fraction: float = .95
 
     def __post_init__(self):
         if self.style not in INSTALL_STYLES:
             raise ValueError(f"install style must be one of {INSTALL_STYLES}, got {self.style!r}")
+        if self.profile not in INSTALL_PROFILES:
+            raise ValueError(f"install profile must be one of {tuple(INSTALL_PROFILES)}, got {self.profile!r}")
         low, high = (float(value) for value in self.range_m)
         object.__setattr__(self, "range_m", (low, high))
         checks = {
@@ -77,20 +92,43 @@ class InstallRule:
             "normal_margin_deg": 0. <= self.normal_margin_deg <= 30.,
             "range_m": 0. <= low < high <= 30.,
             "wall_standoff_m": 0. <= self.wall_standoff_m <= .5,
+            "height_span_m": 0. <= self.height_span_m and .2 <= self.height_m - self.height_span_m
+            and self.height_m + self.height_span_m <= 3. and self.aim_height_m < self.height_m - self.height_span_m,
+            "max_speed_fraction": 0. < self.max_speed_fraction <= 1.,
         }
         bad = [name for name, ok in checks.items() if not ok]
         if bad:
             raise ValueError("invalid installation rule fields: " + ", ".join(bad))
 
     @classmethod
-    def from_dict(cls, value=None):
+    def for_profile(cls, profile="default", **overrides):
+        if profile not in INSTALL_PROFILES:
+            raise ValueError(f"install profile must be one of {tuple(INSTALL_PROFILES)}, got {profile!r}")
+        return cls(**{**INSTALL_PROFILES[profile], **overrides, "profile": profile})
+
+    @classmethod
+    def from_dict(cls, value=None, *, key_events=()):
+        """``profile`` ``auto`` (or omitted) follows the key events: a fall event selects ``fall``."""
         value = dict(value or {})
         unknown = set(value) - {item for item in cls.__dataclass_fields__}
         if unknown:
             raise ValueError("unknown installation rule fields: " + ", ".join(sorted(unknown)))
         if "range_m" in value:
             value["range_m"] = tuple(value["range_m"])
-        return cls(**value)
+        profile = value.pop("profile", "auto")
+        if profile == "auto":
+            profile = profile_for_events(key_events)
+        return cls.for_profile(profile, **value)
+
+    @property
+    def mount_heights_m(self):
+        if self.height_span_m <= 0.:
+            return (float(self.height_m),)
+        steps = int(math.floor(self.height_span_m / MOUNT_HEIGHT_STEP_M + 1e-9))
+        offsets = [step * MOUNT_HEIGHT_STEP_M for step in range(-steps, steps + 1)]
+        if steps * MOUNT_HEIGHT_STEP_M < self.height_span_m - 1e-9:
+            offsets = [-self.height_span_m] + offsets + [self.height_span_m]
+        return tuple(round(float(self.height_m + offset), 6) for offset in offsets)
 
     @property
     def exclusion_deg(self):
@@ -104,6 +142,14 @@ class InstallRule:
         payload = asdict(self)
         payload["range_m"] = list(self.range_m)
         return payload
+
+
+def profile_for_events(key_events):
+    """``fall`` when any key event is a fall, else ``default``."""
+    for event in key_events or ():
+        if str(event.get("kind") or "").lower().startswith("fall"):
+            return "fall"
+    return "default"
 
 
 # ----------------------------------------------------------------- geometry
@@ -429,7 +475,8 @@ def _position_blockers(geometry, position, actor_paths):
                                       "object_name": geometry.owners.get(mesh.object_id, mesh.name),
                                       "top_m": float(mesh.hi[1])}
     for path in actor_paths or ():
-        top = float(path.get("height_m", 1.8)) + geometry.floor_y
+        # ``top_y`` is a world height; ``height_m`` is above the floor.
+        top = float(path["top_y"]) if "top_y" in path else float(path.get("height_m", 1.8)) + geometry.floor_y
         if top < point[1] - .1:
             continue
         points = np.asarray(path["points_xz"], dtype=np.float64).reshape(-1, 2)
@@ -444,7 +491,6 @@ def _position_blockers(geometry, position, actor_paths):
 def mount_positions(geometry, room, rule, *, actor_paths=None):
     """Wall samples every 0.25 m and the four inner corners (design 7.1)."""
     faces = geometry.inner_faces(room)
-    height = geometry.floor_y + rule.height_m
     standoff = rule.wall_standoff_m
     candidates, rejected = [], []
 
@@ -456,43 +502,45 @@ def mount_positions(geometry, room, rule, *, actor_paths=None):
         else:
             rejected.append({**item, "reason": reason, "detail": detail})
 
-    if rule.style in {"auto", "wall"}:
-        for side, (fixed_axis, along_axis, inward) in _SIDES.items():
-            walls = _side_walls(geometry, room, side)
-            if along_axis == 0:
-                low, high = faces["west"], faces["east"]
-            else:
-                low, high = faces["south"], faces["north"]
-            for along in np.arange(low + CORNER_CLEARANCE_M, high - CORNER_CLEARANCE_M + 1e-9, WALL_STEP_M):
-                along = float(along)
-                position = [0., height, 0.]
-                position[fixed_axis] = faces[side] + (inward[0] + inward[1]) * standoff
-                position[along_axis] = along
-                item = {"style": "wall", "wall": side, "position_m": position, "inward_xz": list(inward)}
-                covered = walls and all(
-                    _wall_covers(walls, along_axis, along + offset, height)
-                    for offset in (-OPENING_CLEARANCE_M, 0., OPENING_CLEARANCE_M))
-                opening = _opening_near(geometry, room, side, along)
-                if not covered or opening is not None:
-                    detail = {"opening": asdict(opening)} if opening is not None else {"wall_missing": True}
-                    rejected.append({**item, "reason": "opening", "detail": detail})
+    for mount_height in rule.mount_heights_m:
+        height = geometry.floor_y + mount_height
+        if rule.style in {"auto", "wall"}:
+            for side, (fixed_axis, along_axis, inward) in _SIDES.items():
+                walls = _side_walls(geometry, room, side)
+                if along_axis == 0:
+                    low, high = faces["west"], faces["east"]
+                else:
+                    low, high = faces["south"], faces["north"]
+                for along in np.arange(low + CORNER_CLEARANCE_M, high - CORNER_CLEARANCE_M + 1e-9, WALL_STEP_M):
+                    along = float(along)
+                    position = [0., height, 0.]
+                    position[fixed_axis] = faces[side] + (inward[0] + inward[1]) * standoff
+                    position[along_axis] = along
+                    item = {"style": "wall", "wall": side, "position_m": position, "inward_xz": list(inward)}
+                    covered = walls and all(
+                        _wall_covers(walls, along_axis, along + offset, height)
+                        for offset in (-OPENING_CLEARANCE_M, 0., OPENING_CLEARANCE_M))
+                    opening = _opening_near(geometry, room, side, along)
+                    if not covered or opening is not None:
+                        detail = {"opening": asdict(opening)} if opening is not None else {"wall_missing": True}
+                        rejected.append({**item, "reason": "opening", "detail": detail})
+                        continue
+                    accept(item)
+        if rule.style in {"auto", "corner"}:
+            for name, (x_side, z_side) in {"south_west": ("west", "south"), "south_east": ("east", "south"),
+                                           "north_west": ("west", "north"),
+                                           "north_east": ("east", "north")}.items():
+                nx, nz = _SIDES[x_side][2][0], _SIDES[z_side][2][1]
+                position = [faces[x_side] + nx * standoff, height, faces[z_side] + nz * standoff]
+                bisector = [nx / math.sqrt(2.), nz / math.sqrt(2.)]
+                item = {"style": "corner", "wall": name, "position_m": position, "inward_xz": bisector}
+                near_x = _opening_near(geometry, room, z_side, faces[x_side])
+                near_z = _opening_near(geometry, room, x_side, faces[z_side])
+                if near_x is not None or near_z is not None:
+                    rejected.append({**item, "reason": "opening",
+                                     "detail": {"opening": asdict(near_x or near_z)}})
                     continue
                 accept(item)
-    if rule.style in {"auto", "corner"}:
-        for name, (x_side, z_side) in {"south_west": ("west", "south"), "south_east": ("east", "south"),
-                                       "north_west": ("west", "north"),
-                                       "north_east": ("east", "north")}.items():
-            nx, nz = _SIDES[x_side][2][0], _SIDES[z_side][2][1]
-            position = [faces[x_side] + nx * standoff, height, faces[z_side] + nz * standoff]
-            bisector = [nx / math.sqrt(2.), nz / math.sqrt(2.)]
-            item = {"style": "corner", "wall": name, "position_m": position, "inward_xz": bisector}
-            near_x = _opening_near(geometry, room, z_side, faces[x_side])
-            near_z = _opening_near(geometry, room, x_side, faces[z_side])
-            if near_x is not None or near_z is not None:
-                rejected.append({**item, "reason": "opening",
-                                 "detail": {"opening": asdict(near_x or near_z)}})
-                continue
-            accept(item)
     return candidates, rejected
 
 
@@ -897,9 +945,55 @@ def _summarize_rejections(rejected, per_reason=3):
     return counts, examples
 
 
+def peak_radial_speed(position, motion_samples):
+    """Largest |radial speed| of any sampled site as seen from ``position``.
+
+    ``motion_samples``: ``[{object_id, times_s (F,), positions_m (F, S, 3),
+    velocities_mps (F, S, 3)}]``, the same frame samples the native solver
+    checks against the unambiguous velocity.
+    """
+    point = np.asarray(position, dtype=np.float64)
+    best = {"peak_radial_mps": 0., "object_id": None, "t_s": None, "site_index": None}
+    for item in motion_samples or ():
+        sites = np.asarray(item["positions_m"], dtype=np.float64)
+        velocity = np.asarray(item["velocities_mps"], dtype=np.float64)
+        if not sites.size:
+            continue
+        line = sites - point
+        distance = np.maximum(np.linalg.norm(line, axis=-1), 1e-9)
+        radial = np.abs(np.sum(velocity * line, axis=-1) / distance)
+        frame, site = np.unravel_index(int(np.argmax(radial)), radial.shape)
+        if radial[frame, site] > best["peak_radial_mps"]:
+            times = np.asarray(item.get("times_s", np.arange(len(sites))), dtype=np.float64)
+            best = {"peak_radial_mps": float(radial[frame, site]), "object_id": str(item.get("object_id")),
+                    "t_s": float(times[frame]), "site_index": int(site)}
+    return best
+
+
+def _across_motion(position, key_events):
+    """For fall events with ``direction_xz``: the smallest |sin| between sight line and fall direction."""
+    values = []
+    for event in key_events:
+        direction = event.get("direction_xz")
+        if direction is None or not str(event.get("kind") or "").lower().startswith("fall"):
+            continue
+        direction = np.asarray(direction, dtype=np.float64)
+        sight = np.asarray([event["position_m"][0] - position[0], event["position_m"][2] - position[2]])
+        norm = np.linalg.norm(direction) * np.linalg.norm(sight)
+        if norm > 1e-9:
+            values.append(abs(float(direction[0] * sight[1] - direction[1] * sight[0])) / norm)
+    return min(values) if values else None
+
+
 def plan_installation(scene=None, *, rule=None, key_events=(), actor_paths=None, geometry=None,
-                      require_all_events=True, room_index=None):
-    """Choose the installation mount; read-only. Raises :class:`InstallRuleError`."""
+                      require_all_events=True, room_index=None, motion_samples=None,
+                      max_radial_speed_mps=None):
+    """Choose the installation mount; read-only. Raises :class:`InstallRuleError`.
+
+    With ``motion_samples`` and ``max_radial_speed_mps`` every mount position is
+    refused whose predicted peak radial speed exceeds ``max_speed_fraction`` of
+    the unambiguous speed, before any native work (RADAR_VELOCITY_ALIASING).
+    """
     rule = rule or InstallRule()
     if geometry is None:
         geometry = room_geometry_from_scene(scene)
@@ -920,9 +1014,18 @@ def plan_installation(scene=None, *, rule=None, key_events=(), actor_paths=None,
                     "rejected_mounts": examples})
     raster = _raster(geometry, room)
     doors = _room_doors(geometry, room)
+    check_velocity = bool(motion_samples) and max_radial_speed_mps is not None
+    limit = float(max_radial_speed_mps) * rule.max_speed_fraction if check_velocity else None
+    fastest = []
     valid = []
     for candidate in positions:
         position = candidate["position_m"]
+        speed = peak_radial_speed(position, motion_samples) if check_velocity else None
+        if speed is not None and speed["peak_radial_mps"] > limit:
+            fastest.append((speed["peak_radial_mps"], position, speed))
+            rejected.append({**candidate, "reason": "velocity_aliasing",
+                             "detail": {**speed, "limit_mps": limit}})
+            continue
         visibility = _zone_visibility(geometry, room, raster, position)
         feet = _plane_feet(geometry, position)
         for offset, heading in _headings(candidate):
@@ -952,11 +1055,32 @@ def plan_installation(scene=None, *, rule=None, key_events=(), actor_paths=None,
             mount.update(worst_normal_angle_deg=normal["worst_normal_angle_deg"],
                          worst_normal_surface=normal["surface"])
             mount["index"] = len(valid)
-            score = (sum(item["in_zone"] for item in events), round(fraction, 2),
+            # A fall profile prefers the mount that looks most across the motion:
+            # the smallest predicted radial speed, else the fall direction given.
+            across = ()
+            if rule.profile == "fall":
+                if speed is not None:
+                    across = (-round(speed["peak_radial_mps"] / limit, 2),)
+                else:
+                    value = _across_motion(position, key_events)
+                    across = (round(value, 2),) if value is not None else ()
+            score = (sum(item["in_zone"] for item in events), *across, round(fraction, 2),
                      round(door_distance, 1), -mount["index"])
             valid.append({"mount": mount, "zones": zones, "events": events, "score": score,
-                          "zone_fraction": fraction, "door_distance_m": door_distance})
+                          "zone_fraction": fraction, "door_distance_m": door_distance, "speed": speed})
     counts, examples = _summarize_rejections(rejected)
+    if check_velocity and len(fastest) == len(positions):
+        peak, best_position, speed = min(fastest, key=lambda item: item[0])
+        raise InstallRuleError(
+            "RADAR_VELOCITY_ALIASING",
+            f"Every mount sees a radial speed of at least {peak:.2f} m/s, above {limit:.2f} m/s "
+            f"({rule.max_speed_fraction:.0%} of the {float(max_radial_speed_mps):.2f} m/s unambiguous speed).",
+            next_step=("Use the fall profile (a lower, side mount), slow the motion, or shorten the chirp period "
+                       "to raise the unambiguous speed."),
+            detail={"room": asdict(room), "best_peak_radial_mps": peak, "best_position_m": best_position,
+                    "object_id": speed["object_id"], "t_s": speed["t_s"], "limit_mps": limit,
+                    "max_unambiguous_speed_mps": float(max_radial_speed_mps),
+                    "profile": rule.profile, "rejected_counts": counts})
     usable = [item for item in valid if item["zones"]["person"].area_m2 > 0.]
     if not usable:
         raise InstallRuleError(
@@ -993,10 +1117,15 @@ def plan_installation(scene=None, *, rule=None, key_events=(), actor_paths=None,
         "rejected_counts": counts,
         "rejected_mounts": examples,
         "score": list(best["score"]),
+        "velocity": ({"checked": True, **best["speed"], "limit_mps": limit,
+                      "max_unambiguous_speed_mps": float(max_radial_speed_mps),
+                      "max_speed_fraction": rule.max_speed_fraction}
+                     if check_velocity else {"checked": False}),
     }
 
 
 __all__ = [
+    "INSTALL_PROFILES",
     "InstallRule",
     "InstallRuleError",
     "RoomGeometry",
@@ -1007,8 +1136,10 @@ __all__ = [
     "event_test_point",
     "make_mount",
     "mount_positions",
+    "peak_radial_speed",
     "plan_installation",
     "planar_normal_check",
+    "profile_for_events",
     "room_geometry_from_scene",
     "sensing_zones",
 ]
