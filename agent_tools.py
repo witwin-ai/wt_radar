@@ -1729,6 +1729,10 @@ LABEL_KEY_EVENTS_PROPERTY = {
 
 # Scenario default (design 5.4): clip length minus 0.2 s at 10 fps.
 _INSTALLATION_FPS = 10.0
+# Velocities for the aliasing check are sampled this densely over the measured
+# interval, so a fall peak between 10 fps Radar frames is not missed and the
+# chosen mount holds at any Radar FPS up to the Studio maximum.
+_VELOCITY_SAMPLE_FPS = 30.0
 _INSTALLATION_TAIL_S = 0.2
 
 
@@ -1772,12 +1776,20 @@ def _plan_installation(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
          if key in {"id", "actor_kind", "position_m", "test_height_m", "kind", "direction_xz"}}
         for event in args.get("key_events") or ()
     ]
+    from .install_rule import InstallRuleError
+
     motion = _installation_motion(scene, args)
-    plan = plan_installation(scene, rule=rule, key_events=events, room_index=args.get("room_index"),
-                             actor_paths=motion["actor_paths"], motion_samples=motion["samples"],
-                             max_radial_speed_mps=motion["max_unambiguous_speed_mps"])
+    try:
+        plan = plan_installation(scene, rule=rule, key_events=events, room_index=args.get("room_index"),
+                                 actor_paths=motion["actor_paths"], motion_samples=motion["samples"],
+                                 max_radial_speed_mps=motion["max_unambiguous_speed_mps"])
+    except InstallRuleError as exc:
+        if exc.code == "RADAR_VELOCITY_ALIASING":
+            exc.detail.update(interval=motion["interval"], sample_fps=_VELOCITY_SAMPLE_FPS)
+        raise
     plan["mount"]["rotation_euler_zxy_rad"] = _look_at_euler(plan["position_m"], plan["aim_point_m"])
-    plan["velocity"]["interval"] = motion["interval"]
+    if plan["velocity"]["checked"]:
+        plan["velocity"].update(interval=motion["interval"], sample_fps=_VELOCITY_SAMPLE_FPS)
     return plan
 
 
@@ -1806,9 +1818,12 @@ def _installation_motion(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
         return empty
     try:
         sampler = MultiTargetSkinSampler(scene, target_specs)
-        times = interval["start_s"] + np.arange(frames, dtype=np.float64) / interval["fps"]
-        if times[-1] > sampler.duration + 1e-7:
+        last = interval["start_s"] + (frames - 1) / interval["fps"]
+        if last > sampler.duration + 1e-7:
             return empty
+        dense = int(math.floor((last - interval["start_s"]) * _VELOCITY_SAMPLE_FPS + 1e-9)) + 1
+        times = np.union1d(interval["start_s"] + np.arange(frames, dtype=np.float64) / interval["fps"],
+                           interval["start_s"] + np.arange(dense, dtype=np.float64) / _VELOCITY_SAMPLE_FPS)
         sampled = [sampler.sample(float(t)) for t in times]
     except (ValueError, RuntimeError):
         return empty
