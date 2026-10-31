@@ -79,6 +79,8 @@ def label_frames(*, radar_position, forward, up, times_s, positions_by_frame, ta
         root = points[:, sites].mean(axis=1)
         root_azimuth, root_elevation = antenna_angles(position, forward, root, up=up)
         root_range = np.linalg.norm(root - position, axis=1)
+        speed = (np.linalg.norm(np.gradient(root, times, axis=0), axis=1) if len(times) > 1
+                 else np.zeros(len(times)))
         visible = (in_beam[:, sites] & in_range[:, sites] & line_of_sight[:, sites]).mean(axis=1)
         beam_share = in_beam[:, sites].mean(axis=1)
         frames, counts = [], {label: 0 for label in LABELS}
@@ -101,6 +103,7 @@ def label_frames(*, radar_position, forward, up, times_s, positions_by_frame, ta
                 "range_m": float(root_range[index]),
                 "azimuth_deg": float(root_azimuth[index]),
                 "elevation_deg": float(root_elevation[index]),
+                "speed_mps": float(speed[index]),
                 "key_event": None,
             })
         for event in events_by_target.get(object_id, ()):
