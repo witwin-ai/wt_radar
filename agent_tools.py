@@ -1646,6 +1646,270 @@ def _native_manifest_checks(
     return checks
 
 
+INSTALL_RULE_PROPERTY = {
+    "type": "object",
+    "properties": {
+        "style": {"type": "string", "enum": ["auto", "wall", "corner"], "default": "auto"},
+        "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 2.0,
+                     "description": "Mount height above the floor in metres (installer wall mount)."},
+        "aim_height_m": {"type": "number", "minimum": 0, "maximum": 3, "default": 0.5,
+                         "description": "The boresight crosses this height (m) at the sensing-zone centroid."},
+        "beam_half_deg": {"type": "number", "minimum": 1, "maximum": 89, "default": 30,
+                          "description": "First null of the configured separable pattern, degrees."},
+        "normal_margin_deg": {"type": "number", "minimum": 0, "maximum": 30, "default": 5,
+                              "description": "No planar normal within beam_half_deg + this margin, degrees."},
+        "range_m": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 2, "maxItems": 2,
+                    "default": [1.0, 6.0], "description": "Sensing-zone range limits in metres."},
+        "wall_standoff_m": {"type": "number", "minimum": 0, "maximum": 0.5, "default": 0.05,
+                            "description": "Distance from the inner wall face in metres."},
+    },
+    "additionalProperties": False,
+    "description": "Installation rule (witwin.scenario/v1 radar.rule); omitted fields take the defaults.",
+}
+
+PLACEMENT_KEY_EVENTS_PROPERTY = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["id", "position_m"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "actor_kind": {"type": "string", "enum": ["person", "cat"], "default": "person"},
+            "position_m": {
+                "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                "description": "World position in metres; y is the supporting surface (floor, bed top).",
+            },
+            "test_height_m": {
+                "type": "number", "minimum": 0, "maximum": 2,
+                "description": "Height above the support that must be seen; default 1.0 person, 0.25 cat.",
+            },
+            "object_id": {"type": "string", "description": "Actor id, for the label preview."},
+            "t_s": {"type": "number", "minimum": 0, "description": "Event time in seconds, for the label preview."},
+        },
+        "additionalProperties": False,
+    },
+    "description": "Installation only: key events (arrival, seat contact, fall impact, cat landing) the zone must hold.",
+}
+
+LABEL_KEY_EVENTS_PROPERTY = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["id", "object_id", "t_s"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "object_id": {"type": "string", "minLength": 1, "description": "The declared Radar target."},
+            "t_s": {"type": "number", "minimum": 0, "description": "Event time in seconds."},
+            "kind": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "description": "Key events; each must be in_view at its nearest Radar frame (the only hard visibility gate).",
+}
+
+# Scenario default (design 5.4): clip length minus 0.2 s at 10 fps.
+_INSTALLATION_FPS = 10.0
+_INSTALLATION_TAIL_S = 0.2
+
+
+def _installation_rule(args: dict[str, Any]) -> Any:
+    from .install_rule import InstallRule
+
+    value = dict(args.get("install_rule") or {})
+    if "height_m" not in value and "height_m" in args:
+        value["height_m"] = float(args["height_m"])
+    try:
+        return InstallRule.from_dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolError(str(exc), code="invalid_sensor_placement",
+                        detail={"install_rule": _jsonable(value)}) from exc
+
+
+def _installation_interval(scene: Any) -> dict[str, float] | None:
+    timeline = _timeline_summary(scene)
+    if not timeline["available"] or timeline["playing"] or timeline["recording"]:
+        return None
+    frames = int(math.floor((float(timeline["duration_s"]) - _INSTALLATION_TAIL_S) * _INSTALLATION_FPS + 1e-9))
+    frames = min(frames, int(30 * _INSTALLATION_FPS))
+    if frames < 2:
+        return None
+    return {"start_s": 0.0, "duration_s": frames / _INSTALLATION_FPS, "fps": _INSTALLATION_FPS}
+
+
+def _plan_installation(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Room-geometry installation; raises InstallRuleError when blocked."""
+    from .install_rule import plan_installation
+
+    if str(args.get("placement_mode") or "automatic") != "automatic":
+        raise ToolError("The installation objective chooses the pose; use placement_mode automatic.",
+                        code="conflicting_sensor_placement")
+    if "position_m" in args or "aim_point_m" in args or "distance_m" in args:
+        raise ToolError("The installation objective cannot take explicit coordinates or distance_m.",
+                        code="conflicting_sensor_placement")
+    rule = _installation_rule(args)
+    events = [
+        {key: value for key, value in event.items() if key in {"id", "actor_kind", "position_m", "test_height_m"}}
+        for event in args.get("key_events") or ()
+    ]
+    plan = plan_installation(scene, rule=rule, key_events=events, room_index=args.get("room_index"))
+    plan["mount"]["rotation_euler_zxy_rad"] = _look_at_euler(plan["position_m"], plan["aim_point_m"])
+    return plan
+
+
+def _installation_label_preview(scene: Any, plan: dict[str, Any], target_specs: list[dict[str, Any]],
+                                interval: dict[str, float] | None, key_events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Geometric frame labels at the proposed mount, before any simulation."""
+    if not target_specs or interval is None:
+        return {"available": False, "reason": "needs_targets_and_a_baked_timeline"}
+    from .adapter.studio_motion import MultiTargetSkinSampler
+    from .labels import label_frames
+    from .los import StaticOccluders
+
+    try:
+        sampler = MultiTargetSkinSampler(scene, target_specs)
+        frames = int(round(interval["duration_s"] * interval["fps"]))
+        times = interval["start_s"] + np.arange(frames, dtype=np.float64) / interval["fps"]
+        positions = np.asarray([sampler.sample(float(t))[0] for t in times])
+        probe = _settings_object("Installation label probe").get_component("Radar")
+        result = label_frames(
+            radar_position=plan["position_m"], forward=plan["mount"]["forward"], up=None, times_s=times,
+            positions_by_frame=positions, target_slices=sampler.target_slices,
+            occluders=StaticOccluders.from_scene(scene),
+            range_m=(1.0, float(Derived.compute(probe)["max_range_m"])),
+            key_events=[event for event in key_events if "object_id" in event and "t_s" in event])
+    except (ValueError, RuntimeError) as exc:
+        return {"available": False, "reason": str(exc)}
+    return {
+        "available": True,
+        "label_method": result["label_method"],
+        "targets": [{key: target[key] for key in ("object_id", "site_count", "label_counts", "in_view_fraction")}
+                    for target in result["targets"]],
+        "key_events": result["key_events"],
+        "gate": result["gate"],
+    }
+
+
+def _install_blocked(scene: Any, exc: Any) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "blocked",
+        "scene_id": str(scene.scene_id),
+        "blockers": [{"code": exc.code, "message": str(exc), "next_step": exc.next_step,
+                      "detail": _jsonable(exc.detail)}],
+        "mutates_scene": False,
+        "mutates_timeline": False,
+        "mutates_project": False,
+    }
+
+
+def _plan_sensor_installation(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """plan_sensor_placement for ``placement_objective: installation`` (design 7.7).
+
+    Takes the room only and returns ``proposed_ensure_sensor_arguments`` as the
+    other objectives do: a fixed pose at the rule's mount, so ensure_sensor
+    writes exactly the planned pose.
+    """
+    from .install_rule import InstallRuleError
+
+    target_specs = _target_specs_from_args(scene, args, infer_single=True)
+    try:
+        plan = _plan_installation(scene, args)
+    except InstallRuleError as exc:
+        return _install_blocked(scene, exc)
+    if str(args.get("radar_object_id") or "").strip():
+        _select_radar(scene, str(args["radar_object_id"]))
+    interval = _installation_interval(scene)
+    proposed = {
+        "scene_id": str(scene.scene_id),
+        "placement_mode": "fixed",
+        "placement_objective": "installation",
+        "position_m": plan["position_m"],
+        "aim_point_m": plan["aim_point_m"],
+        "height_m": float(plan["rule"]["height_m"]),
+        "target_multipath": bool(args.get("target_multipath", False)),
+        "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
+    }
+    if target_specs:
+        proposed["targets"] = _target_input_args(target_specs)
+    if interval is not None:
+        proposed.update(interval)
+    for key in ("radar_object_id", "max_range_m"):
+        if key in args:
+            proposed[key] = args[key]
+    placement = {
+        "mode": "installation",
+        "verification": "room_geometry_install_rule; native preflight runs once motion exists",
+        **{key: plan[key] for key in (
+            "mount", "position_m", "aim_point_m", "rule", "room", "zones", "zone_fraction_of_open_floor",
+            "key_events", "key_events_in_zone", "candidate_count", "valid_mount_count", "rejected_counts",
+            "rejected_mounts", "label_method")},
+        "label_preview": _installation_label_preview(
+            scene, plan, target_specs, interval, list(args.get("key_events") or ())),
+    }
+    return {
+        "ok": True,
+        "status": "ready_for_confirmation",
+        "scene_id": str(scene.scene_id),
+        "target_object_id": target_specs[0]["object_id"] if target_specs else "",
+        "targets": target_specs,
+        "dynamic_object_ids": _dynamic_skinned_object_ids(scene),
+        "placement": _jsonable(placement),
+        "proposed_ensure_sensor_arguments": _jsonable(proposed),
+        "requires_targets_before_ensure": not target_specs,
+        "next_step": {
+            "tool": "witwin.radar.ensure_sensor",
+            "requires_fresh_operation_id": True,
+            "requires_confirmation": False,
+        },
+        "mutates_scene": False,
+        "mutates_timeline": False,
+        "mutates_project": False,
+    }
+
+
+def _strip_label_frames(result: dict[str, Any]) -> dict[str, Any]:
+    result = dict(result)
+    result["targets"] = [{key: value for key, value in target.items() if key != "frames"}
+                         for target in result.get("targets") or ()]
+    return result
+
+
+def _load_result_for_check(ctx: Any, scene: Any, obj: Any, args: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """A verified export (by operation) or a project result file (by path)."""
+    from .adapter.saved_result import SavedRadarResult
+
+    if args.get("operation_id"):
+        receipt = _require_matching_operation(
+            ctx, str(args["operation_id"]), scene_id=str(scene.scene_id), radar_object_id=str(obj.id))
+        if not receipt.get("exports"):
+            raise ToolError("Export the verified result before checking its output.", code="export_required",
+                            detail={"operation_id": str(args["operation_id"]), "status": receipt.get("status")})
+        from .adapter.durable_result import load_verified_export
+        from .adapter.replay import motion_fingerprint
+        saved, export = load_verified_export(
+            ctx.api.server.default_scene_dir, receipt, scene_id=scene.scene_id,
+            input_fingerprint=_measurement_input_fingerprint(scene, obj),
+            motion_fingerprint=motion_fingerprint(scene),
+        )
+        return saved, {"source": "verified_export", "export": export}
+    if not args.get("result_path"):
+        raise ToolError("Give operation_id (an exported measurement) or result_path.", code="missing_result")
+    folder = (Path(ctx.api.server.default_scene_dir) / "results" / "radar-animation").resolve()
+    path = Path(str(args["result_path"])).resolve()
+    if not path.is_relative_to(folder):
+        raise ToolError("result_path must be inside the project's results/radar-animation folder.",
+                        code="result_path_outside_project", detail={"result_path": str(path)})
+    try:
+        saved = SavedRadarResult.load(path)
+    except (OSError, ValueError) as exc:
+        raise ToolError(str(exc), code="result_unreadable", detail={"result_path": str(path)}) from exc
+    producer_scene = saved.producer.get("scene_id")
+    if producer_scene is not None and str(producer_scene) != str(scene.scene_id):
+        raise ToolError("The result file belongs to another scene.", code="result_scene_mismatch",
+                        detail={"result_scene_id": producer_scene, "scene_id": str(scene.scene_id)})
+    return saved, {"source": "result_path", "result_path": str(path)}
+
+
 def register(ctx: Any) -> None:
     owned_job_keys: set[str] = set()
 
@@ -1797,10 +2061,20 @@ def register(ctx: Any) -> None:
                     "enum": [
                         "balanced", "maximize_range_span", "bidirectional_radial_velocity",
                         "stronger_doppler", "side_view", "whole_path_visible",
-                        "opposite_side", "closer_with_full_path_visible",
+                        "opposite_side", "closer_with_full_path_visible", "installation",
                     ],
                     "default": "balanced",
-                    "description": "Physical measurement objective for automatic full-trajectory placement.",
+                    "description": (
+                        "Physical measurement objective for automatic full-trajectory placement. "
+                        "installation mounts the Radar from room geometry only (wall or corner, 2.0 m, "
+                        "tilted down, no wall/floor/furniture face normal in the beam) and needs no motion."
+                    ),
+                },
+                "install_rule": INSTALL_RULE_PROPERTY,
+                "key_events": PLACEMENT_KEY_EVENTS_PROPERTY,
+                "room_index": {
+                    "type": "integer", "minimum": 0,
+                    "description": "Installation only: the room to mount in; default is the room holding most key events.",
                 },
                 "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
                 "target_multipath": {
@@ -1843,6 +2117,8 @@ def register(ctx: Any) -> None:
     )
     def _plan_sensor_placement(args: Dict[str, Any]) -> dict[str, Any]:
         scene = _scene_from_args(ctx, args)
+        if str(args.get("placement_objective") or "") == "installation":
+            return _plan_sensor_installation(scene, args)
         target_specs = _target_specs_from_args(scene, args, infer_single=True)
         target_id = target_specs[0]["object_id"] if target_specs else ""
         candidates = [
@@ -2019,10 +2295,20 @@ def register(ctx: Any) -> None:
                     "enum": [
                         "balanced", "maximize_range_span", "bidirectional_radial_velocity",
                         "stronger_doppler", "side_view", "whole_path_visible",
-                        "opposite_side", "closer_with_full_path_visible",
+                        "opposite_side", "closer_with_full_path_visible", "installation",
                     ],
                     "default": "balanced",
-                    "description": "Physical measurement objective for automatic full-trajectory placement.",
+                    "description": (
+                        "Physical measurement objective for automatic full-trajectory placement. "
+                        "installation mounts the Radar from room geometry only (wall or corner, 2.0 m, "
+                        "tilted down, no wall/floor/furniture face normal in the beam) and needs no motion."
+                    ),
+                },
+                "install_rule": INSTALL_RULE_PROPERTY,
+                "key_events": PLACEMENT_KEY_EVENTS_PROPERTY,
+                "room_index": {
+                    "type": "integer", "minimum": 0,
+                    "description": "Installation only: the room to mount in; default is the room holding most key events.",
                 },
                 "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
                 "distance_m": {
@@ -2182,7 +2468,14 @@ def register(ctx: Any) -> None:
                 obj.tag = _PIPELINE_RADAR_TAG
                 created = True
         placement = None
-        if automatic:
+        if automatic and str(args.get("placement_objective") or "") == "installation":
+            from .install_rule import InstallRuleError
+            try:
+                placement = {"mode": "installation", **_plan_installation(scene, args)}
+            except InstallRuleError as exc:
+                raise ToolError(str(exc), code=exc.code,
+                                detail={"next_step": exc.next_step, **_jsonable(exc.detail)}) from exc
+        elif automatic:
             from .sensor_placement import choose_sensor_placement
             placement_args = {**args}
             if "targets" in args:
@@ -3059,6 +3352,124 @@ def register(ctx: Any) -> None:
             return {**_operation_result(receipt, obj), "export": export, "reused": False}
 
     @tool(
+        name="label_visibility",
+        description=(
+            "Read-only per-frame visibility labels for the selected Radar's declared targets over its "
+            "authored measurement interval: in_view, occluded, out_of_fov or out_of_range per target and "
+            "frame, with the visible-site fraction, range and angles (Studio-side static line of sight, "
+            "label_method studio_los_v1). Labels never reject a sample; only key events must be in_view."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "key_events": LABEL_KEY_EVENTS_PROPERTY,
+                "include_frames": {"type": "boolean", "default": True,
+                                   "description": "False returns only per-target counts and the gate."},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        timeout=120.0,
+        tags=INSPECT_TAGS,
+    )
+    def _label_visibility(args: Dict[str, Any]) -> dict[str, Any]:
+        from .labels import label_visibility
+
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
+        try:
+            native = _read_preflight(ctx, scene_id=str(scene.scene_id), radar_object_id=str(obj.id),
+                                     fingerprint=_measurement_input_fingerprint(scene, obj))
+        except (ToolError, ValueError, AttributeError):
+            native = None
+        try:
+            result = label_visibility(scene, obj, key_events=list(args.get("key_events") or ()),
+                                      native_preflight=native)
+        except ValueError as exc:
+            raise ToolError(str(exc), code="labels_unavailable") from exc
+        if not bool(args.get("include_frames", True)):
+            result = _strip_label_frames(result)
+        return {"ok": True, "status": "ready", **_jsonable(result),
+                "mutates_scene": False, "mutates_timeline": False, "mutates_project": False}
+
+    @tool(
+        name="check_radar_output",
+        description=(
+            "Read-only Radar output checks on an exported measurement (operation_id) or a project result "
+            "file (result_path): replay ready, finite and non-zero cube, frame count, each target present "
+            "near its ground-truth range on frames it is in view and moving, key events in view, and a "
+            "RADAR_STATIC_DOMINANT warning when a static return dominates the moving targets."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "operation_id": {"type": "string", "minLength": 1,
+                                 "description": "A measurement operation with a verified export."},
+                "result_path": {"type": "string", "minLength": 1,
+                                "description": "A result NPZ inside the project's results/radar-animation folder."},
+                "key_events": LABEL_KEY_EVENTS_PROPERTY,
+                "include_frames": {"type": "boolean", "default": False,
+                                   "description": "Also return per-frame static and moving peaks."},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        timeout=300.0,
+        tags=VERIFY_TAGS,
+    )
+    async def _check_radar_output(args: Dict[str, Any]) -> dict[str, Any]:
+        from .labels import label_visibility
+        from .output_checks import check_saved_result
+
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
+        saved, source = await asyncio.to_thread(_load_result_for_check, ctx, scene, obj, args)
+        try:
+            labels = label_visibility(scene, obj, key_events=list(args.get("key_events") or ()))
+        except ValueError as exc:
+            raise ToolError(str(exc), code="labels_unavailable") from exc
+        expected = len(labels["frame_times_s"])
+        result = await asyncio.to_thread(check_saved_result, saved, labels=labels, expected_frame_count=expected)
+        checks = dict(result["checks"])
+        checks["frame_times_match"] = bool(
+            len(saved.times_s) == expected and np.allclose(saved.times_s, labels["frame_times_s"], atol=1e-6))
+        replay = _recorded_replay_summary(ctx, obj)
+        checks["replay_ready"] = _recorded_replay_is_ready(replay)
+        checks["key_events_in_view"] = bool(labels["gate"]["key_events_in_view"])
+        failed = [name for name, value in checks.items() if value is False]
+        payload = {
+            "ok": True,
+            "status": "passed" if not failed else "failed",
+            "scene_id": str(scene.scene_id),
+            "radar_object_id": str(obj.id),
+            "checks": checks,
+            "failed_checks": failed,
+            "warnings": result["warnings"],
+            "targets": result["targets"],
+            "static_to_moving_db": result["static_to_moving_db"],
+            "thresholds": result["thresholds"],
+            "key_events_in_view": checks["key_events_in_view"],
+            "key_event_failures": labels["gate"]["failures"],
+            "labels": _strip_label_frames(labels),
+            "replay": replay,
+            "result": source,
+            "mutates_scene": False,
+            "mutates_timeline": False,
+            "mutates_project": False,
+        }
+        if bool(args.get("include_frames", False)):
+            payload["frames"] = result["frames"]
+        return _jsonable(payload)
+
+    @tool(
         name="describe_pipeline_contract",
         description=(
             "Return the versioned Radar planning and result-action contracts for "
@@ -3111,5 +3522,7 @@ def register(ctx: Any) -> None:
         _prepare_replay,
         _export_result,
         _describe_pipeline_contract,
+        _label_visibility,
+        _check_radar_output,
     ):
         ctx.tools.register(value)

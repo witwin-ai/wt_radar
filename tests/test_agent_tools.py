@@ -209,6 +209,8 @@ def test_registers_narrow_domain_tools(harness):
         "prepare_replay",
         "export_result",
         "describe_pipeline_contract",
+        "label_visibility",
+        "check_radar_output",
     }
     assert tools["inspect_pipeline"].permission_tier == "read"
     assert tools["plan_sensor_placement"].permission_tier == "read"
