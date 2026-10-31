@@ -18,7 +18,11 @@ import numpy as np
 
 
 # A static peak this far above the strongest moving return is a warning.
-STATIC_DOMINANT_DB = 30.
+# Calibrated on meeting sample 03 (2.8-8.6 s, 58 frames): the installation-rule
+# mount peaks at 17.3 dB (0 frames over 20 dB); a north-wall mount looking
+# straight at the south wall puts its foot point at 4.51 m and exceeds 20 dB on
+# 57 of 58 frames (median 23.7 dB, max 44.4 dB).
+STATIC_DOMINANT_DB = 20.
 # A target is present when its moving return near the true range clears the
 # median moving floor of the frame by this much.
 PRESENCE_DB = 10.
