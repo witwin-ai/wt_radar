@@ -3470,6 +3470,96 @@ def register(ctx: Any) -> None:
         return _jsonable(payload)
 
     @tool(
+        name="capture_static_radar",
+        description=(
+            "Static Radar capture (no moving target): the room alone (mode room, the background and "
+            "clutter a dataset needs) or the declared actors frozen at one Timeline time (mode frozen), "
+            "as frame_count frames on the Radar's FPS. Writes one new NPZ into the project's "
+            "results/radar-animation folder and checks it; never changes the scene or motion. It "
+            "replaces the Radar's in-memory result; exported measurements stay on disk."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "mode": {"type": "string", "enum": ["room", "frozen"], "default": "room",
+                         "description": "room leaves every actor out; frozen holds the Radar's targets still."},
+                "frame_count": {"type": "integer", "minimum": 1, "maximum": 300, "default": 10},
+                "freeze_time_s": {"type": "number", "minimum": 0,
+                                  "description": "Frozen mode: Timeline time of the pose; default the Radar start."},
+            },
+            "additionalProperties": False,
+        },
+        side_effects=True,
+        requires_confirmation=True,
+        permission_tier="file_write",
+        idempotent=False,
+        durable_confirmation=True,
+        timeout=900.0,
+        tags=SUBMIT_TAGS,
+    )
+    async def _capture_static_radar(args: Dict[str, Any]) -> dict[str, Any]:
+        from .adapter.animation import persist_export
+        from .adapter.saved_result import SavedRadarResult
+        from .adapter.static_capture import DEFAULT_FRAME_COUNT, static_capture_request
+        from .output_checks import check_saved_result
+
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
+        radar = obj.get_component("Radar")
+        timeline = _timeline_summary(scene)
+        if timeline["playing"] or timeline["recording"]:
+            raise ToolError("Pause timeline playback and recording before a static capture.",
+                            code="timeline_busy", detail={"timeline": timeline})
+        mode = str(args.get("mode") or "room")
+        try:
+            request = static_capture_request(
+                radar, mode=mode, frame_count=int(args.get("frame_count", DEFAULT_FRAME_COUNT)),
+                freeze_time_s=args.get("freeze_time_s"))
+        except ValueError as exc:
+            raise ToolError(str(exc), code="invalid_static_capture") from exc
+        try:
+            status = await radar._simulate_async(animation=True, request=request)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - native error retained for the caller
+            raise ToolError(str(exc), code="RADAR_SIMULATION_FAILED",
+                            detail={"type": type(exc).__name__}) from exc
+        try:
+            reference = await asyncio.to_thread(radar._query_result, "animation_export", {})
+            path = await asyncio.to_thread(persist_export, ctx.api, reference)
+            saved = await asyncio.to_thread(SavedRadarResult.load, path)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(str(exc), code="static_capture_export_failed") from exc
+        checks = await asyncio.to_thread(check_saved_result, saved, expected_frame_count=request["frame_count"])
+        producer = saved.producer
+        return _jsonable({
+            "ok": True,
+            "status": "captured" if checks["passed"] else "failed",
+            "scene_id": str(scene.scene_id),
+            "radar_object_id": str(obj.id),
+            "capture": "static",
+            "mode": mode,
+            "frame_count": int(request["frame_count"]),
+            "fps": float(request["fps"]),
+            "freeze_time_s": request.get("freeze_time_s"),
+            "export_path": str(path),
+            "component_status": str(status),
+            "checks": checks["checks"],
+            "failed_checks": checks["failed_checks"],
+            "static_peak_range_m": max(checks["frames"], key=lambda item: item["static_peak_db"])[
+                "static_peak_range_m"] if checks["frames"] else None,
+            "targets": producer.get("targets"),
+            "site_count": producer.get("site_count"),
+            "environment_reflection": producer.get("environment_reflection"),
+            "mutates_scene": False,
+            "mutates_timeline": False,
+            "mutates_project": True,
+        })
+
+    @tool(
         name="describe_pipeline_contract",
         description=(
             "Return the versioned Radar planning and result-action contracts for "
@@ -3524,5 +3614,6 @@ def register(ctx: Any) -> None:
         _describe_pipeline_contract,
         _label_visibility,
         _check_radar_output,
+        _capture_static_radar,
     ):
         ctx.tools.register(value)

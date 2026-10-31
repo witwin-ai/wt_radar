@@ -17,6 +17,19 @@ SUPPORTED_VIEWS = {"range_profile", "range_spectrum", "range_doppler"}
 
 def validate_options(component):
     """Old settings must not silently acquire a different meaning."""
+    validate_runtime_options(component)
+    if not str(component.snapshot_target_id).strip():
+        raise ValueError("Set Snapshot Target ID to an existing object; no target is selected automatically.")
+    rcs = num(component.snapshot_rcs_m2)
+    if not np.isfinite(rcs) or rcs <= 0:
+        raise ValueError("Snapshot RCS must be positive finite square metres; it is an explicit modelling assumption.")
+    values = np.asarray(vec(component.snapshot_local_point), dtype=np.float64)
+    if values.shape != (3,) or not np.isfinite(values).all():
+        raise ValueError("snapshot_local_point must contain three finite values.")
+
+
+def validate_runtime_options(component):
+    """The instrument checks every native request shares, with or without a target."""
     unsupported = [name for name in (
         "enable_thermal", "enable_quantization", "enable_phase", "enable_lna",
         "enable_agc", "enable_adc", "pol_enabled", "multipath", "use_seed",
@@ -33,15 +46,9 @@ def validate_options(component):
             raise ValueError(f"Legacy {name} is not used by point snapshots; restore its default {default!r}.")
     if component.post_processors:
         raise ValueError("Legacy post-processors are not supported by the snapshot adapter.")
-    if not str(component.snapshot_target_id).strip():
-        raise ValueError("Set Snapshot Target ID to an existing object; no target is selected automatically.")
-    rcs = num(component.snapshot_rcs_m2)
-    if not np.isfinite(rcs) or rcs <= 0:
-        raise ValueError("Snapshot RCS must be positive finite square metres; it is an explicit modelling assumption.")
-    for name in ("snapshot_local_point", "snapshot_polarization"):
-        values = np.asarray(vec(getattr(component, name)), dtype=np.float64)
-        if values.shape != (3,) or not np.isfinite(values).all():
-            raise ValueError(f"{name} must contain three finite values.")
+    values = np.asarray(vec(component.snapshot_polarization), dtype=np.float64)
+    if values.shape != (3,) or not np.isfinite(values).all():
+        raise ValueError("snapshot_polarization must contain three finite values.")
     if np.linalg.norm(vec(component.snapshot_polarization)) <= 1e-12:
         raise ValueError("Snapshot world polarization must be nonzero.")
     count = int(component.num_tx) * int(component.num_rx) * int(component.chirp_per_frame) * int(component.adc_samples)

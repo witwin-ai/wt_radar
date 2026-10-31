@@ -23,6 +23,8 @@ class EnvironmentClutterResult:
     reflected_path_count: int
     material_slot_count: int
     max_depth: int = 1
+    # Producer axes of this cube, for a capture with no target synthesis.
+    axes: object = None
 
 
 def add_environment_to_fmcw_result(radar, target_cube, environment):
@@ -66,8 +68,9 @@ def single_bounce_environment_cube(radar, world, *, polarization):
     from witwin.radar.channel import ChannelPropagationAdapter, compile_scene
     from witwin.radar.sensors import RoundTripPatternStage
     from witwin.radar.simulation import ScatterSitePolicy, bind_radar_world
+    from witwin.radar.processing import ProcessingAxes
     from witwin.radar.synthesis import SlowTimeMode, SynthesisPathBatch
-    from witwin.radar.synthesis.assembly import assemble_frame_cube
+    from witwin.radar.synthesis.assembly import SynthesisResult, assemble_frame_cube
     from witwin.radar.synthesis.fmcw import synthesize_fmcw
 
     propagation = radar.system_config.propagation
@@ -145,10 +148,12 @@ def single_bounce_environment_cube(radar, world, *, polarization):
     )
     if cube.device.type != "cuda" or not torch.isfinite(cube).all():
         raise RuntimeError("Native single-bounce environment cube is missing or nonfinite.")
+    spec = radar.system_config.waveform_spec()
     return EnvironmentClutterResult(
         cube=cube,
         reflected_path_count=reflected_path_count,
         material_slot_count=material_slot_count,
+        axes=ProcessingAxes.from_synthesis(SynthesisResult.from_fmcw(synthesis_cube, spec), spec, array),
     )
 
 

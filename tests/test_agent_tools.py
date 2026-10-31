@@ -211,6 +211,7 @@ def test_registers_narrow_domain_tools(harness):
         "describe_pipeline_contract",
         "label_visibility",
         "check_radar_output",
+        "capture_static_radar",
     }
     assert tools["inspect_pipeline"].permission_tier == "read"
     assert tools["plan_sensor_placement"].permission_tier == "read"

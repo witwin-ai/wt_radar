@@ -653,8 +653,12 @@ class RadarComponent(Component):
         Notifications.success("Radar", "Existing NPZ verified; no new copy created." if reused else "Radar NPZ exported.")
         return self.animation_status
 
-    async def _simulate_async(self, animation=False, on_submitted=None):
-        """Submit an immutable copy of current Studio state to the native solver."""
+    async def _simulate_async(self, animation=False, on_submitted=None, request=None):
+        """Submit an immutable copy of current Studio state to the native solver.
+
+        ``request`` replaces the animation request built from this component,
+        for multi-frame products with another adapter (a static capture).
+        """
         from ..adapter.snapshot import snapshot_request, SUPPORTED_VIEWS
         if self._snapshot_running or self._export_running or self._replay_preparing:
             raise ValueError("A Radar simulation or replay operation is already active; wait before starting another one.")
@@ -688,7 +692,9 @@ class RadarComponent(Component):
             self.snapshot_figure.clear()
             self.snapshot_status = "Running one-frame frozen-point diagnostic; existing Replay is preserved."
         try:
-            if animation:
+            if animation and request is not None:
+                request = dict(request)
+            elif animation:
                 from ..adapter.animation import animation_request
                 request = animation_request(self)
             else:

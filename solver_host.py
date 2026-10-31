@@ -26,6 +26,9 @@ def solve(ctx, scene, config):
     from wt_radar.adapter.animation import MODEL as ANIMATION_MODEL, solve_animation
     if config.get("adapter") == ANIMATION_MODEL:
         return solve_animation(ctx, scene, config)
+    from wt_radar.adapter.static_capture import STATIC_MODEL, solve_static_capture
+    if config.get("adapter") == STATIC_MODEL:
+        return solve_static_capture(ctx, scene, config)
     from wt_radar.adapter.snapshot import MODEL, solve_snapshot
     if config.get("adapter") == MODEL:
         return solve_snapshot(ctx, scene, config)
