@@ -499,22 +499,23 @@ def mount_positions(geometry, room, rule, *, actor_paths=None):
 # ------------------------------------------------------------------ mounts
 
 
-def _axes(forward):
+def _axes(forward, up=None):
     forward = np.asarray(forward, dtype=np.float64)
     forward = forward / np.linalg.norm(forward)
-    right = np.cross(forward, [0., 1., 0.])
+    right = np.cross(forward, [0., 1., 0.] if up is None else np.asarray(up, dtype=np.float64))
     right /= np.linalg.norm(right)
     up = np.cross(right, forward)
     return forward, right, up
 
 
-def antenna_angles(position, forward, points):
+def antenna_angles(position, forward, points, *, up=None):
     """Azimuth/elevation in degrees, as the separable pattern evaluates them.
 
     Local x is right and local -z the boresight, so ``az = atan2(v_x, -v_z)``
-    and ``el = atan2(v_y, -v_z)`` (witwin.radar ``SeparablePattern``).
+    and ``el = atan2(v_y, -v_z)`` (witwin.radar ``SeparablePattern``). Without
+    ``up`` the mount has no roll (the pose ``_look_at_euler`` authors).
     """
-    forward, right, up = _axes(forward)
+    forward, right, up = _axes(forward, up)
     v = np.asarray(points, dtype=np.float64).reshape(-1, 3) - np.asarray(position, dtype=np.float64)
     along = v @ forward
     return np.degrees(np.arctan2(v @ right, along)), np.degrees(np.arctan2(v @ up, along))
