@@ -116,7 +116,7 @@ def test_label_visibility_tool_returns_labels_and_the_key_event_gate(scene):
     assert "frames" not in compact["targets"][0]
 
 
-def _write_result(path, frame_count):
+def _write_result(path, frame_count, *, amplitude=1.):
     from witwin.radar import Radar
     from witwin.radar.processing import ProcessingAxes
     from witwin.radar.synthesis.assembly import SynthesisResult
@@ -135,7 +135,7 @@ def _write_result(path, frame_count):
     for key in ("range_m", "velocity_mps"):
         record[key] = record[key].tolist()
     cube = np.zeros((frame_count, 1, 1, 32, 64), dtype=np.complex64)
-    cube[:, 0, 0, :, 5] = np.exp(2j * np.pi * 4 * np.arange(32) / 32)
+    cube[:, 0, 0, :, 5] = amplitude * np.exp(2j * np.pi * 4 * np.arange(32) / 32)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, cube=cube, times_s=np.arange(frame_count) / 10., result_schema_version=np.asarray(1),
              processing_axes_json=np.asarray(json.dumps(record)),

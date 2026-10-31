@@ -93,7 +93,8 @@ def test_frozen_capture_holds_the_actor_still_at_its_sites(scene, cuda_ready):
     assert result.metadata["targets"][0]["active_site_count"] > 0
 
 
-def test_capture_tool_writes_and_checks_one_new_result(scene, tmp_path, monkeypatch):
+@pytest.mark.parametrize("amplitude", [1., 0.])
+def test_capture_tool_writes_and_checks_one_new_result(scene, tmp_path, monkeypatch, amplitude):
     original, component = scene
     component.snapshot_target_id = ""
     tools = register(original, tmp_path)
@@ -112,7 +113,7 @@ def test_capture_tool_writes_and_checks_one_new_result(scene, tmp_path, monkeypa
 
     def persist(api, reference):
         from test_install_tools import _write_result
-        return str(_write_result(folder / "studio-animation-static.npz", 4))
+        return str(_write_result(folder / "studio-animation-static.npz", 4, amplitude=amplitude))
 
     monkeypatch.setattr(component, "_simulate_async", simulate)
     monkeypatch.setattr(component, "_query_result", query)
@@ -123,3 +124,5 @@ def test_capture_tool_writes_and_checks_one_new_result(scene, tmp_path, monkeypa
     assert result["export_path"].endswith("studio-animation-static.npz")
     assert result["checks"]["all_finite"] and result["checks"]["frame_count_matches"]
     assert result["mutates_scene"] is False
+    # A room whose specular returns all fall outside the beam is a valid, zero capture.
+    assert result["room_return_in_beam"] is (amplitude > 0)

@@ -3535,9 +3535,15 @@ def register(ctx: Any) -> None:
             raise ToolError(str(exc), code="static_capture_export_failed") from exc
         checks = await asyncio.to_thread(check_saved_result, saved, expected_frame_count=request["frame_count"])
         producer = saved.producer
+        # The room model is specular single bounce: a mount with every wall,
+        # floor and furniture foot point outside the pattern (the installation
+        # rule) truthfully returns a zero room cube. Only frozen actors must
+        # return energy.
+        failed = [name for name in checks["failed_checks"] if not (mode == "room" and name == "nonzero_return")]
         return _jsonable({
             "ok": True,
-            "status": "captured" if checks["passed"] else "failed",
+            "status": "captured" if not failed else "failed",
+            "room_return_in_beam": bool(checks["checks"]["nonzero_return"]),
             "scene_id": str(scene.scene_id),
             "radar_object_id": str(obj.id),
             "capture": "static",
@@ -3548,7 +3554,7 @@ def register(ctx: Any) -> None:
             "export_path": str(path),
             "component_status": str(status),
             "checks": checks["checks"],
-            "failed_checks": checks["failed_checks"],
+            "failed_checks": failed,
             "static_peak_range_m": max(checks["frames"], key=lambda item: item["static_peak_db"])[
                 "static_peak_range_m"] if checks["frames"] else None,
             "targets": producer.get("targets"),
