@@ -90,6 +90,12 @@ def radar_output_checks(cube, axes, times_s, *, labels=None, expected_frame_coun
             record = {"frame": index, "t_s": float(times[index]) if index < len(times) else None,
                       "static_peak_db": _db(static_peak), "static_peak_range_m": float(ranges[static_bin]),
                       "moving_peak_db": _db(moving_peak), "static_to_moving_db": ratio_db}
+            # With every target standing still the bodies themselves are the
+            # zero-Doppler return (a fallen person lying down), and the ratio
+            # says nothing about the room; without labels every frame counts.
+            record["static_check"] = not label_frames or any(
+                float(rows[index].get("speed_mps") or 0.) >= min_speed_mps
+                for rows in label_frames.values() if index < len(rows))
             moving_by_range = moving.max(axis=0) if moving.size else np.zeros(len(ranges))
             for object_id, rows in label_frames.items():
                 if index >= len(rows):
@@ -111,7 +117,8 @@ def radar_output_checks(cube, axes, times_s, *, labels=None, expected_frame_coun
                     summary["missing_frames"].append({"frame": index, "range_m": float(row["range_m"]),
                                                       "margin_db": margin})
             frames.append(record)
-    dominant = [item for item in frames if item["static_to_moving_db"] > static_dominant_db]
+    dominant = [item for item in frames
+                if item["static_check"] and item["static_to_moving_db"] > static_dominant_db]
     if dominant:
         worst = max(dominant, key=lambda item: item["static_to_moving_db"])
         warnings.append({
@@ -137,6 +144,7 @@ def radar_output_checks(cube, axes, times_s, *, labels=None, expected_frame_coun
         "warnings": warnings,
         "targets": targets,
         "static_to_moving_db": {"median": float(np.median(ratios)), "max": float(np.max(ratios))} if ratios else None,
+        "static_check_skipped_frames": sum(not item["static_check"] for item in frames),
         "thresholds": {"static_dominant_db": static_dominant_db, "presence_db": presence_db,
                        "presence_min_fraction": PRESENCE_MIN_FRACTION, "min_speed_mps": min_speed_mps,
                        "range_window_m": range_window_m},
