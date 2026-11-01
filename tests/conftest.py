@@ -40,18 +40,6 @@ def wtr():
 
 
 @pytest.fixture(scope="session")
-def adapter(wtr):
-    """A fresh :class:`RadarAdapter` instance."""
-    return importlib.import_module(f"{PKG}.adapter.radar_adapter").RadarAdapter()
-
-
-@pytest.fixture(scope="session")
-def config_map(wtr):
-    """The :class:`ConfigMap` class (RadarConfig <-> Radar Settings object)."""
-    return importlib.import_module(f"{PKG}.adapter.config_map").ConfigMap
-
-
-@pytest.fixture(scope="session")
 def device():
     """'cuda' when available, else 'cpu'."""
     import torch

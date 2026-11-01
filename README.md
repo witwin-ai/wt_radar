@@ -1,106 +1,185 @@
-# wt-radar
+# WT Radar
 
-Round-trips `witwin.radar` solver scenes to and from the witwin-studio editor and runs
-the FMCW radar engine, with in-component signal visualization. It is an independent
-plugin (its own git repo) built on the frozen core base layer
-(`witwin_server.platform_bridge`) — see
-[RADAR_PLUGIN_PLAN.md](../../RADAR_PLUGIN_PLAN.md) and the master
-[PLATFORM_SCENE_INTEGRATION_PLAN.md](../../PLATFORM_SCENE_INTEGRATION_PLAN.md).
+Studio integration for the official `witwin-radar 0.4.x` and
+`witwin-channel 0.5.x` packages.
 
-This supersedes the old `wt_radar` (fake `SimpleRadar`); history is preserved in this
-same repo.
+WT Radar owns the Studio boundary: it snapshots the open `.wtscene`, samples
+baked skin motion, selects explicit target sites, requests native Channel paths,
+combines the supported direct environment return, calls official Radar waveform
+synthesis, and publishes results for Studio replay and export. It does not modify
+or replace Radar, Channel, or Maxwell physics code.
 
-## What's special about radar
+The animated-target boundary is the existing Studio `SkinnedMesh` plus baked
+`Transform` tracks; no target-side Radar component is required. See
+[the animated skinned target contract](docs/animated-skinned-target-contract.md).
 
-- **The sensor lives outside the scene.** The load/export contract carries a
-  **`(Scene, RadarConfig)` pair**, unlike maxwell/channel which carry a single scene.
-  `RadarConfig` maps to a singleton **Radar Settings** object.
-- **Mesh-first scene input.** Like channel/maxwell, the live solver walks ordinary
-  visible Studio `Mesh` objects and exports them directly as radar structures. Users do
-  not need radar-specific sidecar components for static targets.
-- **Two independent hierarchies.** The studio `Transform` parent tree is for static
-  pose; the radar **motion graph** (`scene._structure_motions`, a separate acyclic
-  rigid-motion graph) is for time-parameterized dynamics. They are never conflated.
-- **Non-SI sensor units on purpose.** `slope` in MHz/us, times in us, `sample_rate` in
-  ksps, `power` in dBm, antenna locations in half-wavelength units. The component unit
-  pickers keep the stored value in the platform's native unit, so the round trip is
-  exact — values are never silently converted to SI.
+The default animation policy matches the original WT Radar behavior: moving
+skin sites use line-of-sight target returns, while static room geometry still
+contributes a native one-bounce background. **Target Multipath** is an explicit
+high-cost option for wall-to-target and target-to-wall paths; it is off by
+default.
+
+Intra-frame target motion evaluates every transmitted chirp by default. The
+official Radar 0.4 error-controlled **Adaptive** policy remains available for
+comparison, but is not assumed to outperform chirp sampling. Path topology is
+still rediscovered at Studio-frame boundaries.
+
+**Target Site Budget** is the fallback for untyped skinned targets. Typed SMPL
+humans default to the editable **Human Target Site Budget** (720), while
+registered animal actors default to the editable **Animal Target Site Budget**
+(360). An explicit per-target `site_budget` still wins. Budgets through 64 use
+anatomically prioritized bone anchors; larger values use deterministic
+full-surface coverage. The declared total target RCS remains constant.
+
+Animation measurements accept either the legacy single `target_object_id` or a
+`targets` list. A human and dog declaration is sampled jointly, passed to one
+native `PointTargets` solve, and reported with per-target site slices. Automatic
+placement uses the combined trajectories and confirms the combined native
+topology before accepting a sensor pose.
+
+## Supported physical model
+
+The multi-frame animation path combines two coherent contributions:
+
+1. Dynamic target returns from stable skin sites that have native inbound and
+   outbound Channel paths for every requested frame.
+2. Static room background returns for native one-bounce paths of the form
+   `Radar -> wall/floor/furniture -> Radar`.
+
+The environment contribution is adapted in WT Radar because Radar 0.4 does not
+publish a direct-environment composer. Path discovery remains owned by the
+official Channel package, and FMCW synthesis remains owned by the official Radar
+package.
+
+The current model is deliberately limited to one specular environment bounce.
+It does not claim diffuse clutter, calibrated animal RCS, target self-occlusion,
+or additional room bounces. Missing target paths fail preflight instead of being
+zero-filled, and excluded sites do not transfer their RCS to visible sites.
+
+## Studio workflow
+
+1. Open a furnished room containing one or more skinned targets and baked
+   Motion Matching timelines.
+2. Add **Library -> Radar -> Radar Settings** to the same scene. The object's
+   Transform is the sensor pose; local `-Z` is its forward direction.
+3. Let the Agent configure the target list, or set **Snapshot Target ID** for a
+   legacy single-target measurement.
+4. Set **Measurement start time**, **Animation duration**, and **Animation FPS**.
+   The interval must fit the baked timeline, and `duration * FPS` must be an
+   integer. The limits are 30 seconds, 30 FPS, and 1536 MiB of raw result data.
+5. Click **Simulate & Prepare Replay**. This creates independent native GPU
+   measurements for the requested frames and prepares the numeric Studio replay.
+6. Inspect Range Profile, Range Spectrum, or Range-Doppler. Changing the result
+   frame does not seek or mutate the editor timeline.
+7. Click **Export Animation Result** to copy a validated `.npz` into
+   `results/radar-animation/` under the project.
+
+**Run Static Snapshot (1 frame)** is a separate single-point diagnostic. The
+Library **Radar (Demo)** prefab automatically selects its box target for this
+workflow. Historical Start Stream, Generate Frames, `RadarAdapter`, and Radar 0.3
+`Scene/RadarConfig/trace` entry points have been removed.
+
+## Result contract
+
+Animation exports contain the complex Radar cube, physical axes, timestamps,
+sampled target positions and velocities, active site IDs, topology evidence,
+environment-reflection statistics, package versions, and an input fingerprint.
+Exports are user-owned and never overwrite an existing file.
+
+The environment evidence includes:
+
+- `model`
+- `max_depth` (currently exactly `1`)
+- `reflected_path_count`
+- `material_slot_count`
+- `coherent_with_target`
+
+Studio can load a metadata-bearing exported result without rerunning the solver.
+Replay uses the official Radar 0.4 processing API and the existing numeric
+LineChart/Heatmap widgets.
+
+For an exported or measured `.npz` recording, the existing **Radar Replay**
+figure is the single review surface. **All Frames** is enabled by default and
+adds an in-figure Play/Pause button and frame scrubber for Range Profile and
+Range-Doppler. The same **Result Display** selector also provides:
+
+- **Micro-Doppler**: time x closing velocity, integrated across range.
+- **Range-Time**: time x range, integrated across Doppler velocity.
+- **Motion Energy**: normalized energy outside the zero-Doppler bin.
+
+The complete-recording heatmaps show relative amplitude in dB against the
+recording peak and retain every saved frame and physical bin. Hardware timestamp
+jitter is rendered on uniform display bins between the measured start/end times
+because Studio heatmaps require uniform x spacing. Turn off **All Frames** only
+when a specific numeric frame/chirp needs inspection.
+
+### Motion-fidelity A/B evidence
+
+`submit_animation_measurement` optionally accepts the complete
+`final_motion_fidelity` object returned by Motion Matching. Radar binds its
+report ID to the current baked Timeline fingerprint and embeds the reduced
+provenance in the exported NPZ. A stale report cannot be attached after the
+Timeline changes.
+
+Compare two exports made with the same interval and Radar configuration:
+
+```powershell
+python tools/compare_motion_fidelity.py `
+  --before C:\path\before.npz `
+  --after C:\path\after.npz `
+  --output C:\path\motion-fidelity-ab.json
+```
+
+Without a separately identified trusted reference, the report describes
+micro-Doppler distribution and motion-energy changes but explicitly refuses to
+claim improvement. Add `--reference` and `--reference-id` to measure whether
+the repaired result is closer to that reference. These metrics are offline
+evidence and never replace the animation fidelity, collision, support, or
+Timeline commit gates.
+
+## Runtime contract
+
+The plugin manifest and startup checks require:
+
+- `witwin-radar >=0.4,<0.5`
+- `witwin-channel >=0.5,<0.6`
+
+An absent or incompatible package fails explicitly before GPU synthesis. The
+supported solver request adapters are the explicit-point snapshot and baked
+Studio animation models; an unlabelled request does not fall back to Radar 0.3.
 
 ## Layout
 
-```
-adapter/        RadarAdapter (detect/to_studio/to_platform) + config/structure/motion/solve maps
-components/      Unified Radar, optional RadarMotion, post-processors
-examples/        radar (Scene, RadarConfig) factories for the load demo
-library_items.py drag-to-create prefabs (Radar demo, settings, plain mesh target)
-tests/           per-phase round-trip + live-solve suites
-```
-
-Human/SMPL bodies are owned by the **wt-human** plugin, not radar. A radar scene that
-contains one round-trips through the shared base geometry map (`kind="smpl"`) with no
-radar-side SMPL code; radar's only human-aware feature is the optional `RadarTimeline`
-"motion" source, which renders frames from a human placed by wt-human.
-
-## Phases
-
-| Phase | Scope |
-|-------|-------|
-| R0 | Scaffolding + structures + `(Scene, RadarConfig)` contract |
-| R1 | Full sensor config: antenna pattern / noise / polarization / receiver chain + sensor pose/backend + validation |
-| R2 | Dynamics (`RadarMotion` motion graph + parenting/acyclicity); human geometry is wt-human's |
-| R3 | Tracer + 3 solver backends + single-frame signal viz (range-doppler / point cloud / MUSIC / CFAR) + library items |
-| R4 | Multi-frame timeline (follow-up) |
-| R5 | Polish: `simulate_group`, pluggable post-processors, viewport point cloud (follow-up) |
-
-## Running the tests
-
-The round-trip + solve suites need the radar stack importable (`witwin.radar` /
-`witwin.core`, which pull in drjit + mitsuba; the package eagerly initializes the mitsuba
-CUDA variant) plus `witwin_server` on the path. With those present:
-
-```bash
-# from this directory, in an env that has witwin.radar + witwin.core
-PYTHONPATH=/path/to/witwin-studio/server python -m pytest tests/ -q
+```text
+adapter/
+  snapshot.py             one-point frozen diagnostic
+  animation.py            baked Studio skin animation orchestration
+  studio_geometry.py      Studio mesh/material export
+  studio_motion.py        baked skin sampling
+  environment_clutter.py  native one-bounce environment request
+  direct_environment.py   Channel-path to Radar-input bookkeeping
+  radar04.py               official Radar 0.4 construction
+  replay.py                Studio numeric replay
+components/
+  radar.py                 current Studio component and controls
+solver_host.py             snapshot/animation dispatch and result queries
+agent_tools.py             planning, preflight, execution, evidence
+tests/                     current Radar 0.4 contract and regression suite
 ```
 
-If the radar stack can't be imported, the suite skips itself rather than erroring.
-The dirichlet/slang backends require a CUDA device; the pytorch backend runs on CPU.
+## Tests
 
-On Windows, the dirichlet and slang backends compile through SlangTorch and write a
-per-source cache under the external radar package, for example
-`E:\Code\witwin-platform\radar\witwin\radar\solvers\.slangtorch_cache`. If pytest appears
-to hang before any RayD trace logs, check SlangTorch's lock path first. In this workspace
-the non-elevated sandbox could not acquire
-`dirichlet.slangb9c103f6b206b8e5.lock`; clearing `.slangtorch_cache` and running the GPU
-suite with permission to write/lock the external radar package fixed the apparent hang.
-
-## Measuring live stream throughput
-
-Use `tools/live_stream_throughput.py` from the studio repo root to measure the solver-side
-Start Stream path:
+Run from this repository using the Studio/Radar environment:
 
 ```powershell
-$env:PYTHONPATH="E:\Code\witwin-studio\server;E:\Code\witwin-studio\plugins;E:\Code\witwin-platform\radar;E:\Code\witwin-platform\core"
-conda run -n witwin2 python plugins\wt_radar\tools\live_stream_throughput.py --profile smoke --frames 20 --warmup-frames 2 --max-fps 30 --channels raw,rd,pc --backend dirichlet --device cuda --resolution 16 --encode-bytes
+C:\Users\WQZ\AppData\Local\anaconda3\envs\witwin2\python.exe -m pytest -q
 ```
 
-The script drives `solver_host.LiveSession` directly and reports frame FPS, inter-frame
-latency, solve/post-processing timings, channel payload bytes, and timeout/in-flight solve
-state. Use `--profile demo` to test the heavier default demo radar configuration.
+GPU physics checks require CUDA. A skipped CUDA test is not equivalent to a
+successful physical acceptance run.
 
-To measure the frontend component's actual canvas refresh rate, enable the stream widget
-metrics collector in the browser devtools console before starting the stream:
-
-```javascript
-localStorage.setItem("witwinStreamWidgetMetrics", "1");
-window.__WITWIN_STREAM_WIDGET_METRICS__ = undefined;
-```
-
-Reload the app, start the radar stream, then inspect:
-
-```javascript
-window.__WITWIN_STREAM_WIDGET_METRICS__.summary()
-```
-
-That summary is based on completed `canvas` draws in the stream widgets, not on backend
-publish completion.
+The final acceptance is a real furnished Studio scene with baked target motion.
+Every requested frame must be finite and nonzero; the topology must retain active
+target sites; environment `reflected_path_count` and `material_slot_count` must be
+positive; and the exported NPZ must reopen with the recorded metadata intact.
+See [ACCEPTANCE.md](ACCEPTANCE.md) for the latest reproducible GPU run.

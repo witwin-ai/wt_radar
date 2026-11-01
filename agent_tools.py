@@ -1,0 +1,3625 @@
+"""Agent-facing Radar tools built on the Studio/Radar 0.4 bridge.
+
+These tools deliberately stop at orchestration and evidence.  They do not
+implement propagation, scattering, waveform generation, or DSP; those remain
+owned by ``witwin-radar`` and ``witwin-channel``.
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+from datetime import datetime, timezone
+import hashlib
+import importlib
+from importlib.metadata import PackageNotFoundError, version
+import json
+import math
+from pathlib import Path
+import re
+import traceback
+from typing import Any, Dict, Iterable
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+from witwin_server.tools.base import ToolError, tool
+
+from .adapter.memory_budget import MAX_RESULT_BYTES, available_memory_bytes
+from .adapter.common import Derived
+from .adapter.specs import SensorSpec
+from .library_items import _settings_object
+from .retrieval_tags import (
+    CANCEL_TAGS,
+    ENSURE_TAGS,
+    EXPORT_TAGS,
+    INSPECT_TAGS,
+    PLAN_TAGS,
+    REPLAY_TAGS,
+    RESULT_INSPECT_TAGS,
+    SENSOR_PLAN_TAGS,
+    STATUS_TAGS,
+    SUBMIT_TAGS,
+    VERIFY_TAGS,
+)
+
+
+SCENE_ID_PROPERTY = {
+    "type": "string",
+    "minLength": 1,
+    "description": "Exact open Studio scene id; never inferred from an object name.",
+}
+
+TARGETS_PROPERTY = {
+    "type": "array",
+    "minItems": 1,
+    "items": {
+        "type": "object",
+        "required": ["object_id"],
+        "properties": {
+            "object_id": {"type": "string", "minLength": 1},
+            "site_budget": {"type": "integer", "minimum": 1, "maximum": 2400},
+        },
+        "additionalProperties": False,
+    },
+    "description": (
+        "One or more independently animated skinned targets. Omit site_budget for the editable "
+        "type default (720 per SMPL human, 360 per registered animal); an explicit value wins."
+    ),
+}
+
+_PIPELINE_RADAR_TAG = "witwin.pipeline.radar"
+_RUNTIME_RADAR_FIELDS = {
+    "animation_export_path",
+    "animation_frame_index",
+    "animation_status",
+    "replay_status",
+    "saved_result_loaded",
+    "signal_figure",
+    "signal_source",
+    "signal_stream",
+    "snapshot_status",
+    "stream_status",
+    # Review-only controls do not alter the native simulation result. They
+    # must not stale a valid measurement when preview controls change.
+    "view",
+    "tx_index",
+    "rx_index",
+    "static_clutter_removal",
+    "show_cfar",
+}
+_OPERATION_STATE_KEY = "agent_radar_operations_v1"
+_OPERATION_RECEIPT_SCHEMA_VERSION = 1
+_ACTIVE_JOBS: dict[str, asyncio.Task] = {}
+_EXPORT_LOCKS: dict[str, asyncio.Lock] = {}
+_PREFLIGHT_CACHE_ATTRIBUTE = "_radar_native_preflight_cache_v2"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _preflight_cache(ctx: Any) -> dict[str, Any]:
+    cache = getattr(ctx, _PREFLIGHT_CACHE_ATTRIBUTE, None)
+    if cache is None:
+        cache = {}
+        setattr(ctx, _PREFLIGHT_CACHE_ATTRIBUTE, cache)
+    return cache
+
+
+def _preflight_cache_key(scene_id: str, radar_object_id: str, fingerprint: str) -> str:
+    return f"{scene_id}\0{radar_object_id}\0{fingerprint}"
+
+
+def _remember_preflight(
+    ctx: Any,
+    *,
+    scene_id: str,
+    radar_object_id: str,
+    fingerprint: str,
+    native_preflight: dict[str, Any],
+) -> None:
+    evidence = copy.deepcopy(native_preflight)
+    # Only the new motion-sample cache needs an explicit in-payload binding.
+    # Older topology-only receipts remain byte-for-byte compatible; their
+    # identity is already enforced by the authoritative cache key.
+    if "sampled_motion" in evidence:
+        evidence["input_fingerprint"] = fingerprint
+    _preflight_cache(ctx)[_preflight_cache_key(scene_id, radar_object_id, fingerprint)] = {
+        "created_at": _utc_now(),
+        "native_preflight": evidence,
+    }
+
+
+def _public_preflight(native_preflight: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal sampled arrays from Agent-visible tool evidence."""
+    evidence = copy.deepcopy(native_preflight)
+    evidence.pop("sampled_motion", None)
+    return evidence
+
+
+def _consume_preflight(
+    ctx: Any,
+    *,
+    scene_id: str,
+    radar_object_id: str,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    cached = _preflight_cache(ctx).pop(
+        _preflight_cache_key(scene_id, radar_object_id, fingerprint), None,
+    )
+    return copy.deepcopy(cached["native_preflight"]) if cached is not None else None
+
+
+def _read_preflight(
+    ctx: Any,
+    *,
+    scene_id: str,
+    radar_object_id: str,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    """Read a matching immutable preflight without transferring ownership.
+
+    Planning is repeatable and may inspect the same evidence more than once;
+    submission remains the only operation that consumes the cached receipt.
+    """
+    cached = _preflight_cache(ctx).get(
+        _preflight_cache_key(scene_id, radar_object_id, fingerprint),
+    )
+    return copy.deepcopy(cached["native_preflight"]) if cached is not None else None
+
+
+def _workspace_state(ctx: Any) -> Any:
+    state = getattr(ctx, "workspaceState", None) or getattr(ctx, "workspace_state", None)
+    if state is None:
+        container = getattr(ctx, "state", None)
+        state = getattr(container, "workspace_state", None) or getattr(container, "workspaceState", None)
+    return state
+
+
+def _operation_map(ctx: Any) -> dict[str, Any]:
+    state = _workspace_state(ctx)
+    if state is None:
+        value = getattr(ctx, "_radar_operation_fallback", {}) or {}
+    else:
+        getter = getattr(state, "get_strict", None) or state.get
+        try:
+            value = getter(_OPERATION_STATE_KEY, {})
+        except Exception as exc:
+            raise ToolError(
+                "Radar operation state is unreadable; it was not reset or overwritten.",
+                code="radar_operation_state_corrupt",
+                detail={"path": str(getattr(state, "path", "")), "error": str(exc)},
+            ) from exc
+    if not isinstance(value, dict):
+        raise ToolError(
+            "Radar operation state is not a JSON object; it was not reset or overwritten.",
+            code="radar_operation_state_corrupt",
+            detail={"value_type": type(value).__name__},
+        )
+    return dict(value)
+
+
+def _save_operation_map(ctx: Any, value: dict[str, Any]) -> None:
+    state = _workspace_state(ctx)
+    if state is None:
+        setattr(ctx, "_radar_operation_fallback", copy.deepcopy(value))
+    else:
+        state.set(_OPERATION_STATE_KEY, _jsonable(value))
+
+
+def _get_operation(ctx: Any, operation_id: str) -> dict[str, Any] | None:
+    value = _operation_map(ctx).get(operation_id)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ToolError(
+            "Radar operation receipt is not a JSON object.",
+            code="radar_operation_state_corrupt",
+            detail={"operation_id": operation_id, "value_type": type(value).__name__},
+        )
+    if value.get("schema_version") != _OPERATION_RECEIPT_SCHEMA_VERSION:
+        raise ToolError(
+            "Radar operation receipt schema is missing or unsupported.",
+            code="radar_operation_state_corrupt",
+            detail={
+                "operation_id": operation_id,
+                "expected_schema_version": _OPERATION_RECEIPT_SCHEMA_VERSION,
+                "actual_schema_version": value.get("schema_version"),
+            },
+        )
+    if str(value.get("operation_id") or "") != str(operation_id):
+        raise ToolError(
+            "Radar operation receipt identity does not match its map key.",
+            code="radar_operation_state_corrupt",
+            detail={
+                "expected_operation_id": operation_id,
+                "actual_operation_id": value.get("operation_id"),
+            },
+        )
+    return copy.deepcopy(value)
+
+
+def _put_operation(ctx: Any, receipt: dict[str, Any]) -> dict[str, Any]:
+    receipt = {
+        **receipt,
+        "schema_version": _OPERATION_RECEIPT_SCHEMA_VERSION,
+        "updated_at": _utc_now(),
+    }
+    operation_id = str(receipt["operation_id"])
+    state = _workspace_state(ctx)
+    updater = getattr(state, "update_strict", None) if state is not None else None
+    if callable(updater):
+        def update_map(current):
+            if not isinstance(current, dict):
+                raise ValueError("Radar operation map is not a JSON object")
+            values = dict(current)
+            values[operation_id] = _jsonable(receipt)
+            return values
+
+        try:
+            updater(_OPERATION_STATE_KEY, update_map, {})
+        except Exception as exc:
+            raise ToolError(
+                "Radar operation receipt could not be written atomically.",
+                code="radar_operation_state_corrupt",
+                detail={"operation_id": operation_id, "error": str(exc)},
+            ) from exc
+    else:
+        values = _operation_map(ctx)
+        values[operation_id] = _jsonable(receipt)
+        _save_operation_map(ctx, values)
+    return copy.deepcopy(receipt)
+
+
+def _job_key(ctx: Any, operation_id: str) -> str:
+    state = _workspace_state(ctx)
+    path = str(getattr(state, "path", "memory"))
+    return f"{path}:{operation_id}"
+
+
+def _scene_from_args(ctx: Any, args: Dict[str, Any]):
+    requested = str(args.get("scene_id") or "").strip()
+    if not requested:
+        raise ToolError("scene_id is required", code="scene_context_required")
+    current = getattr(ctx, "scene", None)
+    if str(getattr(current, "scene_id", "")) == requested:
+        return current
+    server = getattr(getattr(ctx, "api", None), "server", None)
+    getter = getattr(server, "get_scene", None)
+    scene = getter(requested) if callable(getter) else None
+    if scene is None:
+        scenes = getattr(server, "scenes", None)
+        scene = scenes.get(requested) if hasattr(scenes, "get") else None
+    if scene is None:
+        raise ToolError(
+            f"scene not found or no longer open: {requested}",
+            code="missing_scene",
+            detail={"scene_id": requested},
+        )
+    return scene
+
+
+def _radar_objects(scene: Any) -> list[Any]:
+    return [
+        obj for obj in (getattr(scene, "objects", {}) or {}).values()
+        if callable(getattr(obj, "get_component", None))
+        and obj.get_component("Radar") is not None
+    ]
+
+
+def _select_radar(scene: Any, object_id: str = "") -> Any:
+    requested = str(object_id or "").strip()
+    if requested:
+        obj = scene.get_object(requested)
+        if obj is None or obj.get_component("Radar") is None:
+            raise ToolError(
+                f"Radar object not found in scene: {requested}",
+                code="missing_radar",
+                detail={"scene_id": str(scene.scene_id), "radar_object_id": requested},
+            )
+        return obj
+    sensors = _radar_objects(scene)
+    if not sensors:
+        raise ToolError("No Radar Settings object exists in this scene.", code="missing_radar")
+    if len(sensors) != 1:
+        raise ToolError(
+            "More than one Radar exists; specify radar_object_id explicitly.",
+            code="ambiguous_radar",
+            detail={"radar_object_ids": [str(obj.id) for obj in sensors]},
+        )
+    return sensors[0]
+
+
+def _as_vector3(value: Any, name: str) -> np.ndarray:
+    vector = np.asarray(value, dtype=np.float64)
+    if vector.shape != (3,) or not np.isfinite(vector).all():
+        raise ToolError(f"{name} must contain three finite numbers", code="invalid_sensor_pose")
+    return vector
+
+
+def _look_at_euler(position: Any, aim_point: Any) -> list[float]:
+    origin = _as_vector3(position, "position")
+    target = _as_vector3(aim_point, "aim_point")
+    forward = target - origin
+    length = float(np.linalg.norm(forward))
+    if length <= 1e-6:
+        raise ToolError("Radar position and aim point must be different.", code="invalid_sensor_pose")
+    forward /= length
+    reference_up = np.array([0.0, 1.0, 0.0])
+    if abs(float(np.dot(forward, reference_up))) > 0.98:
+        reference_up = np.array([0.0, 0.0, 1.0])
+    right = np.cross(forward, reference_up)
+    right /= np.linalg.norm(right)
+    up = np.cross(-forward, right)
+    rotation = np.column_stack((right, up, -forward))
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-6):
+        raise ToolError("Could not construct a right-handed Radar pose.", code="invalid_sensor_pose")
+    return Rotation.from_matrix(rotation).as_euler("ZXY", degrees=False).tolist()
+
+
+def _configure_directional_pattern(radar: Any, fov_deg: float) -> None:
+    """Author a forward antenna taper matching the placement FOV."""
+    half = float(fov_deg) / 2.0
+    angles = [-half, -half / 2.0, 0.0, half / 2.0, half]
+    gains = [0.0, 0.5, 1.0, 0.5, 0.0]
+    radar.use_default = False
+    radar.pattern_kind = "separable"
+    radar.x_angles_deg = angles
+    radar.y_angles_deg = angles
+    radar.x_values = gains
+    radar.y_values = gains
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if hasattr(value, "detach"):
+        return value.detach().cpu().tolist()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    return str(value)
+
+
+def _persisted_numeric_identity(value: Any) -> Any:
+    """Canonicalize authored numbers to the precision Studio persists.
+
+    Component and Timeline numeric fields round-trip through Studio's float32
+    storage.  Hashing the pre-save Python float64 spelling made an unchanged
+    Radar appear edited after reopening a Scene (for example 77e9 becomes
+    76999999488.0).  The solver already consumes these persisted values, so
+    float32 is the exact durable-authoring boundary rather than a tolerance.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, (str, int)):
+        return value
+    if isinstance(value, (float, np.floating)):
+        canonical = float(np.float32(value))
+        return 0.0 if canonical == 0.0 else canonical
+    if isinstance(value, dict):
+        return {str(key): _persisted_numeric_identity(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_persisted_numeric_identity(item) for item in value]
+    return _persisted_numeric_identity(_jsonable(value))
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
+
+def _call_diagnostics(module_name: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"module": module_name, "import_ok": False}
+    try:
+        module = importlib.import_module(module_name)
+        result["import_ok"] = True
+        for function_name in ("runtime_diagnostics", "build_info", "capabilities"):
+            function = getattr(module, function_name, None)
+            if callable(function):
+                try:
+                    result[function_name] = _jsonable(function())
+                except Exception as exc:  # diagnostics must remain reportable
+                    result[function_name] = {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def _runtime_evidence() -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "packages": {
+            name: _package_version(name)
+            for name in ("witwin", "witwin-radar", "witwin-channel", "torch")
+        },
+        "radar": _call_diagnostics("witwin.radar"),
+        "channel": _call_diagnostics("witwin.channel"),
+    }
+    try:
+        import torch
+
+        cuda = bool(torch.cuda.is_available())
+        evidence["torch"] = {
+            "version": str(torch.__version__),
+            "cuda_build": str(torch.version.cuda),
+            "cuda_available": cuda,
+            "device_name": torch.cuda.get_device_name(0) if cuda else None,
+            "compute_capability": list(torch.cuda.get_device_capability(0)) if cuda else None,
+        }
+    except Exception as exc:
+        evidence["torch"] = {"cuda_available": False, "error": str(exc)}
+    return evidence
+
+
+def _strip_runtime_radar_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_runtime_radar_fields(item)
+            for key, item in value.items()
+            if key not in _RUNTIME_RADAR_FIELDS
+        }
+    if isinstance(value, list):
+        return [_strip_runtime_radar_fields(item) for item in value]
+    return _jsonable(value)
+
+
+def _update_content_hash(digest: Any, label: str, value: Any, *, dtype: Any) -> None:
+    """Hash one solver-consumed numeric buffer with explicit dtype and shape."""
+    if value is None:
+        array = np.empty((0,), dtype=dtype)
+    elif hasattr(value, "detach"):
+        array = value.detach().cpu().numpy()
+    else:
+        array = np.asarray(value)
+    array = np.ascontiguousarray(array, dtype=dtype)
+    header = json.dumps(
+        {"label": label, "dtype": array.dtype.str, "shape": list(array.shape)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest.update(len(header).to_bytes(8, "little"))
+    digest.update(header)
+    digest.update(array.tobytes(order="C"))
+
+
+def _geometry_content_digest(scene: Any) -> str:
+    """Digest the hydrated geometry and skin buffers consumed by the adapter."""
+    digest = hashlib.sha256()
+    for object_id in sorted((str(value) for value in scene.objects), key=str):
+        obj = scene.get_object(object_id)
+        skin = obj.get_component("SkinnedMesh") if obj is not None else None
+        mesh = skin or (obj.get_component("Mesh") if obj is not None else None)
+        if mesh is None:
+            continue
+        digest.update(json.dumps(
+            {"object_id": object_id, "component": "SkinnedMesh" if skin else "Mesh"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        _update_content_hash(digest, "vertices", mesh.get_vertices_numpy(), dtype=np.float32)
+        _update_content_hash(digest, "faces", mesh.get_faces_numpy(), dtype=np.uint32)
+        if skin is None:
+            continue
+        skinning = skin.get_skinning_data()
+        digest.update(json.dumps(
+            {"bone_ids": [str(value) for value in (skinning.get("bone_ids") or [])]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        _update_content_hash(digest, "skin_indices", skinning.get("skin_indices"), dtype=np.int64)
+        _update_content_hash(digest, "skin_weights", skinning.get("skin_weights"), dtype=np.float32)
+        _update_content_hash(
+            digest,
+            "inverse_bind_matrices",
+            skinning.get("inverse_bind_matrices"),
+            dtype=np.float32,
+        )
+    return digest.hexdigest()
+
+
+def _hash_json(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _scene_input_evidence(scene: Any) -> dict[str, Any]:
+    from witwin_server.features.timeline.fingerprint import authored_scene_payload
+    payload = _jsonable(authored_scene_payload(scene))
+    radar_object_ids: set[str] = set()
+    for object_id, obj in (payload.get("objects") or {}).items():
+        if any(component.get("type") == "Radar" for component in obj.get("components") or []):
+            radar_object_ids.add(str(object_id))
+    geometry = _geometry_content_digest(scene)
+    payload["solver_geometry_content_sha256"] = geometry
+    payload["scene_fingerprint_schema"] = "witwin.radar.authored-scene.v5"
+    # Component values are stored by Studio's field system as float32, but
+    # Timeline key times/values remain JSON/TOML doubles and the native motion
+    # sampler consumes those doubles.  Canonicalizing the entire Scene to
+    # float32 would make distinct solver inputs share one identity.
+    payload["objects"] = _persisted_numeric_identity(payload.get("objects") or {})
+    objects = payload.get("objects") or {}
+    non_radar_objects = {
+        key: value for key, value in objects.items() if str(key) not in radar_object_ids
+    }
+    # Radar authoring is represented separately by _radar_measurement_contract.
+    # Excluding the settings object here prevents its runtime/review state and
+    # quaternion serialization round-trips from contaminating room/motion identity.
+    payload["objects"] = non_radar_objects
+    return {
+        "schema": "witwin.radar.authored-scene.v5",
+        "fingerprint": _hash_json(payload),
+        "metadata_fingerprint": _hash_json({
+            key: value for key, value in payload.items()
+            if key not in {"objects", "timeline", "solver_geometry_content_sha256"}
+        }),
+        "timeline_fingerprint": _hash_json(payload.get("timeline")),
+        "non_radar_objects_fingerprint": _hash_json(non_radar_objects),
+        "geometry_content_sha256": geometry,
+    }
+
+
+def _scene_input_fingerprint(scene: Any) -> str:
+    return str(_scene_input_evidence(scene)["fingerprint"])
+
+
+def _effective_target_site_budget(obj: Any) -> int:
+    return sum(spec["site_budget"] for spec in _target_specs(obj))
+
+
+def _target_specs(obj: Any) -> list[dict[str, Any]]:
+    from .adapter.target_contract import component_target_specs
+
+    radar = obj.get_component("Radar")
+    if not str(getattr(radar, "animation_targets_json", "") or "").strip() and not str(
+        getattr(radar, "snapshot_target_id", "") or ""
+    ).strip():
+        return []
+    return component_target_specs(radar)
+
+
+def _dynamic_skinned_object_ids(scene: Any) -> list[str]:
+    """Skinned actors moved by keyframed Timeline tracks, in scene order.
+
+    An actor moves when a track drives the actor itself, one of its skin bones,
+    a descendant, or an ancestor; the native sampler treats exactly that set as
+    the actor's moving geometry.
+    """
+    objects = getattr(scene, "objects", {}) or {}
+    manager = getattr(scene, "timeline_manager", None)
+    clip = getattr(manager, "clip", None)
+    moving = {
+        str(track.object_id)
+        for track in (getattr(clip, "tracks", {}) or {}).values()
+        if getattr(track, "keyframes", None)
+    }
+    if not moving:
+        return []
+    children: dict[str, list[str]] = {}
+    for object_id, obj in objects.items():
+        parent = getattr(obj, "parent_id", None)
+        if parent:
+            children.setdefault(str(parent), []).append(str(object_id))
+    dynamic = []
+    for object_id, obj in objects.items():
+        if not callable(getattr(obj, "get_component", None)):
+            continue
+        skin = obj.get_component("SkinnedMesh")
+        if skin is None:
+            continue
+        members = {str(object_id)}
+        try:
+            members.update(str(bone) for bone in (skin.get_skinning_data() or {}).get("bone_ids", ()))
+        except Exception:  # an unhydrated skin still owns its descendants
+            pass
+        pending = [str(object_id)]
+        while pending:
+            for child in children.get(pending.pop(), ()):
+                if child not in members:
+                    members.add(child)
+                    pending.append(child)
+        parent = getattr(obj, "parent_id", None)
+        while parent:
+            members.add(str(parent))
+            parent_obj = scene.get_object(parent)
+            parent = getattr(parent_obj, "parent_id", None) if parent_obj is not None else None
+        if members & moving:
+            dynamic.append(str(object_id))
+    return dynamic
+
+
+def _target_specs_from_args(scene: Any, args: dict[str, Any], *, infer_single: bool) -> list[dict[str, Any]]:
+    """Resolve the new target list or the legacy single target argument.
+
+    Omitted targets resolve to every moving skinned actor. A declared list must
+    include every moving actor: the native sampler cannot treat an undeclared
+    moving actor as static room geometry, so a partial list fails explicitly
+    with the complete suggested list instead of measuring only one actor.
+    """
+    from .adapter.target_contract import normalize_target_specs
+
+    has_targets = "targets" in args
+    legacy_id = str(args.get("target_object_id") or "").strip()
+    if has_targets and legacy_id:
+        raise ToolError(
+            "Use targets or target_object_id, not both.",
+            code="conflicting_target_contract",
+        )
+    values = args.get("targets") if has_targets else (
+        [{"object_id": legacy_id}] if legacy_id else None
+    )
+    dynamic_ids = _dynamic_skinned_object_ids(scene)
+    if values is None and infer_single:
+        candidates = [
+            obj for obj in (getattr(scene, "objects", {}) or {}).values()
+            if callable(getattr(obj, "get_component", None))
+            and obj.get_component("SkinnedMesh") is not None
+        ]
+        if dynamic_ids:
+            values = [{"object_id": object_id} for object_id in dynamic_ids]
+        elif len(candidates) == 1:
+            values = [{"object_id": str(candidates[0].id)}]
+        else:
+            return []
+    if values is None:
+        raise ToolError("Radar requires at least one animated target.", code="missing_target")
+    try:
+        specs = normalize_target_specs(scene, values)
+    except ValueError as exc:
+        message = str(exc)
+        code = "target_not_skinned" if "SkinnedMesh" in message else "missing_target"
+        if "duplicated" in message:
+            code = "duplicate_target"
+        raise ToolError(message, code=code) from exc
+    declared = {spec["object_id"] for spec in specs}
+    missing = [object_id for object_id in dynamic_ids if object_id not in declared]
+    if missing:
+        raise ToolError(
+            "Every moving actor must be a Radar target; the target list omits "
+            + ", ".join(missing) + ". Declare all dynamic objects together.",
+            code="undeclared_dynamic_target",
+            detail={
+                "missing_object_ids": missing,
+                "dynamic_object_ids": dynamic_ids,
+                "suggested_targets": _target_input_args(specs) + [
+                    {"object_id": object_id} for object_id in missing],
+            },
+        )
+    return specs
+
+
+def _target_input_args(target_specs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project resolved target evidence back onto the public input schema."""
+    return [
+        {
+            key: spec[key]
+            for key in ("object_id", "site_budget")
+            if key in spec
+        }
+        for spec in target_specs
+    ]
+
+
+def _radar_measurement_contract(obj: Any) -> dict[str, Any]:
+    """Durable authored Radar inputs actually consumed by the native adapter."""
+    from dataclasses import asdict
+    from .adapter.config_map import ConfigMap
+    from .adapter.specs import SensorSpec, TracerSpec
+
+    radar = obj.get_component("Radar")
+    sensor = asdict(SensorSpec.from_component(radar))
+    contract = _persisted_numeric_identity({
+        "config": ConfigMap.build_dict(obj),
+        "tracer": asdict(TracerSpec.from_component(radar)),
+        "targets": _target_specs(obj),
+        "target": {
+            "object_id": str(radar.snapshot_target_id or ""),
+            "local_point_m": _jsonable(radar.snapshot_local_point),
+            "rcs_m2": float(radar.snapshot_rcs_m2),
+            "polarization": _jsonable(radar.snapshot_polarization),
+        },
+        "animation": {
+            "start_s": float(radar.t0),
+            "duration_s": float(radar.animation_duration_s),
+            "fps": float(radar.animation_fps),
+            "motion_sampling": str(radar.motion_sampling),
+            "target_multipath": bool(radar.target_multipath),
+            "target_motion_sampling": str(radar.target_motion_sampling),
+            "target_site_budget": _effective_target_site_budget(obj),
+        },
+    })
+    # SensorSpec is derived from the exact float32 world matrix consumed by
+    # the solver.  Do not decimal-round it: adjacent authored pose ULPs can
+    # change LOS at a visibility boundary and therefore must change identity.
+    contract["sensor"] = _jsonable(sensor)
+    return contract
+
+
+def _measurement_input_fingerprint(scene: Any, obj: Any) -> str:
+    radar = obj.get_component("Radar")
+    if radar is None:
+        raise ValueError("Radar measurement fingerprint requires a Radar component.")
+    payload = {
+        "schema": "witwin.radar.agent-input.v10",
+        "scene_fingerprint": _scene_input_fingerprint(scene),
+        "scene_id": str(scene.scene_id),
+        "radar_object_id": str(obj.id),
+        "radar_contract": _radar_measurement_contract(obj),
+        "physics": {
+            "target": {
+                "components": ["los"] + (["reflection"] if radar.target_multipath else []),
+                "max_depth": 1 if radar.target_multipath else 0,
+                "motion_sampling": str(radar.target_motion_sampling),
+                "site_budget": _effective_target_site_budget(obj),
+            },
+            "targets": _target_specs(obj),
+            "environment": {"components": ["reflection"], "max_depth": 1},
+            "device": "cuda",
+        },
+        "packages": {
+            name: _package_version(name)
+            for name in ("witwin", "witwin-radar", "witwin-channel", "torch")
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _timeline_summary(scene: Any) -> dict[str, Any]:
+    manager = getattr(scene, "timeline_manager", None)
+    if manager is None:
+        return {"available": False, "duration_s": 0.0, "playing": False, "recording": False}
+    clip = getattr(manager, "clip", None)
+    return {
+        "available": clip is not None,
+        "duration_s": float(getattr(clip, "duration", 0.0) or 0.0),
+        "playing": bool(getattr(manager, "is_playing", False)),
+        "recording": bool(getattr(manager, "is_recording", False)),
+    }
+
+
+def _default_automatic_placement_interval(scene: Any) -> dict[str, float] | None:
+    """Choose an integral-frame interval covering the complete baked Timeline.
+
+    A placement that is validated against only the historical five-second
+    default cannot truthfully claim whole-path coverage for longer motion. Use
+    the complete authored interval at the highest supported aligned frame rate;
+    fail closed when the Timeline cannot be represented by the Radar timebase.
+    """
+    timeline = _timeline_summary(scene)
+    duration = float(timeline["duration_s"])
+    if (not timeline["available"] or duration <= 0 or duration > 30
+            or timeline["playing"] or timeline["recording"]):
+        return None
+    from .adapter.timebase import aligned_frame_count
+    for fps_value in range(30, 0, -1):
+        fps = float(fps_value)
+        frame_count = aligned_frame_count(duration, fps)
+        if frame_count is not None:
+            return {"start_s": 0.0, "duration_s": frame_count / fps, "fps": fps}
+    return None
+
+
+def _recorded_replay_summary(ctx: Any, obj: Any) -> dict[str, Any]:
+    """Inspect the saved Figure separately from transient native worker state."""
+    from .adapter.replay import MAX_PREVIEW_BYTES, motion_fingerprint
+
+    summary = {
+        "status": "not_prepared", "manifest_present": False,
+        "payload_available": False, "payload_integrity_verified": False,
+        "motion_current": False, "ready_for_timeline": False,
+        "scope": "saved numeric RP/RD recording; not a live native solver handle or geometry validation",
+    }
+    try:
+        # Deserialization restores the serialized Figure property, while the
+        # imperative Figure builder may still be empty until its first update.
+        figure = (obj.get_component("Radar").to_dict().get("values") or {}).get("signal_figure") or {}
+        record = (figure.get("data") or {}).get("recording")
+        if not isinstance(record, dict):
+            return summary
+        summary["manifest_present"] = True
+        asset = record.get("asset") or {}
+        asset_id = str(asset.get("assetId") or "")
+        times = np.asarray(record.get("timesS"), dtype=np.float64)
+        stride = int(record.get("frameStride", 0))
+        expected_bytes = len(times) * stride * 4
+        if (
+            record.get("schema") != 1 or record.get("sceneId") != obj.scene.scene_id
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", asset_id)
+            or asset.get("uri") != f"/scenes/{obj.scene.scene_id}/assets/{asset_id}"
+            or asset.get("format") != "witwin.radar.replay.float32.v1"
+            or times.ndim != 1 or len(times) < 2 or not np.isfinite(times).all()
+            or not np.all(np.diff(times) > 0)
+            or not math.isfinite(float(record.get("endTimeS", 0)))
+            or float(record.get("endTimeS", 0)) <= times[-1]
+            or stride != len(record.get("rangeM", [])) * (1 + len(record.get("velocityMps", [])))
+            or expected_bytes <= 0 or expected_bytes > MAX_PREVIEW_BYTES
+            or expected_bytes != asset.get("byteLength")
+        ):
+            return {**summary, "status": "invalid_manifest"}
+        summary.update({"asset": copy.deepcopy(asset), "frame_count": len(times),
+                        "interval_s": [float(times[0]), float(record["endTimeS"])]})
+        handler = getattr(ctx.api.server, "handlers", {}).get("binary_assets")
+        if handler is None:
+            return {**summary, "status": "service_unavailable"}
+        service = handler.service
+        payload = service.get_bytes(asset_id)
+        path = service.resolve_file(asset_id) if payload is None else None
+        if payload is None and (path is None or not path.is_file()):
+            return {**summary, "status": "missing_payload"}
+        summary["payload_available"] = True
+        summary["storage"] = "persistent_file" if path is not None else "memory"
+        size = path.stat().st_size if path is not None else len(payload)
+        digest = _sha256_file(path) if path is not None and size == expected_bytes else (
+            hashlib.sha256(payload).hexdigest() if payload is not None else ""
+        )
+        summary["payload_integrity_verified"] = size == expected_bytes and asset.get("contentHash") == f"sha256:{digest}"
+        if not summary["payload_integrity_verified"]:
+            return {**summary, "status": "payload_mismatch"}
+        fingerprint = record.get("sceneFingerprint")
+        summary["motion_current"] = bool(fingerprint and fingerprint == motion_fingerprint(obj.scene))
+        if not summary["motion_current"]:
+            return {**summary, "status": "stale_motion" if fingerprint else "unverified_motion"}
+        return {**summary, "status": "available", "ready_for_timeline": True}
+    except (OSError, TypeError, ValueError, AttributeError, OverflowError) as exc:
+        return {**summary, "status": "invalid_manifest", "detail": str(exc)}
+
+
+def _recorded_replay_is_ready(summary: dict[str, Any]) -> bool:
+    """One completion predicate shared by automatic and explicit Replay paths."""
+    return (
+        summary.get("status") == "available"
+        and summary.get("payload_available") is True
+        and summary.get("payload_integrity_verified") is True
+        and summary.get("motion_current") is True
+        and summary.get("ready_for_timeline") is True
+    )
+
+
+def _sensor_summary(obj: Any) -> dict[str, Any]:
+    radar = obj.get_component("Radar")
+    pose = SensorSpec.from_component(radar)
+    target_id = str(getattr(radar, "snapshot_target_id", "") or "")
+    result_present = bool(getattr(radar, "_animation_result", False))
+    current_fingerprint = None
+    if getattr(obj, "scene", None) is not None:
+        try:
+            current_fingerprint = _measurement_input_fingerprint(obj.scene, obj)
+        except Exception:
+            current_fingerprint = None
+    recorded_fingerprint = str(getattr(radar, "_last_result_input_fingerprint", "") or "") or None
+    waveform = Derived.compute(radar)
+    return {
+        "object_id": str(obj.id),
+        "name": str(obj.name),
+        "tag": str(getattr(obj, "tag", "") or ""),
+        "position_m": _jsonable(pose.position),
+        "look_at_point_m": _jsonable(pose.target),
+        "up": _jsonable(pose.up),
+        "fov_deg": float(radar.fov),
+        "waveform": {
+            "slope_mhz_per_us": float(radar.slope),
+            "sample_rate_ksps": float(radar.sample_rate),
+            "range_bin_count": int(radar.num_range_bins),
+            "range_resolution_m": float(waveform["range_resolution_m"]),
+            "max_range_m": float(waveform["max_range_m"]),
+        },
+        "target_object_id": target_id or None,
+        "targets": _target_specs(obj),
+        # Read-only current authored measurement identity.  Orchestrators use
+        # this to distinguish harmless Radar UI/runtime-state normalization
+        # from a real pose/FOV/target/waveform/scene-input change after export.
+        "measurement_input_fingerprint": current_fingerprint,
+        "animation": {
+            "start_s": float(radar.t0),
+            "duration_s": float(radar.animation_duration_s),
+            "fps": float(radar.animation_fps),
+            "view": str(radar.view),
+            "target_multipath": bool(radar.target_multipath),
+            "target_motion_sampling": str(radar.target_motion_sampling),
+            "target_site_budget": _effective_target_site_budget(obj),
+        },
+        "result": {
+            "running": bool(getattr(radar, "_snapshot_running", False)),
+            "present": result_present,
+            "current": bool(result_present and recorded_fingerprint and recorded_fingerprint == current_fingerprint),
+            "input_fingerprint": recorded_fingerprint,
+            "run_id": str(getattr(radar, "_solver_run_id", "") or "") or None,
+            "result_handle": str(getattr(radar, "_solver_result_handle", "") or "") or None,
+            "export_path": str(getattr(radar, "animation_export_path", "") or "") or None,
+            "status": str(getattr(radar, "animation_status", "") or ""),
+            "replay_status": str(getattr(radar, "replay_status", "") or ""),
+        },
+        "physics_contract": {
+            "components": ["los", "reflection"],
+            "max_depth": 1,
+            "device": "cuda",
+            "room_role": "occlusion plus native static single-bounce specular reflection",
+            "target_multipath": bool(radar.target_multipath),
+            "target_max_depth": 1 if radar.target_multipath else 0,
+            "target_motion_sampling": str(radar.target_motion_sampling),
+            "target_site_budget": _effective_target_site_budget(obj),
+            "target_model": (
+                "interval-visible stable skinned surface sites; uncalibrated equal-RCS "
+                "shares are based on all declared sites and are not renormalized"
+            ),
+        },
+    }
+
+
+def _operation_result(receipt: dict[str, Any], obj: Any | None = None) -> dict[str, Any]:
+    status = str(receipt.get("status") or "")
+    completion_status = {
+        "queued": "pending",
+        "running": "pending",
+        "simulated": "simulated_unverified",
+        "verified": "verified",
+        "replay_ready": "verified",
+        "exported": "exported",
+        "failed": "failed",
+        "stale": "failed",
+        "interrupted": "failed",
+    }.get(status, "pending")
+    result = {
+        "ok": status not in {"failed", "stale", "interrupted"},
+        "status": status,
+        "completion_status": completion_status,
+        "can_claim_success": completion_status in {"verified", "exported"},
+        "operation_id": receipt.get("operation_id"),
+        "scene_id": receipt.get("scene_id"),
+        "radar_object_id": receipt.get("radar_object_id"),
+        "input_fingerprint": receipt.get("input_fingerprint"),
+        "created_at": receipt.get("created_at"),
+        "updated_at": receipt.get("updated_at"),
+        "run_id": receipt.get("run_id"),
+        "result_handle": receipt.get("result_handle"),
+        "verification": receipt.get("verification"),
+        "error": receipt.get("error"),
+        "next_step": receipt.get("next_step"),
+        "motion_fidelity": receipt.get("motion_fidelity"),
+    }
+    if obj is not None:
+        result["radar"] = _sensor_summary(obj)
+    return result
+
+
+def _sensor_configuration_state(obj: Any) -> dict[str, Any]:
+    radar = obj.get_component("Radar")
+    transform = obj.get_component("Transform")
+    return {
+        "target_object_id": str(radar.snapshot_target_id or ""),
+        "targets": _target_specs(obj),
+        "start_s": float(radar.t0),
+        "duration_s": float(radar.animation_duration_s),
+        "fps": float(radar.animation_fps),
+        "target_multipath": bool(radar.target_multipath),
+        "target_motion_sampling": str(radar.target_motion_sampling),
+        "target_site_budget": int(radar.target_site_budget),
+        "fov_deg": float(radar.fov),
+        "slope_mhz_per_us": float(radar.slope),
+        "position_m": _jsonable(transform.position),
+        "rotation_rad": _jsonable(transform.rotation),
+    }
+
+
+def _configuration_matches(current: dict[str, Any], expected: dict[str, Any]) -> bool:
+    if str(current.get("target_object_id") or "") != str(expected.get("target_object_id") or ""):
+        return False
+    if current.get("targets") != expected.get("targets", current.get("targets")):
+        return False
+    if bool(current.get("target_multipath", False)) != bool(expected.get("target_multipath", False)):
+        return False
+    if str(current.get("target_motion_sampling") or "chirp") != str(
+        expected.get("target_motion_sampling") or "chirp"
+    ):
+        return False
+    if int(current.get("target_site_budget", 24)) != int(expected.get("target_site_budget", 24)):
+        return False
+    for key in ("start_s", "duration_s", "fps", "fov_deg"):
+        if not math.isclose(float(current.get(key, math.nan)), float(expected.get(key, math.nan)), abs_tol=1e-9):
+            return False
+    # Receipts written before range focusing did not record waveform slope.
+    # Keep those retries compatible; every new receipt binds this field.
+    if "slope_mhz_per_us" in expected and not math.isclose(
+        float(current.get("slope_mhz_per_us", math.nan)),
+        float(expected["slope_mhz_per_us"]),
+        abs_tol=1e-9,
+    ):
+        return False
+    for key in ("position_m", "rotation_rad"):
+        lhs = np.asarray(current.get(key), dtype=np.float64)
+        rhs = np.asarray(expected.get(key), dtype=np.float64)
+        if lhs.shape != rhs.shape or not np.allclose(lhs, rhs, rtol=0, atol=1e-8):
+            return False
+    return True
+
+
+def _require_live_result_identity(obj: Any, receipt: dict[str, Any]) -> Any:
+    radar = obj.get_component("Radar")
+    live_run = str(getattr(radar, "_solver_run_id", "") or "")
+    live_handle = str(getattr(radar, "_solver_result_handle", "") or "")
+    if (
+        not bool(getattr(radar, "_animation_result", False))
+        or not live_run
+        or not live_handle
+        or live_run != str(receipt.get("run_id") or "")
+        or live_handle != str(receipt.get("result_handle") or "")
+    ):
+        raise ToolError(
+            "The live Radar component no longer owns the submitted native result.",
+            code="result_handle_unavailable",
+            detail={
+                "expected_run_id": receipt.get("run_id"),
+                "expected_result_handle": receipt.get("result_handle"),
+                "live_run_id": live_run or None,
+                "live_result_handle": live_handle or None,
+            },
+        )
+    return radar
+
+
+def _result_source(ctx: Any, obj: Any, receipt: dict[str, Any]):
+    """Use a live result or a receipt-bound export, never invent a worker handle."""
+    radar = obj.get_component("Radar")
+    if (radar._animation_result or radar._solver_result_handle or radar._solver_run_id):
+        # A matching live handle does not invalidate an already verified,
+        # receipt-bound export. Prefer those durable bytes so another logical
+        # export id remains idempotent instead of serializing a second NPZ with
+        # a different archive identity. Verify the live identity first so an
+        # unrelated in-memory result can never be hidden by an older file.
+        radar = _require_live_result_identity(obj, receipt)
+        if receipt.get("exports"):
+            from .adapter.durable_result import load_verified_export
+            from .adapter.replay import motion_fingerprint
+            saved, export = load_verified_export(
+                ctx.api.server.default_scene_dir, receipt, scene_id=obj.scene.scene_id,
+                input_fingerprint=_measurement_input_fingerprint(obj.scene, obj),
+                motion_fingerprint=motion_fingerprint(obj.scene),
+            )
+            return radar, saved, export
+        return radar, None, None
+    from .adapter.durable_result import load_verified_export
+    from .adapter.replay import motion_fingerprint
+    saved, export = load_verified_export(
+        ctx.api.server.default_scene_dir, receipt, scene_id=obj.scene.scene_id,
+        input_fingerprint=_measurement_input_fingerprint(obj.scene, obj),
+        motion_fingerprint=motion_fingerprint(obj.scene),
+    )
+    return radar, saved, export
+
+
+def _durable_result_summaries(ctx: Any, obj: Any) -> list[dict[str, Any]]:
+    summaries = []
+    for operation_id in _operation_map(ctx):
+        receipt = _get_operation(ctx, operation_id)
+        if (receipt.get("scene_id") != obj.scene.scene_id
+                or receipt.get("radar_object_id") != obj.id or not receipt.get("exports")):
+            continue
+        summary = {"operation_id": operation_id, "status": "unavailable",
+                   "created_at": receipt.get("created_at"), "updated_at": receipt.get("updated_at")}
+        try:
+            from .adapter.durable_result import load_verified_export
+            from .adapter.replay import motion_fingerprint
+            saved, export = load_verified_export(
+                ctx.api.server.default_scene_dir, receipt, scene_id=obj.scene.scene_id,
+                input_fingerprint=_measurement_input_fingerprint(obj.scene, obj),
+                motion_fingerprint=motion_fingerprint(obj.scene),
+            )
+            summary.update(status="available", current=True, export=export,
+                           frame_count=len(saved.times_s), source="verified_native_npz")
+        except ToolError as exc:
+            summary.update(current=False, error={"code": exc.code, "message": str(exc)})
+        summaries.append(summary)
+    return summaries
+
+
+def _expected_result_evidence(scene: Any, radar: Any, native_preflight: dict[str, Any]) -> dict[str, Any]:
+    measurement = _validate_interval(
+        scene, radar, float(radar.t0), float(radar.animation_duration_s), float(radar.animation_fps),
+    )
+    topology = dict(native_preflight.get("topology") or {})
+    declared_site_count = int(topology["declared_site_count"])
+    active_site_count = int(topology["active_site_count"])
+    occluded_site_count = int(topology["occluded_site_count"])
+    active_site_ids = [int(value) for value in topology["active_site_ids"]]
+    return {
+        "scene_id": str(scene.scene_id),
+        "model": str(native_preflight["model"]),
+        "frame_count": int(measurement["frame_count"]),
+        "cube_shape": list(measurement["cube_shape"]),
+        "site_count": active_site_count,
+        "declared_site_count": declared_site_count,
+        "active_site_count": active_site_count,
+        "occluded_site_count": occluded_site_count,
+        "active_site_ids": active_site_ids,
+        "rcs_policy": str(topology["rcs_policy"]),
+        "rcs_per_site_m2": float(radar.snapshot_rcs_m2) / declared_site_count,
+        "visibility_coverage": float(topology["visibility_coverage"]),
+        "visibility_quality": str(topology["visibility_quality"]),
+        "start_s": float(radar.t0),
+        "fps": float(radar.animation_fps),
+        "versions": {
+            name: _package_version(name)
+            for name in ("witwin-radar", "witwin-channel", "witwin")
+        },
+        "device_prefix": "cuda",
+        "solver_completion_contract": "atomic_active_sites_no_zero_fill_v2",
+        "environment_reflection_model": "radar04_native_single_bounce",
+        "environment_reflection_max_depth": 1,
+        "environment_coherent_with_target": True,
+    }
+
+
+# Receipts in these states represent a measurement that already ran or is
+# still running for its inputs; re-submitting those inputs must resolve to it.
+_LIVE_MEASUREMENT_STATUSES = frozenset({
+    "queued", "running", "simulated", "verified", "replay_ready", "exported",
+})
+
+
+def _is_measurement_receipt(receipt: Any) -> bool:
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("kind", "animation_measurement") == "animation_measurement"
+        and "input_fingerprint" in receipt
+    )
+
+
+def _live_measurement(
+    ctx: Any, *, scene_id: str, radar_object_id: str, input_fingerprint: str,
+) -> dict[str, Any] | None:
+    """The existing measurement of exactly these inputs, oldest first."""
+    matches = [
+        receipt for receipt in _operation_map(ctx).values()
+        if _is_measurement_receipt(receipt)
+        and str(receipt.get("scene_id") or "") == str(scene_id)
+        and str(receipt.get("radar_object_id") or "") == str(radar_object_id)
+        and str(receipt.get("input_fingerprint") or "") == str(input_fingerprint)
+        and receipt.get("status") in _LIVE_MEASUREMENT_STATUSES
+    ]
+    if not matches:
+        return None
+    first = min(matches, key=lambda receipt: (str(receipt.get("created_at") or ""), str(receipt["operation_id"])))
+    return _get_operation(ctx, str(first["operation_id"]))
+
+
+def _measurement_operation_id(
+    ctx: Any, *, scene_id: str, radar_object_id: str, input_fingerprint: str,
+) -> str:
+    """Deterministic operation id of the one measurement of these inputs.
+
+    A live measurement keeps its id; after a failed, interrupted or cancelled
+    attempt the next retry suffix is used so a real retry stays possible.
+    """
+    live = _live_measurement(
+        ctx, scene_id=scene_id, radar_object_id=radar_object_id, input_fingerprint=input_fingerprint,
+    )
+    if live is not None:
+        return str(live["operation_id"])
+    base = f"radar-measure-{str(input_fingerprint)[:24]}"
+    candidate, attempt = base, 0
+    while _get_operation(ctx, candidate) is not None:
+        attempt += 1
+        candidate = f"{base}-retry-{attempt}"
+    return candidate
+
+
+def _require_matching_operation(
+    ctx: Any,
+    operation_id: str,
+    *,
+    scene_id: str,
+    radar_object_id: str,
+    input_fingerprint: str | None = None,
+    motion_fidelity_report_id: str | None = None,
+) -> dict[str, Any]:
+    receipt = _get_operation(ctx, operation_id)
+    if receipt is None:
+        raise ToolError(
+            f"Radar operation not found: {operation_id}",
+            code="missing_radar_operation",
+            detail={"operation_id": operation_id},
+        )
+    expected = {"scene_id": str(scene_id), "radar_object_id": str(radar_object_id)}
+    if input_fingerprint is not None:
+        expected["input_fingerprint"] = str(input_fingerprint)
+    if motion_fidelity_report_id is not None:
+        expected["motion_fidelity_report_id"] = str(
+            motion_fidelity_report_id)
+    conflicts = {
+        key: {"stored": receipt.get(key), "requested": value}
+        for key, value in expected.items()
+        if str(receipt.get(key) or "") != str(value)
+    }
+    if conflicts:
+        raise ToolError(
+            "operation_id is already bound to different Radar inputs",
+            code="operation_conflict",
+            detail={"operation_id": operation_id, "conflicts": conflicts},
+        )
+    return receipt
+
+
+async def _run_animation_job(
+    ctx: Any,
+    *,
+    operation_id: str,
+    scene: Any,
+    obj: Any,
+    input_fingerprint: str,
+    native_preflight: dict[str, Any],
+    motion_fidelity: dict[str, Any] | None = None,
+) -> None:
+    receipt = _get_operation(ctx, operation_id) or {}
+    receipt.update(status="running", next_step="wait_for_simulation")
+    _put_operation(ctx, receipt)
+    radar = obj.get_component("Radar")
+    setattr(radar, "_agent_input_fingerprint", input_fingerprint)
+    setattr(radar, "_agent_native_preflight", copy.deepcopy(native_preflight))
+    if motion_fidelity is not None:
+        setattr(radar, "_motion_fidelity_provenance", copy.deepcopy(motion_fidelity))
+    def _on_submitted(run_id: str) -> None:
+        latest = _get_operation(ctx, operation_id) or receipt
+        _put_operation(ctx, {
+            **latest,
+            "status": "running",
+            "run_id": str(run_id),
+            "next_step": "wait_for_simulation",
+        })
+    try:
+        await radar._simulate_async(animation=True, on_submitted=_on_submitted)
+        current = _measurement_input_fingerprint(scene, obj)
+        if current != input_fingerprint:
+            _put_operation(ctx, {
+                **receipt,
+                "status": "stale",
+                "run_id": str(getattr(radar, "_solver_run_id", "") or "") or None,
+                "result_handle": str(getattr(radar, "_solver_result_handle", "") or "") or None,
+                "error": {
+                    "code": "scene_changed_during_simulation",
+                    "message": "The scene changed while the immutable solver copy was running.",
+                    "expected_input_fingerprint": input_fingerprint,
+                    "current_input_fingerprint": current,
+                },
+                "next_step": "plan_again",
+            })
+            return
+        run_id = str(getattr(radar, "_solver_run_id", "") or "")
+        result_handle = str(getattr(radar, "_solver_result_handle", "") or "")
+        if not bool(getattr(radar, "_animation_result", False)) or not run_id or not result_handle:
+            raise RuntimeError(
+                "Native simulation returned without publishing an animation result, run id, and result handle."
+            )
+        latest = _get_operation(ctx, operation_id) or receipt
+        completed = {
+            **latest,
+            "run_id": run_id,
+            "result_handle": result_handle,
+        }
+        manifest = await asyncio.to_thread(radar._query_result, "animation_manifest", {})
+        expected = dict(completed.get("expected_evidence") or {})
+        checks = _native_manifest_checks(manifest, completed, expected)
+        if not all(checks.values()):
+            _put_operation(ctx, {
+                **completed,
+                "status": "failed",
+                "verification": {"passed": False, "checks": checks, "manifest": manifest},
+                "error": {
+                    "code": "result_evidence_mismatch",
+                    "message": "Native result did not satisfy every preflight completion requirement.",
+                },
+                "next_step": "inspect_failure",
+            })
+            return
+        setattr(radar, "_last_result_input_fingerprint", input_fingerprint)
+        recorded = _recorded_replay_summary(ctx, obj)
+        if not _recorded_replay_is_ready(recorded):
+            try:
+                replay_status = await radar.prepare_synchronized_replay()
+            except Exception as replay_error:  # noqa: BLE001 - preserve diagnostic evidence
+                _put_operation(ctx, {
+                    **completed,
+                    "status": "failed",
+                    "verification": {"passed": True, "checks": checks, "manifest": manifest},
+                    "error": {
+                        "code": "replay_preparation_failed",
+                        "type": type(replay_error).__name__,
+                        "message": str(replay_error),
+                    },
+                    "next_step": "inspect_failure",
+                })
+                return
+            recorded = _recorded_replay_summary(ctx, obj)
+        else:
+            replay_status = str(getattr(radar, "replay_status", "Replay ready"))
+        current = _measurement_input_fingerprint(scene, obj)
+        if current != input_fingerprint:
+            _put_operation(ctx, {
+                **completed,
+                "status": "stale",
+                "verification": {"passed": True, "checks": checks, "manifest": manifest},
+                "error": {
+                    "code": "scene_changed_during_replay_publication",
+                    "message": "The scene changed before the completed Replay could be bound.",
+                    "expected_input_fingerprint": input_fingerprint,
+                    "current_input_fingerprint": current,
+                },
+                "next_step": "plan_again",
+            })
+            return
+        if not _recorded_replay_is_ready(recorded):
+            _put_operation(ctx, {
+                **completed,
+                "status": "failed",
+                "verification": {"passed": True, "checks": checks, "manifest": manifest},
+                "error": {
+                    "code": "replay_preparation_unverified",
+                    "message": "The multi-frame result exists, but no current verified Timeline Replay was published.",
+                    "recorded_replay": recorded,
+                },
+                "next_step": "inspect_failure",
+            })
+            return
+        _put_operation(ctx, {
+            **completed,
+            "status": "replay_ready",
+            "verification": {"passed": True, "checks": checks, "manifest": manifest},
+            "replay": {
+                "ready": True,
+                "status": str(replay_status),
+                "tx_index": int(radar.tx_index),
+                "rx_index": int(radar.rx_index),
+                "recorded_replay": recorded,
+            },
+            "error": None,
+            "next_step": "export_result",
+        })
+    except asyncio.CancelledError:
+        latest = _get_operation(ctx, operation_id) or receipt
+        _put_operation(ctx, {
+            **latest,
+            "status": "interrupted",
+            "error": {"code": "task_cancelled", "message": "Radar orchestration task was cancelled."},
+            "next_step": "inspect_before_retry",
+        })
+        raise
+    except Exception as exc:
+        latest = _get_operation(ctx, operation_id) or receipt
+        _put_operation(ctx, {
+            **latest,
+            "status": "failed",
+            "error": {
+                "code": "native_simulation_failed",
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+            "next_step": "inspect_failure",
+        })
+    finally:
+        if getattr(radar, "_agent_input_fingerprint", None) == input_fingerprint:
+            delattr(radar, "_agent_input_fingerprint")
+        if hasattr(radar, "_agent_native_preflight"):
+            delattr(radar, "_agent_native_preflight")
+        if (motion_fidelity is not None
+                and getattr(radar, "_motion_fidelity_provenance", None)
+                == motion_fidelity):
+            delattr(radar, "_motion_fidelity_provenance")
+
+
+def _validate_interval(scene: Any, radar: Any, start_s: float, duration_s: float, fps: float) -> dict[str, Any]:
+    values = np.asarray([start_s, duration_s, fps], dtype=np.float64)
+    if not np.isfinite(values).all() or start_s < 0 or not 0 < duration_s <= 30 or not 1 <= fps <= 30:
+        raise ToolError(
+            "Animation requires start >= 0, duration (0,30] seconds, and FPS [1,30].",
+            code="invalid_measurement_interval",
+        )
+    from .adapter.timebase import aligned_frame_count
+    frame_count_float = duration_s * fps
+    frame_count = aligned_frame_count(duration_s, fps)
+    if frame_count is None:
+        raise ToolError(
+            "duration_s * fps must be an integer of at least two frames.",
+            code="invalid_measurement_interval",
+            detail={"frame_count": frame_count_float},
+        )
+    timeline = _timeline_summary(scene)
+    if not timeline["available"] or start_s + duration_s > timeline["duration_s"] + 1e-7:
+        raise ToolError(
+            "Requested measurement extends beyond the baked Studio timeline.",
+            code="timeline_interval_unavailable",
+            detail={"timeline": timeline, "requested_end_s": start_s + duration_s},
+        )
+    if timeline["playing"] or timeline["recording"]:
+        raise ToolError(
+            "Pause timeline playback and recording before Radar preflight or simulation.",
+            code="timeline_busy",
+            detail={"timeline": timeline},
+        )
+    result_bytes = (
+        frame_count * int(radar.num_tx) * int(radar.num_rx)
+        * int(radar.chirp_per_frame) * int(radar.adc_samples) * 8
+    )
+    needed_bytes = max(512 * 1024**2, 3 * result_bytes)
+    if result_bytes > MAX_RESULT_BYTES:
+        raise ToolError(
+            "Animation exceeds the 1536 MiB raw-cube budget; settings were not changed.",
+            code="result_memory_budget_exceeded",
+            detail={"result_bytes": result_bytes, "limit_bytes": MAX_RESULT_BYTES},
+        )
+    available_bytes = int(available_memory_bytes())
+    if available_bytes < needed_bytes:
+        raise ToolError(
+            "Insufficient free host memory for the requested result; settings were not changed.",
+            code="insufficient_host_memory",
+            detail={"available_bytes": available_bytes, "required_headroom_bytes": needed_bytes},
+        )
+    return {
+        "start_s": start_s,
+        "duration_s": duration_s,
+        "fps": fps,
+        "frame_count": int(frame_count),
+        "cube_shape": [
+            frame_count,
+            int(radar.num_tx),
+            int(radar.num_rx),
+            int(radar.chirp_per_frame),
+            int(radar.adc_samples),
+        ],
+        "complex64_result_bytes": result_bytes,
+        "required_host_headroom_bytes": needed_bytes,
+        "available_host_memory_bytes": available_bytes,
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _export_evidence(ctx: Any, path: Path) -> dict[str, Any]:
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ToolError("Radar export file is missing or empty.", code="export_verification_failed")
+    server = getattr(getattr(ctx, "api", None), "server", None)
+    project = Path(getattr(server, "default_scene_dir", ".")).resolve()
+    resolved = path.resolve()
+    expected_folder = (project / "results" / "radar-animation").resolve()
+    if not resolved.is_relative_to(expected_folder):
+        raise ToolError(
+            "Radar export is outside the project results/radar-animation directory.",
+            code="export_path_invalid",
+            detail={"path": str(resolved), "expected_folder": str(expected_folder)},
+        )
+    return {
+        "path": str(resolved),
+        "project_relative_path": str(resolved.relative_to(project)).replace("\\", "/"),
+        "size_bytes": resolved.stat().st_size,
+        "sha256": _sha256_file(resolved),
+        "format": "native_npz",
+    }
+
+
+MAX_SOLVE_SITE_EXCLUSIONS = 16
+
+
+def _expected_after_solve_exclusions(
+    manifest: dict[str, Any], expected: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Apply the native solve's recorded site exclusions to the preflight evidence.
+
+    The solve removes, for the whole interval, a preflight-active site its own
+    frozen topology cannot reach. Each exclusion must name a distinct
+    preflight-active site; the active set, counts and coverage are then judged
+    against the preflight set minus exactly those sites.
+    """
+    exclusions = list(manifest.get("solve_exclusions") or [])
+    if not exclusions:
+        return expected, True
+    preflight_ids = [int(value) for value in (expected.get("active_site_ids") or [])]
+    excluded_ids = [int(item.get("site_id", -1)) for item in exclusions if isinstance(item, dict)]
+    valid = (
+        len(excluded_ids) == len(exclusions) <= MAX_SOLVE_SITE_EXCLUSIONS
+        and len(set(excluded_ids)) == len(excluded_ids)
+        and set(excluded_ids) <= set(preflight_ids)
+        and len(excluded_ids) < len(preflight_ids)
+    )
+    if not valid:
+        return expected, False
+    remaining = [value for value in preflight_ids if value not in set(excluded_ids)]
+    declared = int(expected.get("declared_site_count", 0) or 0)
+    return {
+        **expected,
+        "site_count": len(remaining),
+        "active_site_count": len(remaining),
+        "occluded_site_count": int(expected.get("occluded_site_count", 0)) + len(excluded_ids),
+        "active_site_ids": remaining,
+        "visibility_coverage": len(remaining) / declared if declared else float("nan"),
+        "visibility_quality": "degraded_interval_global_subset",
+    }, True
+
+
+def _native_manifest_checks(
+    manifest: dict[str, Any],
+    receipt: dict[str, Any],
+    expected: dict[str, Any],
+) -> dict[str, bool]:
+    """Validate native result evidence without performing RF/DSP work."""
+    expected, solve_exclusions_valid = _expected_after_solve_exclusions(manifest, expected)
+    frame_count = int(expected.get("frame_count", 0) or 0)
+    required_evidence_frames = max(2, int(math.ceil(frame_count * 0.1)))
+    checks = {
+        "input_fingerprint_matches": manifest.get("input_fingerprint") == receipt["input_fingerprint"],
+        "scene_id_matches": str(manifest.get("scene_id") or "") == str(expected.get("scene_id") or ""),
+        "model_matches": str(manifest.get("model") or "") == str(expected.get("model") or ""),
+        "frame_count_matches": int(manifest.get("frame_count", -1)) == int(expected.get("frame_count", -2)),
+        "cube_shape_matches": list(manifest.get("cube_shape") or []) == list(expected.get("cube_shape") or []),
+        "site_count_matches": int(manifest.get("site_count", -1)) == int(expected.get("site_count", -2)),
+        "declared_site_count_matches": int(manifest.get("declared_site_count", -1))
+        == int(expected.get("declared_site_count", -2)),
+        "active_site_count_matches": int(manifest.get("active_site_count", -1))
+        == int(expected.get("active_site_count", -2)),
+        "occluded_site_count_matches": int(manifest.get("occluded_site_count", -1))
+        == int(expected.get("occluded_site_count", -2)),
+        "site_partition_is_complete": (
+            int(manifest.get("declared_site_count", -1))
+            == int(manifest.get("active_site_count", -2))
+            + int(manifest.get("occluded_site_count", -3))
+        ),
+        "active_site_ids_match": [int(value) for value in (manifest.get("active_site_ids") or [])]
+        == [int(value) for value in (expected.get("active_site_ids") or [])],
+        "rcs_policy_matches": str(manifest.get("rcs_policy") or "")
+        == str(expected.get("rcs_policy") or ""),
+        "rcs_per_site_matches": bool(np.isclose(
+            float(manifest.get("rcs_per_site_m2", float("nan"))),
+            float(expected.get("rcs_per_site_m2", float("nan"))),
+            rtol=1e-12,
+            atol=0.0,
+        )),
+        "visibility_coverage_matches": bool(np.isclose(
+            float(manifest.get("visibility_coverage", float("nan"))),
+            float(expected.get("visibility_coverage", float("nan"))),
+            rtol=0.0,
+            atol=1e-12,
+        )),
+        "visibility_quality_matches": str(manifest.get("visibility_quality") or "")
+        == str(expected.get("visibility_quality") or ""),
+        "versions_match": dict(manifest.get("versions") or {}) == dict(expected.get("versions") or {}),
+        "all_finite": bool(manifest.get("all_finite")),
+        "cuda_device": bool(re.fullmatch(r"cuda(?::\d+)?", str(manifest.get("device") or ""))),
+        "timebase_finite": bool(manifest.get("timebase_finite")),
+        "motion_arrays_finite": bool(manifest.get("motion_arrays_finite")),
+        "no_zero_fill_or_dropped_active_sites": bool(
+            manifest.get("no_zero_fill_or_dropped_active_sites")
+        ),
+        "nonzero_signal_present": bool(manifest.get("signal_nonzero"))
+        and float(manifest.get("signal_abs_max") or 0.0) > 0.0
+        and int(manifest.get("nonzero_return_frames") or 0) >= required_evidence_frames,
+        "target_motion_present": int(manifest.get("moving_site_count") or 0) > 0
+        and float(manifest.get("motion_speed_max_mps") or 0.0) >= 0.01
+        and float(manifest.get("motion_position_extent_m") or 0.0) >= 0.01,
+        "native_motion_coupling_present": int(
+            manifest.get("coupled_dynamic_return_frames") or 0
+        ) >= required_evidence_frames,
+        "environment_reflection_model_matches": (
+            str(manifest.get("environment_reflection_model") or "")
+            == str(expected.get("environment_reflection_model") or "")
+        ),
+        "environment_reflection_depth_matches": (
+            int(manifest.get("environment_reflection_max_depth", -1))
+            == int(expected.get("environment_reflection_max_depth", -2))
+        ),
+        "environment_reflection_is_coherent": (
+            bool(manifest.get("environment_coherent_with_target"))
+            is bool(expected.get("environment_coherent_with_target"))
+        ),
+        "environment_materials_were_compiled": int(
+            manifest.get("environment_material_slot_count", -1)
+        ) > 0,
+        "environment_reflection_paths_reported": int(
+            manifest.get("environment_reflected_path_count", -1)
+        ) >= 0,
+        "solver_completion_contract_matches": (
+            str(manifest.get("solver_completion_contract") or "")
+            == str(expected.get("solver_completion_contract") or "")
+        ),
+        "solve_exclusions_are_preflight_active_sites": solve_exclusions_valid,
+        "result_handle_present": bool(receipt.get("result_handle")),
+        "run_id_present": bool(receipt.get("run_id")),
+    }
+    try:
+        actual_times = np.asarray(manifest.get("times_s"), dtype=np.float64)
+        expected_times = float(expected["start_s"]) + (
+            np.arange(int(expected["frame_count"]), dtype=np.float64) / float(expected["fps"])
+        )
+        checks["timebase_matches"] = bool(
+            actual_times.shape == expected_times.shape
+            and np.isfinite(actual_times).all()
+            and np.allclose(actual_times, expected_times, rtol=0, atol=1e-9)
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        checks["timebase_matches"] = False
+    return checks
+
+
+INSTALL_RULE_PROPERTY = {
+    "type": "object",
+    "properties": {
+        "style": {"type": "string", "enum": ["auto", "wall", "corner"], "default": "auto"},
+        "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 2.0,
+                     "description": "Mount height above the floor in metres (installer wall mount)."},
+        "aim_height_m": {"type": "number", "minimum": 0, "maximum": 3, "default": 0.5,
+                         "description": "The boresight crosses this height (m) at the sensing-zone centroid."},
+        "beam_half_deg": {"type": "number", "minimum": 1, "maximum": 89, "default": 30,
+                          "description": "First null of the configured separable pattern, degrees."},
+        "normal_margin_deg": {"type": "number", "minimum": 0, "maximum": 30, "default": 5,
+                              "description": "No planar normal within beam_half_deg + this margin, degrees."},
+        "range_m": {"type": "array", "items": {"type": "number", "minimum": 0}, "minItems": 2, "maxItems": 2,
+                    "default": [1.0, 6.0], "description": "Sensing-zone range limits in metres."},
+        "wall_standoff_m": {"type": "number", "minimum": 0, "maximum": 0.5, "default": 0.05,
+                            "description": "Distance from the inner wall face in metres."},
+    },
+    "additionalProperties": False,
+    "description": "Installation rule (witwin.scenario/v1 radar.rule); omitted fields take the defaults.",
+}
+
+PLACEMENT_KEY_EVENTS_PROPERTY = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["id", "position_m"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "actor_kind": {"type": "string", "enum": ["person", "cat"], "default": "person"},
+            "position_m": {
+                "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                "description": "World position in metres; y is the supporting surface (floor, bed top).",
+            },
+            "test_height_m": {
+                "type": "number", "minimum": 0, "maximum": 2,
+                "description": "Height above the support that must be seen; default 1.0 person, 0.25 cat.",
+            },
+            "object_id": {"type": "string", "description": "Actor id, for the label preview."},
+            "t_s": {"type": "number", "minimum": 0, "description": "Event time in seconds, for the label preview."},
+        },
+        "additionalProperties": False,
+    },
+    "description": "Installation only: key events (arrival, seat contact, fall impact, cat landing) the zone must hold.",
+}
+
+LABEL_KEY_EVENTS_PROPERTY = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["id", "object_id", "t_s"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "object_id": {"type": "string", "minLength": 1, "description": "The declared Radar target."},
+            "t_s": {"type": "number", "minimum": 0, "description": "Event time in seconds."},
+            "kind": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "description": "Key events; each must be in_view at its nearest Radar frame (the only hard visibility gate).",
+}
+
+# Scenario default (design 5.4): clip length minus 0.2 s at 10 fps.
+_INSTALLATION_FPS = 10.0
+_INSTALLATION_TAIL_S = 0.2
+
+
+def _installation_rule(args: dict[str, Any]) -> Any:
+    from .install_rule import InstallRule
+
+    value = dict(args.get("install_rule") or {})
+    if "height_m" not in value and "height_m" in args:
+        value["height_m"] = float(args["height_m"])
+    try:
+        return InstallRule.from_dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolError(str(exc), code="invalid_sensor_placement",
+                        detail={"install_rule": _jsonable(value)}) from exc
+
+
+def _installation_interval(scene: Any) -> dict[str, float] | None:
+    timeline = _timeline_summary(scene)
+    if not timeline["available"] or timeline["playing"] or timeline["recording"]:
+        return None
+    frames = int(math.floor((float(timeline["duration_s"]) - _INSTALLATION_TAIL_S) * _INSTALLATION_FPS + 1e-9))
+    frames = min(frames, int(30 * _INSTALLATION_FPS))
+    if frames < 2:
+        return None
+    return {"start_s": 0.0, "duration_s": frames / _INSTALLATION_FPS, "fps": _INSTALLATION_FPS}
+
+
+def _plan_installation(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Room-geometry installation; raises InstallRuleError when blocked."""
+    from .install_rule import plan_installation
+
+    if str(args.get("placement_mode") or "automatic") != "automatic":
+        raise ToolError("The installation objective chooses the pose; use placement_mode automatic.",
+                        code="conflicting_sensor_placement")
+    if "position_m" in args or "aim_point_m" in args or "distance_m" in args:
+        raise ToolError("The installation objective cannot take explicit coordinates or distance_m.",
+                        code="conflicting_sensor_placement")
+    rule = _installation_rule(args)
+    events = [
+        {key: value for key, value in event.items() if key in {"id", "actor_kind", "position_m", "test_height_m"}}
+        for event in args.get("key_events") or ()
+    ]
+    plan = plan_installation(scene, rule=rule, key_events=events, room_index=args.get("room_index"))
+    plan["mount"]["rotation_euler_zxy_rad"] = _look_at_euler(plan["position_m"], plan["aim_point_m"])
+    return plan
+
+
+def _installation_label_preview(scene: Any, plan: dict[str, Any], target_specs: list[dict[str, Any]],
+                                interval: dict[str, float] | None, key_events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Geometric frame labels at the proposed mount, before any simulation."""
+    if not target_specs or interval is None:
+        return {"available": False, "reason": "needs_targets_and_a_baked_timeline"}
+    from .adapter.studio_motion import MultiTargetSkinSampler
+    from .labels import label_frames
+    from .los import StaticOccluders
+
+    try:
+        sampler = MultiTargetSkinSampler(scene, target_specs)
+        frames = int(round(interval["duration_s"] * interval["fps"]))
+        times = interval["start_s"] + np.arange(frames, dtype=np.float64) / interval["fps"]
+        positions = np.asarray([sampler.sample(float(t))[0] for t in times])
+        probe = _settings_object("Installation label probe").get_component("Radar")
+        result = label_frames(
+            radar_position=plan["position_m"], forward=plan["mount"]["forward"], up=None, times_s=times,
+            positions_by_frame=positions, target_slices=sampler.target_slices,
+            occluders=StaticOccluders.from_scene(scene),
+            range_m=(1.0, float(Derived.compute(probe)["max_range_m"])),
+            key_events=[event for event in key_events if "object_id" in event and "t_s" in event])
+    except (ValueError, RuntimeError) as exc:
+        return {"available": False, "reason": str(exc)}
+    return {
+        "available": True,
+        "label_method": result["label_method"],
+        "targets": [{key: target[key] for key in ("object_id", "site_count", "label_counts", "in_view_fraction")}
+                    for target in result["targets"]],
+        "key_events": result["key_events"],
+        "gate": result["gate"],
+    }
+
+
+def _install_blocked(scene: Any, exc: Any) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "blocked",
+        "scene_id": str(scene.scene_id),
+        "blockers": [{"code": exc.code, "message": str(exc), "next_step": exc.next_step,
+                      "detail": _jsonable(exc.detail)}],
+        "mutates_scene": False,
+        "mutates_timeline": False,
+        "mutates_project": False,
+    }
+
+
+def _plan_sensor_installation(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """plan_sensor_placement for ``placement_objective: installation`` (design 7.7).
+
+    Takes the room only and returns ``proposed_ensure_sensor_arguments`` as the
+    other objectives do: a fixed pose at the rule's mount, so ensure_sensor
+    writes exactly the planned pose.
+    """
+    from .install_rule import InstallRuleError
+
+    target_specs = _target_specs_from_args(scene, args, infer_single=True)
+    try:
+        plan = _plan_installation(scene, args)
+    except InstallRuleError as exc:
+        return _install_blocked(scene, exc)
+    if str(args.get("radar_object_id") or "").strip():
+        _select_radar(scene, str(args["radar_object_id"]))
+    interval = _installation_interval(scene)
+    proposed = {
+        "scene_id": str(scene.scene_id),
+        "placement_mode": "fixed",
+        "placement_objective": "installation",
+        "position_m": plan["position_m"],
+        "aim_point_m": plan["aim_point_m"],
+        "height_m": float(plan["rule"]["height_m"]),
+        "target_multipath": bool(args.get("target_multipath", False)),
+        "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
+    }
+    if target_specs:
+        proposed["targets"] = _target_input_args(target_specs)
+    if interval is not None:
+        proposed.update(interval)
+    for key in ("radar_object_id", "max_range_m"):
+        if key in args:
+            proposed[key] = args[key]
+    placement = {
+        "mode": "installation",
+        "verification": "room_geometry_install_rule; native preflight runs once motion exists",
+        **{key: plan[key] for key in (
+            "mount", "position_m", "aim_point_m", "rule", "room", "zones", "zone_fraction_of_open_floor",
+            "key_events", "key_events_in_zone", "candidate_count", "valid_mount_count", "rejected_counts",
+            "rejected_mounts", "label_method")},
+        "label_preview": _installation_label_preview(
+            scene, plan, target_specs, interval, list(args.get("key_events") or ())),
+    }
+    return {
+        "ok": True,
+        "status": "ready_for_confirmation",
+        "scene_id": str(scene.scene_id),
+        "target_object_id": target_specs[0]["object_id"] if target_specs else "",
+        "targets": target_specs,
+        "dynamic_object_ids": _dynamic_skinned_object_ids(scene),
+        "placement": _jsonable(placement),
+        "proposed_ensure_sensor_arguments": _jsonable(proposed),
+        "requires_targets_before_ensure": not target_specs,
+        "next_step": {
+            "tool": "witwin.radar.ensure_sensor",
+            "requires_fresh_operation_id": True,
+            "requires_confirmation": False,
+        },
+        "mutates_scene": False,
+        "mutates_timeline": False,
+        "mutates_project": False,
+    }
+
+
+def _strip_label_frames(result: dict[str, Any]) -> dict[str, Any]:
+    result = dict(result)
+    result["targets"] = [{key: value for key, value in target.items() if key != "frames"}
+                         for target in result.get("targets") or ()]
+    return result
+
+
+def _load_result_for_check(ctx: Any, scene: Any, obj: Any, args: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """A verified export (by operation) or a project result file (by path)."""
+    from .adapter.saved_result import SavedRadarResult
+
+    if args.get("operation_id"):
+        receipt = _require_matching_operation(
+            ctx, str(args["operation_id"]), scene_id=str(scene.scene_id), radar_object_id=str(obj.id))
+        if not receipt.get("exports"):
+            raise ToolError("Export the verified result before checking its output.", code="export_required",
+                            detail={"operation_id": str(args["operation_id"]), "status": receipt.get("status")})
+        from .adapter.durable_result import load_verified_export
+        from .adapter.replay import motion_fingerprint
+        saved, export = load_verified_export(
+            ctx.api.server.default_scene_dir, receipt, scene_id=scene.scene_id,
+            input_fingerprint=_measurement_input_fingerprint(scene, obj),
+            motion_fingerprint=motion_fingerprint(scene),
+        )
+        return saved, {"source": "verified_export", "export": export}
+    if not args.get("result_path"):
+        raise ToolError("Give operation_id (an exported measurement) or result_path.", code="missing_result")
+    folder = (Path(ctx.api.server.default_scene_dir) / "results" / "radar-animation").resolve()
+    path = Path(str(args["result_path"])).resolve()
+    if not path.is_relative_to(folder):
+        raise ToolError("result_path must be inside the project's results/radar-animation folder.",
+                        code="result_path_outside_project", detail={"result_path": str(path)})
+    try:
+        saved = SavedRadarResult.load(path)
+    except (OSError, ValueError) as exc:
+        raise ToolError(str(exc), code="result_unreadable", detail={"result_path": str(path)}) from exc
+    producer_scene = saved.producer.get("scene_id")
+    if producer_scene is not None and str(producer_scene) != str(scene.scene_id):
+        raise ToolError("The result file belongs to another scene.", code="result_scene_mismatch",
+                        detail={"result_scene_id": producer_scene, "scene_id": str(scene.scene_id)})
+    return saved, {"source": "result_path", "result_path": str(path)}
+
+
+def register(ctx: Any) -> None:
+    owned_job_keys: set[str] = set()
+
+    def _cancel_owned_jobs() -> None:
+        for key in tuple(owned_job_keys):
+            task = _ACTIVE_JOBS.get(key)
+            if task is not None and not task.done():
+                task.cancel()
+
+    tracker = getattr(ctx, "track", None)
+    if callable(tracker):
+        from witwin_server.plugins.disposable import FunctionDisposable
+        tracker(FunctionDisposable(_cancel_owned_jobs))
+
+    @tool(
+        name="runtime_diagnostics",
+        description=(
+            "Report the exact Radar, Channel, Torch and CUDA runtime without changing "
+            "the scene or silently substituting a CPU backend."
+        ),
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        permission_tier="read",
+        idempotent=True,
+        tags=INSPECT_TAGS,
+    )
+    def _runtime_diagnostics(args: Dict[str, Any]) -> dict[str, Any]:
+        runtime = _runtime_evidence()
+        blockers = []
+        for key in ("radar", "channel"):
+            if not bool((runtime.get(key) or {}).get("import_ok")):
+                blockers.append({"code": f"{key}_import_failed", "detail": runtime.get(key)})
+        if not bool((runtime.get("torch") or {}).get("cuda_available")):
+            blockers.append({"code": "cuda_unavailable", "detail": runtime.get("torch")})
+        return {
+            "ok": not blockers,
+            "status": "ready" if not blockers else "blocked",
+            "runtime": runtime,
+            "blockers": blockers,
+        }
+
+    @tool(
+        name="inspect_pipeline",
+        description=(
+            "Inspect Radar Settings, selected animated target, timeline and existing "
+            "native result evidence in one exact Studio scene. Start here to discover "
+            "a saved recording for replay, playback, NPZ export or download using only "
+            "scene_id; radar_object_id is optional. Returns Radar and target object IDs, "
+            "recorded_replay availability, and durable_results with operation_id, export "
+            "identity and current/unavailable status. Use these discovered identities "
+            "for subsequent result tools instead of asking the user for internal IDs "
+            "or searching project files. Multiple candidates remain explicit choices. "
+            "This is read-only: it does not run a simulation, prepare replay or export."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        tags=RESULT_INSPECT_TAGS,
+    )
+    def _inspect_pipeline(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        sensors = _radar_objects(scene)
+        summaries = [
+            {**_sensor_summary(obj), "recorded_replay": _recorded_replay_summary(ctx, obj),
+             "durable_results": _durable_result_summaries(ctx, obj)}
+            for obj in sensors
+        ]
+        requested = str(args.get("radar_object_id") or "").strip()
+        selected = next((item for item in summaries if item["object_id"] == requested), None) if requested else (
+            summaries[0] if len(summaries) == 1 else None
+        )
+        blockers: list[dict[str, Any]] = []
+        if not sensors:
+            blockers.append({"code": "missing_radar", "message": "No Radar Settings object exists."})
+        elif selected is None:
+            blockers.append({
+                "code": "ambiguous_radar" if not requested else "missing_radar",
+                "message": "Select one exact Radar object.",
+                "radar_object_ids": [item["object_id"] for item in summaries],
+            })
+        if selected and not selected["targets"]:
+            blockers.append({"code": "missing_target", "message": "Radar has no animated target."})
+        elif selected:
+            for target_spec in selected["targets"]:
+                target = scene.get_object(target_spec["object_id"])
+                if target is None:
+                    blockers.append({
+                        "code": "missing_target",
+                        "message": "Radar target no longer exists in this scene.",
+                        "target_object_id": target_spec["object_id"],
+                    })
+                elif target.get_component("SkinnedMesh") is None:
+                    blockers.append({
+                        "code": "target_not_skinned",
+                        "message": "Selected target has no SkinnedMesh and cannot drive the animation adapter.",
+                        "target_object_id": target_spec["object_id"],
+                    })
+        timeline = _timeline_summary(scene)
+        if not timeline["available"] or timeline["duration_s"] <= 0:
+            blockers.append({"code": "timeline_unavailable", "message": "Scene has no baked animation interval."})
+        elif timeline["playing"] or timeline["recording"]:
+            blockers.append({"code": "timeline_busy", "message": "Pause Timeline playback and recording."})
+        return {
+            "ok": True,
+            "status": "configured" if not blockers else "blocked",
+            "scene_id": str(scene.scene_id),
+            "timeline": timeline,
+            "radars": summaries,
+            "selected_radar": selected,
+            "blockers": blockers,
+            "scene_input_fingerprint": _scene_input_fingerprint(scene),
+            "scene_input_evidence": _scene_input_evidence(scene),
+        }
+
+    @tool(
+        name="plan_sensor_placement",
+        description=(
+            "Plan one Radar Settings placement without changing the scene, timeline, "
+            "project or native simulation state. Validates explicit fixed coordinates "
+            "and resolves an exact skinned target when unambiguous. Automatic placement "
+            "is bound to a valid integral-frame interval and deferred to ensure_sensor, "
+            "whose native preflight verifies visibility after authored motion exists. "
+            "Use this before every standalone placement write as well as for plan-only "
+            "requests and revisions; it never creates or configures Radar itself."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "target_object_id": {"type": "string", "minLength": 1},
+                "targets": TARGETS_PROPERTY,
+                "placement_mode": {
+                    "type": "string",
+                    "enum": ["fixed", "automatic", "current"],
+                    "default": "fixed",
+                    "description": "Use explicit fixed coordinates, automatic placement, or preserve the selected Radar's current pose.",
+                },
+                "placement_objective": {
+                    "type": "string",
+                    "enum": [
+                        "balanced", "maximize_range_span", "bidirectional_radial_velocity",
+                        "stronger_doppler", "side_view", "whole_path_visible",
+                        "opposite_side", "closer_with_full_path_visible", "installation",
+                    ],
+                    "default": "balanced",
+                    "description": (
+                        "Physical measurement objective for automatic full-trajectory placement. "
+                        "installation mounts the Radar from room geometry only (wall or corner, 2.0 m, "
+                        "tilted down, no wall/floor/furniture face normal in the beam) and needs no motion."
+                    ),
+                },
+                "install_rule": INSTALL_RULE_PROPERTY,
+                "key_events": PLACEMENT_KEY_EVENTS_PROPERTY,
+                "room_index": {
+                    "type": "integer", "minimum": 0,
+                    "description": "Installation only: the room to mount in; default is the room holding most key events.",
+                },
+                "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
+                "target_multipath": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Plan high-cost moving-target room multipath; static room background is always retained.",
+                },
+                "target_motion_sampling": {
+                    "type": "string",
+                    "enum": ["chirp", "adaptive"],
+                    "default": "chirp",
+                    "description": "Use measured-default chirp sampling, or official error-controlled adaptive probes for comparison.",
+                },
+                "max_range_m": {
+                    "type": "number",
+                    "minimum": 2.0,
+                    "maximum": 20.0,
+                    "description": (
+                        "Requested FMCW unambiguous range. Keeps the native range-bin count and "
+                        "sample rate, and derives the chirp slope so a shorter span gives finer "
+                        "physical range bins. Use a span that still covers the full room path."
+                    ),
+                },
+                "distance_m": {
+                    "type": "number", "minimum": 0.25, "maximum": 10,
+                    "description": "Requested world-space distance from the animated target, for automatic placement only.",
+                },
+                "position_m": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                },
+                "aim_point_m": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                },
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        tags=SENSOR_PLAN_TAGS,
+    )
+    def _plan_sensor_placement(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        if str(args.get("placement_objective") or "") == "installation":
+            return _plan_sensor_installation(scene, args)
+        target_specs = _target_specs_from_args(scene, args, infer_single=True)
+        target_id = target_specs[0]["object_id"] if target_specs else ""
+        candidates = [
+            obj for obj in (getattr(scene, "objects", {}) or {}).values()
+            if callable(getattr(obj, "get_component", None))
+            and obj.get_component("SkinnedMesh") is not None
+        ]
+        if not target_specs:
+            return {
+                "ok": False,
+                "status": "blocked",
+                "scene_id": str(scene.scene_id),
+                "blockers": [{
+                    "code": "missing_target" if not candidates else "ambiguous_target",
+                    "message": "Select one exact skinned Radar target.",
+                    "target_object_ids": [str(obj.id) for obj in candidates],
+                }],
+                "mutates_scene": False,
+                "mutates_timeline": False,
+                "mutates_project": False,
+            }
+
+        placement_mode = str(args.get("placement_mode") or "fixed")
+        if placement_mode == "automatic" and ("position_m" in args or "aim_point_m" in args):
+            raise ToolError(
+                "Automatic placement cannot override explicit coordinates; use fixed mode.",
+                code="conflicting_sensor_placement",
+            )
+        if placement_mode == "fixed" and not all(key in args for key in ("position_m", "aim_point_m")):
+            raise ToolError("Fixed placement requires position_m and aim_point_m.", code="missing_sensor_pose")
+        if placement_mode == "fixed" and "distance_m" in args:
+            raise ToolError(
+                "Fixed placement is defined by explicit coordinates and cannot also request distance_m.",
+                code="conflicting_sensor_placement",
+            )
+        if placement_mode == "current" and any(
+            key in args for key in ("position_m", "aim_point_m", "distance_m")
+        ):
+            raise ToolError(
+                "Current placement preserves the authored Radar pose and cannot override coordinates.",
+                code="conflicting_sensor_placement",
+            )
+
+        proposed = {
+            "scene_id": str(scene.scene_id),
+            "targets": _target_input_args(target_specs),
+            "placement_mode": placement_mode,
+            "placement_objective": str(args.get("placement_objective") or "balanced"),
+            "height_m": float(args.get("height_m", 1.0)),
+            "target_multipath": bool(args.get("target_multipath", False)),
+            "target_motion_sampling": str(args.get("target_motion_sampling") or "chirp"),
+        }
+        if "max_range_m" in args:
+            proposed["max_range_m"] = float(args["max_range_m"])
+
+        automatic_interval = None
+        if placement_mode == "automatic":
+            automatic_interval = _default_automatic_placement_interval(scene)
+            if automatic_interval is None:
+                timeline = _timeline_summary(scene)
+                return {
+                    "ok": False,
+                    "status": "blocked",
+                    "scene_id": str(scene.scene_id),
+                    "blockers": [{
+                        "code": "timeline_interval_unavailable",
+                        "message": (
+                            "Automatic full-trajectory Radar placement needs a paused baked "
+                            "Timeline with at least two sample frames."
+                        ),
+                        "timeline": timeline,
+                    }],
+                    "mutates_scene": False,
+                    "mutates_timeline": False,
+                    "mutates_project": False,
+                }
+            proposed.update(automatic_interval)
+        requested_radar = str(args.get("radar_object_id") or "").strip()
+        if requested_radar:
+            selected_radar = _select_radar(scene, requested_radar)
+            proposed["radar_object_id"] = requested_radar
+        else:
+            selected_radar = None
+        if placement_mode == "current":
+            if selected_radar is None:
+                raise ToolError(
+                    "Current placement requires an exact existing radar_object_id.",
+                    code="missing_radar",
+                )
+            current_radar = selected_radar.get_component("Radar")
+            proposed.update({
+                "start_s": float(current_radar.t0),
+                "duration_s": float(current_radar.animation_duration_s),
+                "fps": float(current_radar.animation_fps),
+                "fov_deg": float(current_radar.fov),
+                "target_multipath": bool(current_radar.target_multipath),
+                "target_motion_sampling": str(current_radar.target_motion_sampling),
+            })
+        if "distance_m" in args:
+            proposed["distance_m"] = float(args["distance_m"])
+        if placement_mode == "fixed":
+            position = _as_vector3(args["position_m"], "position_m")
+            aim = _as_vector3(args["aim_point_m"], "aim_point_m")
+            proposed["position_m"] = position.tolist()
+            proposed["aim_point_m"] = aim.tolist()
+            rotation = _look_at_euler(position, aim)
+            placement = {
+                "mode": "fixed",
+                "position_m": position.tolist(),
+                "aim_point_m": aim.tolist(),
+                "rotation_euler_zxy_rad": rotation,
+            }
+        elif placement_mode == "automatic":
+            placement = {
+                "mode": "automatic",
+                "height_m": proposed["height_m"],
+                "distance_m": proposed.get("distance_m"),
+                "timeline_interval": automatic_interval,
+                "verification": "deferred_to_native_preflight_after_motion_exists",
+            }
+        else:
+            pose = SensorSpec.from_component(selected_radar.get_component("Radar"))
+            placement = {
+                "mode": "current",
+                "position_m": _jsonable(pose.position),
+                "aim_point_m": _jsonable(pose.target),
+                "verification": "authored_pose_preserved",
+            }
+        return {
+            "ok": True,
+            "status": "ready_for_confirmation",
+            "scene_id": str(scene.scene_id),
+            "target_object_id": target_id,
+            "targets": target_specs,
+            "dynamic_object_ids": _dynamic_skinned_object_ids(scene),
+            "placement": placement,
+            "proposed_ensure_sensor_arguments": proposed,
+            "next_step": {
+                "tool": "witwin.radar.ensure_sensor",
+                "requires_fresh_operation_id": True,
+                "requires_confirmation": False,
+            },
+            "mutates_scene": False,
+            "mutates_timeline": False,
+            "mutates_project": False,
+        }
+
+    @tool(
+        name="ensure_sensor",
+        description=(
+            "Idempotently create or configure one Studio Radar Settings object at an "
+            "explicit world position (fixed mode), or choose a native-preflight-verified "
+            "pose near the authored motion (automatic mode), and bind it to "
+            "one or more animated targets. This only edits Studio orchestration fields; it does "
+            "not alter Radar or Channel algorithms."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id", "operation_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "operation_id": {"type": "string", "minLength": 1},
+                "radar_object_id": {"type": "string"},
+                "target_object_id": {"type": "string", "minLength": 1},
+                "targets": TARGETS_PROPERTY,
+                "placement_mode": {
+                    "type": "string",
+                    "enum": ["fixed", "automatic", "current"],
+                    "default": "fixed",
+                    "description": "Use current to preserve the exact authored pose while changing non-pose Radar configuration.",
+                },
+                "placement_objective": {
+                    "type": "string",
+                    "enum": [
+                        "balanced", "maximize_range_span", "bidirectional_radial_velocity",
+                        "stronger_doppler", "side_view", "whole_path_visible",
+                        "opposite_side", "closer_with_full_path_visible", "installation",
+                    ],
+                    "default": "balanced",
+                    "description": (
+                        "Physical measurement objective for automatic full-trajectory placement. "
+                        "installation mounts the Radar from room geometry only (wall or corner, 2.0 m, "
+                        "tilted down, no wall/floor/furniture face normal in the beam) and needs no motion."
+                    ),
+                },
+                "install_rule": INSTALL_RULE_PROPERTY,
+                "key_events": PLACEMENT_KEY_EVENTS_PROPERTY,
+                "room_index": {
+                    "type": "integer", "minimum": 0,
+                    "description": "Installation only: the room to mount in; default is the room holding most key events.",
+                },
+                "height_m": {"type": "number", "minimum": 0.2, "maximum": 3, "default": 1},
+                "distance_m": {
+                    "type": "number", "minimum": 0.25, "maximum": 10,
+                    "description": "Requested world-space distance from the animated target, for automatic placement only.",
+                },
+                "position_m": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                },
+                "aim_point_m": {
+                    "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                },
+                "start_s": {"type": "number", "minimum": 0, "default": 0},
+                "duration_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 30, "default": 5},
+                "fps": {"type": "number", "minimum": 1, "maximum": 30, "default": 10},
+                "target_multipath": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Enable high-cost room multipath through the moving target; static room background is always retained.",
+                },
+                "target_motion_sampling": {
+                    "type": "string",
+                    "enum": ["chirp", "adaptive"],
+                    "default": "chirp",
+                    "description": "Chirp-by-chirp target motion by default, or official Radar 0.4 adaptive probes.",
+                },
+                "fov_deg": {"type": "number", "minimum": 1, "maximum": 179, "default": 60},
+                "max_range_m": {
+                    "type": "number",
+                    "minimum": 2.0,
+                    "maximum": 20.0,
+                    "description": (
+                        "Requested FMCW unambiguous range. The Radar plugin derives chirp slope "
+                        "while preserving native sample rate and range-bin count."
+                    ),
+                },
+                "reuse_existing": {"type": "boolean", "default": True},
+            },
+            "additionalProperties": False,
+        },
+        side_effects=True,
+        requires_confirmation=False,
+        permission_tier="scene_write",
+        idempotent=True,
+        durable_confirmation=False,
+        timeout=300.0,
+        tags=ENSURE_TAGS,
+    )
+    def _ensure_sensor(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        operation_id = str(args["operation_id"])
+        ensure_payload = {
+            key: _jsonable(value)
+            for key, value in args.items()
+            if key != "__context"
+        }
+        payload_hash = hashlib.sha256(json.dumps(
+            ensure_payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        existing_operation = _get_operation(ctx, operation_id)
+        if existing_operation is not None:
+            if (
+                existing_operation.get("kind") != "ensure_sensor"
+                or existing_operation.get("payload_hash") != payload_hash
+            ):
+                raise ToolError(
+                    "operation_id is already bound to different Radar inputs",
+                    code="operation_conflict",
+                    detail={"operation_id": operation_id},
+                )
+            existing_obj = scene.get_object(str(existing_operation.get("radar_object_id") or ""))
+            if existing_obj is None or existing_obj.get_component("Radar") is None:
+                raise ToolError(
+                    "The Radar created by this operation no longer exists.",
+                    code="operation_state_stale",
+                    detail={"operation_id": operation_id},
+                )
+            current_state = _sensor_configuration_state(existing_obj)
+            expected_state = dict(existing_operation.get("configured_state") or {})
+            if not expected_state or not _configuration_matches(current_state, expected_state):
+                raise ToolError(
+                    "The Radar configured by this operation has changed since the operation completed.",
+                    code="operation_state_stale",
+                    detail={
+                        "operation_id": operation_id,
+                        "expected": expected_state,
+                        "current": current_state,
+                    },
+                )
+            return {
+                "ok": True,
+                "status": "ready",
+                "scene_id": str(scene.scene_id),
+                "operation_id": operation_id,
+                "created": False,
+                "reused_operation": True,
+                "radar": _sensor_summary(existing_obj),
+                "scene_input_fingerprint": _scene_input_fingerprint(scene),
+            }
+        timeline = _timeline_summary(scene)
+        if timeline["playing"] or timeline["recording"]:
+            raise ToolError(
+                "Pause timeline playback and recording before configuring Radar.",
+                code="timeline_busy",
+                detail={"timeline": timeline},
+            )
+        target_specs = _target_specs_from_args(scene, args, infer_single=False)
+        target_id = target_specs[0]["object_id"]
+        placement_mode = str(args.get("placement_mode") or "fixed")
+        automatic = placement_mode == "automatic"
+        current = placement_mode == "current"
+        if automatic and ("position_m" in args or "aim_point_m" in args):
+            raise ToolError("Automatic placement cannot override explicit coordinates; use fixed mode.",
+                            code="conflicting_sensor_placement")
+        if placement_mode == "fixed" and not all(key in args for key in ("position_m", "aim_point_m")):
+            raise ToolError("Fixed placement requires position_m and aim_point_m.", code="missing_sensor_pose")
+        if placement_mode == "fixed" and "distance_m" in args:
+            raise ToolError(
+                "Fixed placement is defined by explicit coordinates and cannot also request distance_m.",
+                code="conflicting_sensor_placement",
+            )
+        if current and any(key in args for key in ("position_m", "aim_point_m", "distance_m")):
+            raise ToolError(
+                "Current placement preserves the authored Radar pose and cannot override coordinates.",
+                code="conflicting_sensor_placement",
+            )
+        requested = str(args.get("radar_object_id") or "").strip()
+        if current and not requested:
+            raise ToolError(
+                "Current placement requires an exact existing radar_object_id.",
+                code="missing_radar",
+            )
+        created = False
+        if requested:
+            obj = _select_radar(scene, requested)
+        else:
+            sensors = _radar_objects(scene)
+            owned = [obj for obj in sensors if str(getattr(obj, "tag", "")) == _PIPELINE_RADAR_TAG]
+            if len(owned) == 1:
+                obj = owned[0]
+            elif len(owned) > 1 or len(sensors) > 1:
+                raise ToolError(
+                    "More than one Radar exists; specify radar_object_id explicitly.",
+                    code="ambiguous_radar",
+                    detail={"radar_object_ids": [str(sensor.id) for sensor in sensors]},
+                )
+            elif len(sensors) == 1 and bool(args.get("reuse_existing", True)):
+                obj = sensors[0]
+            elif sensors:
+                raise ToolError(
+                    "A user Radar already exists and reuse_existing is false.",
+                    code="existing_radar_requires_selection",
+                    detail={"radar_object_ids": [str(sensor.id) for sensor in sensors]},
+                )
+            else:
+                obj = _settings_object("Agent Radar")
+                obj.tag = _PIPELINE_RADAR_TAG
+                created = True
+        placement = None
+        if automatic and str(args.get("placement_objective") or "") == "installation":
+            from .install_rule import InstallRuleError
+            try:
+                placement = {"mode": "installation", **_plan_installation(scene, args)}
+            except InstallRuleError as exc:
+                raise ToolError(str(exc), code=exc.code,
+                                detail={"next_step": exc.next_step, **_jsonable(exc.detail)}) from exc
+        elif automatic:
+            from .sensor_placement import choose_sensor_placement
+            placement_args = {**args}
+            if "targets" in args:
+                placement_args["targets"] = target_specs
+                placement_args.pop("target_object_id", None)
+            else:
+                placement_args["target_object_id"] = target_id
+            placement = choose_sensor_placement(
+                scene, placement_args, radar_object_id=None if created else str(obj.id)
+            )
+        if created:
+            scene.add_object(obj)
+        radar = obj.get_component("Radar")
+        transform = obj.get_component("Transform")
+        if transform is None or getattr(transform, "parent", None) is not None:
+            if created:
+                scene.remove_object(str(obj.id))
+            raise ToolError(
+                "Agent Radar must be a root object because position_m and aim_point_m are world coordinates.",
+                code="parented_radar_unsupported",
+                detail={"radar_object_id": str(obj.id)},
+            )
+        if current:
+            authored_pose = SensorSpec.from_component(radar)
+            position = _as_vector3(authored_pose.position, "position_m")
+            aim = _as_vector3(authored_pose.target, "aim_point_m")
+            rotation = list(transform.rotation)
+        else:
+            position = _as_vector3(placement["position_m"] if placement else args["position_m"], "position_m")
+            aim = _as_vector3(placement["aim_point_m"] if placement else args["aim_point_m"], "aim_point_m")
+            rotation = _look_at_euler(position, aim)
+        previous = {
+            "snapshot_target_id": radar.snapshot_target_id,
+            "animation_targets_json": radar.animation_targets_json,
+            "t0": radar.t0,
+            "animation_duration_s": radar.animation_duration_s,
+            "animation_fps": radar.animation_fps,
+            "target_multipath": radar.target_multipath,
+            "target_motion_sampling": radar.target_motion_sampling,
+            "target_site_budget": radar.target_site_budget,
+            "fov": radar.fov,
+            "slope": radar.slope,
+            "use_default": radar.use_default,
+            "pattern_kind": radar.pattern_kind,
+            "x_angles_deg": list(radar.x_angles_deg),
+            "y_angles_deg": list(radar.y_angles_deg),
+            "x_values": list(radar.x_values),
+            "y_values": list(radar.y_values),
+            "view": radar.view,
+            "static_clutter_removal": radar.static_clutter_removal,
+            "show_cfar": radar.show_cfar,
+            "position": _jsonable(transform.position),
+            "rotation": _jsonable(transform.rotation),
+        }
+        try:
+            from .adapter.target_contract import encode_target_specs
+            radar.snapshot_target_id = target_id
+            radar.animation_targets_json = encode_target_specs(target_specs)
+            radar.t0 = float(args.get("start_s", 0.0))
+            radar.animation_duration_s = float(args.get("duration_s", 5.0))
+            radar.animation_fps = float(args.get("fps", 10.0))
+            radar.target_multipath = bool(args.get("target_multipath", False))
+            radar.target_motion_sampling = str(args.get("target_motion_sampling") or "chirp")
+            radar.fov = float(args.get("fov_deg", 60.0))
+            if "max_range_m" in args:
+                radar.slope = Derived.slope_for_max_range(radar, float(args["max_range_m"]))
+            if not current:
+                _configure_directional_pattern(radar, radar.fov)
+            # The existing animation adapter requires these review controls.
+            radar.view = "range_doppler"
+            radar.static_clutter_removal = False
+            radar.show_cfar = False
+            if not current and not scene.update_transform(str(obj.id), position=position.tolist(), rotation=rotation):
+                raise ToolError("Could not update Radar transform.", code="sensor_configuration_failed")
+        except Exception:
+            if created:
+                scene.remove_object(str(obj.id))
+            else:
+                for key in (
+                    "snapshot_target_id", "animation_targets_json", "t0", "animation_duration_s", "animation_fps",
+                    "target_multipath", "target_motion_sampling", "target_site_budget",
+                    "fov", "slope", "use_default", "pattern_kind", "x_angles_deg",
+                    "y_angles_deg", "x_values", "y_values", "view",
+                    "static_clutter_removal", "show_cfar",
+                ):
+                    setattr(radar, key, previous[key])
+                scene.update_transform(
+                    str(obj.id), position=previous["position"], rotation=previous["rotation"],
+                )
+            raise
+        public_placement = copy.deepcopy(placement) if placement else {
+            "mode": "current" if current else "fixed",
+            "position_m": position.tolist(), "aim_point_m": aim.tolist(),
+        }
+        if isinstance(public_placement.get("native_preflight"), dict):
+            public_placement["native_preflight"] = _public_preflight(
+                public_placement["native_preflight"]
+            )
+        result = {
+            "ok": True,
+            "status": "ready",
+            "scene_id": str(scene.scene_id),
+            "operation_id": operation_id,
+            "created": created,
+            "reused_operation": False,
+            "placement": public_placement,
+            "radar": _sensor_summary(obj),
+            "scene_input_fingerprint": _scene_input_fingerprint(scene),
+        }
+        if placement and isinstance(placement.get("native_preflight"), dict):
+            # Automatic placement has already validated this exact authored
+            # pose, target and interval on a detached scene. Bind that evidence
+            # to the post-write fingerprint so planning does not repeat the
+            # same full-room native trace.
+            _remember_preflight(
+                ctx,
+                scene_id=str(scene.scene_id),
+                radar_object_id=str(obj.id),
+                fingerprint=_measurement_input_fingerprint(scene, obj),
+                native_preflight=placement["native_preflight"],
+            )
+        _put_operation(ctx, {
+            "operation_id": operation_id,
+            "kind": "ensure_sensor",
+            "payload_hash": payload_hash,
+            "scene_id": str(scene.scene_id),
+            "radar_object_id": str(obj.id),
+            "status": "ready",
+            "created_at": _utc_now(),
+            "configured_state": _sensor_configuration_state(obj),
+            "next_step": "plan_animation_measurement",
+        })
+        return result
+
+    @tool(
+        name="plan_animation_measurement",
+        description=(
+            "Read-only preflight for a real Radar 0.4 CUDA animation measurement. "
+            "It validates the exact target, timeline interval, frame/cube shape, host "
+            "memory and current solver settings without changing FPS or duration. "
+            "For 'use where I moved the radar and run again', select the existing Radar "
+            "and call this directly: its current authored Transform is authoritative. "
+            "Do not call ensure_sensor, create another Radar, or change room, actor, motion, "
+            "Timeline, duration, FPS, or Radar configuration."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "start_s": {"type": "number", "minimum": 0},
+                "duration_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 30},
+                "fps": {"type": "number", "minimum": 1, "maximum": 30},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        timeout=90.0,
+        tags=PLAN_TAGS,
+    )
+    def _plan_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
+        radar = obj.get_component("Radar")
+        target_specs = _target_specs(obj)
+        if not target_specs or any(
+            scene.get_object(spec["object_id"]) is None or spec["object_id"] == str(obj.id)
+            for spec in target_specs
+        ):
+            raise ToolError(
+                "Radar must reference one or more separate existing animated targets.",
+                code="missing_target",
+                detail={"targets": target_specs},
+            )
+        from .adapter.snapshot import validate_options
+        try:
+            validate_options(radar)
+        except Exception as exc:
+            raise ToolError(str(exc), code="unsupported_radar_settings") from exc
+        start_s = float(args.get("start_s", radar.t0))
+        duration_s = float(args.get("duration_s", radar.animation_duration_s))
+        fps = float(args.get("fps", radar.animation_fps))
+        configured = {
+            "start_s": float(radar.t0),
+            "duration_s": float(radar.animation_duration_s),
+            "fps": float(radar.animation_fps),
+        }
+        requested = {"start_s": start_s, "duration_s": duration_s, "fps": fps}
+        # Studio component numerics are stored as float32.  Compare authored
+        # values at that storage precision so a value such as 1.4 does not
+        # become a false configuration mismatch after round-tripping through
+        # the component, while still rejecting a meaningful timing change.
+        if any(not math.isclose(requested[key], configured[key], rel_tol=0.0, abs_tol=1e-6)
+               for key in configured):
+            raise ToolError(
+                "Preflight parameters differ from the authored Radar component; call ensure_sensor first.",
+                code="radar_configuration_mismatch",
+                detail={"configured": configured, "requested": requested},
+            )
+        measurement = _validate_interval(scene, radar, start_s, duration_s, fps)
+        input_fingerprint = _measurement_input_fingerprint(scene, obj)
+        native_preflight = _read_preflight(
+            ctx,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+            fingerprint=input_fingerprint,
+        )
+        if native_preflight is None:
+            try:
+                from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
+                from .adapter.animation import animation_preflight, animation_request
+                request = animation_request(radar)
+                solver_scene = load_scene_ref(copy.deepcopy(make_scene_ref(scene)))
+                native_preflight = animation_preflight(solver_scene, request)
+            except Exception as exc:
+                detail = getattr(exc, "detail", None)
+                code = "radar_topology_unreachable" if detail else "target_motion_unavailable"
+                raise ToolError(str(exc), code=code, detail=detail) from exc
+        runtime = _runtime_evidence()
+        cuda_ready = bool((runtime.get("torch") or {}).get("cuda_available"))
+        if not cuda_ready:
+            raise ToolError(
+                "Radar animation requires CUDA and no CPU fallback is permitted.",
+                code="cuda_unavailable",
+                detail={"runtime": runtime},
+            )
+        _remember_preflight(
+            ctx,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+            fingerprint=input_fingerprint,
+            native_preflight=native_preflight,
+        )
+        target_results = []
+        preflight_targets = {
+            item["object_id"]: item for item in native_preflight.get("targets", [])
+        }
+        for spec in target_specs:
+            target = scene.get_object(spec["object_id"])
+            evidence = preflight_targets.get(spec["object_id"], {})
+            if not evidence and len(target_specs) == 1:
+                evidence = native_preflight.get("topology", {})
+            target_results.append({
+                **spec,
+                "name": str(target.name),
+                "declared_site_count": int(evidence.get("declared_site_count", 0)),
+                "active_site_count": int(evidence.get("active_site_count", 0)),
+                "occluded_site_count": int(evidence.get("occluded_site_count", 0)),
+                "visibility_coverage": float(evidence.get("visibility_coverage", 0.0)),
+                "visibility_quality": str(evidence.get("visibility_quality", "unknown")),
+            })
+        target_results[0]["moving_object_ids"] = native_preflight["moving_object_ids"]
+        measurement_operation_id = _measurement_operation_id(
+            ctx,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+            input_fingerprint=input_fingerprint,
+        )
+        return {
+            "ok": True,
+            "status": "ready",
+            "scene_id": str(scene.scene_id),
+            "measurement_operation_id": measurement_operation_id,
+            "next_step": {
+                "tool": "witwin.radar.submit_animation_measurement",
+                "arguments": {
+                    "scene_id": str(scene.scene_id),
+                    "radar_object_id": str(obj.id),
+                    "operation_id": measurement_operation_id,
+                    "expected_input_fingerprint": input_fingerprint,
+                },
+                "requires_confirmation": False,
+            },
+            "radar": _sensor_summary(obj),
+            "target": target_results[0],
+            "targets": target_results,
+            "measurement": measurement,
+            "native_preflight": _public_preflight(native_preflight),
+            "runtime": runtime,
+            "input_fingerprint": input_fingerprint,
+            "scene_input_fingerprint": _scene_input_fingerprint(scene),
+            "scene_input_evidence": _scene_input_evidence(scene),
+            "completion_requirements": {
+                "actual_frame_count": measurement["frame_count"],
+                "all_frames_finite": True,
+                "device": "cuda",
+                "result_handle_required": True,
+                "no_zero_fill_for_active_sites": True,
+                "stable_active_site_ids_for_full_interval": True,
+                "occluded_declared_sites_reported": True,
+                "no_visible_rcs_renormalization": True,
+            },
+            "algorithm_unchanged": True,
+        }
+
+    @tool(
+        name="submit_animation_measurement",
+        description=(
+            "Submit the already-preflighted Studio animation to the existing native "
+            "Radar 0.4 CUDA solver. Returns immediately with an operation receipt unless "
+            "wait_for_completion is explicitly requested by the trusted direct-rerun host; the "
+            "background job verifies native evidence and publishes Timeline Replay as one "
+            "completion contract. This is the direct write for rerunning at a manually moved "
+            "Radar pose and does not require a separate Run confirmation. Poll get_simulation; "
+            "no static Snapshot fallback is allowed."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id", "radar_object_id", "operation_id", "expected_input_fingerprint"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string", "minLength": 1},
+                "operation_id": {"type": "string", "minLength": 1, "maxLength": 160},
+                "expected_input_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "motion_fidelity": {
+                    "type": "object",
+                    "description": (
+                        "Optional final_motion_fidelity report returned by the motion tool. "
+                        "It is bound to the current baked Timeline and embedded in the Radar result."
+                    ),
+                    "required": ["report_id", "snapshot_fingerprint", "status"],
+                    "properties": {
+                        "report_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "snapshot_fingerprint": {
+                            "type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["passed", "needs_review", "failed", "not_evaluated"],
+                        },
+                    },
+                    "additionalProperties": True,
+                },
+                "wait_for_completion": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Wait for the verified native result and automatic Replay before returning.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        side_effects=True,
+        requires_confirmation=False,
+        permission_tier="scene_write",
+        idempotent=True,
+        durable_confirmation=False,
+        timeout=180.0,
+        tags=SUBMIT_TAGS,
+    )
+    async def _submit_animation_measurement(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args["radar_object_id"]))
+        operation_id = str(args["operation_id"])
+        expected = str(args["expected_input_fingerprint"])
+        motion_fidelity = None
+        if args.get("motion_fidelity") is not None:
+            from .adapter.fidelity_ab import normalize_fidelity_provenance
+            from .adapter.replay import motion_fingerprint
+            motion_fidelity = normalize_fidelity_provenance(
+                args["motion_fidelity"],
+                radar_motion_fingerprint=motion_fingerprint(scene),
+            )
+        current = _measurement_input_fingerprint(scene, obj)
+        if current != expected:
+            raise ToolError(
+                "Scene or Radar inputs changed after preflight; simulation was not started.",
+                code="stale_preflight",
+                detail={"expected_input_fingerprint": expected, "current_input_fingerprint": current},
+            )
+        existing = _get_operation(ctx, operation_id)
+        if existing is not None and not _is_measurement_receipt(existing):
+            raise ToolError(
+                "operation_id already names a "
+                f"{existing.get('kind') or 'non-measurement'} operation; submit the measurement "
+                "with the operation_id from plan_animation_measurement next_step.",
+                code="operation_id_reserved",
+                detail={
+                    "operation_id": operation_id,
+                    "reserved_by": existing.get("kind"),
+                    "measurement_operation_id": _measurement_operation_id(
+                        ctx, scene_id=str(scene.scene_id), radar_object_id=str(obj.id),
+                        input_fingerprint=expected,
+                    ),
+                },
+            )
+        deduplicated_from = None
+        if existing is None:
+            # The same authored inputs are measured once. A second submit under
+            # another operation_id resolves to the existing measurement instead
+            # of starting a duplicate GPU simulation.
+            live = _live_measurement(
+                ctx, scene_id=str(scene.scene_id), radar_object_id=str(obj.id),
+                input_fingerprint=expected,
+            )
+            if live is not None and str(live.get("motion_fidelity_report_id") or "") == str(
+                    motion_fidelity["report_id"] if motion_fidelity else ""):
+                deduplicated_from = operation_id
+                operation_id = str(live["operation_id"])
+                existing = live
+        if existing is not None:
+            _require_matching_operation(
+                ctx,
+                operation_id,
+                scene_id=str(scene.scene_id),
+                radar_object_id=str(obj.id),
+                input_fingerprint=expected,
+                motion_fidelity_report_id=(
+                    motion_fidelity["report_id"] if motion_fidelity else ""),
+            )
+            if bool(args.get("wait_for_completion")) and existing.get("status") in {"queued", "running"}:
+                task = _ACTIVE_JOBS.get(_job_key(ctx, operation_id))
+                if task is not None:
+                    await task
+                    existing = _get_operation(ctx, operation_id) or existing
+            result = _operation_result(existing, obj)
+            if deduplicated_from is not None:
+                result["deduplicated_from_operation_id"] = deduplicated_from
+            return result
+        radar = obj.get_component("Radar")
+        from .adapter.snapshot import validate_options
+        try:
+            validate_options(radar)
+            _validate_interval(
+                scene,
+                radar,
+                float(radar.t0),
+                float(radar.animation_duration_s),
+                float(radar.animation_fps),
+            )
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(str(exc), code="radar_configuration_invalid") from exc
+        native_preflight = _consume_preflight(
+            ctx,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+            fingerprint=expected,
+        )
+        if native_preflight is None:
+            raise ToolError(
+                "No matching native topology preflight is available. Call "
+                "plan_animation_measurement again before submitting.",
+                code="preflight_receipt_missing",
+                detail={
+                    "scene_id": str(scene.scene_id),
+                    "radar_object_id": str(obj.id),
+                    "input_fingerprint": expected,
+                },
+            )
+        receipt = _put_operation(ctx, {
+            "operation_id": operation_id,
+            "kind": "animation_measurement",
+            "scene_id": str(scene.scene_id),
+            "radar_object_id": str(obj.id),
+            "input_fingerprint": expected,
+            "motion_fidelity_report_id": (
+                motion_fidelity["report_id"] if motion_fidelity else None),
+            "motion_fidelity": motion_fidelity,
+            "status": "queued",
+            "created_at": _utc_now(),
+            "run_id": None,
+            "result_handle": None,
+            "verification": None,
+            "expected_evidence": _expected_result_evidence(scene, radar, native_preflight),
+            "error": None,
+            "next_step": "wait_for_simulation",
+        })
+        key = _job_key(ctx, operation_id)
+        task = asyncio.create_task(_run_animation_job(
+            ctx,
+            operation_id=operation_id,
+            scene=scene,
+            obj=obj,
+            input_fingerprint=expected,
+            native_preflight=native_preflight,
+            motion_fidelity=motion_fidelity,
+        ))
+        _ACTIVE_JOBS[key] = task
+        owned_job_keys.add(key)
+        def _finish_job(done: asyncio.Task, job_key: str = key) -> None:
+            _ACTIVE_JOBS.pop(job_key, None)
+            owned_job_keys.discard(job_key)
+            if not done.cancelled():
+                # Retrieve any unexpected exception (for example a persistence
+                # failure) so asyncio never silently discards orchestration errors.
+                done.exception()
+        task.add_done_callback(_finish_job)
+        if bool(args.get("wait_for_completion")):
+            await task
+            completed = _get_operation(ctx, operation_id) or receipt
+            return _operation_result(completed, obj)
+        return _operation_result(receipt, obj)
+
+    @tool(
+        name="get_simulation",
+        description=(
+            "Observe one submitted Radar animation operation. A missing in-memory task "
+            "after restart is reported as interrupted, never guessed to have succeeded."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id", "radar_object_id", "operation_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string", "minLength": 1},
+                "operation_id": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        tags=STATUS_TAGS,
+    )
+    def _get_simulation(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args["radar_object_id"]))
+        operation_id = str(args["operation_id"])
+        receipt = _require_matching_operation(
+            ctx,
+            operation_id,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+        )
+        if receipt.get("status") in {"queued", "running"}:
+            task = _ACTIVE_JOBS.get(_job_key(ctx, operation_id))
+            if task is None:
+                receipt = _put_operation(ctx, {
+                    **receipt,
+                    "status": "interrupted",
+                    "error": {
+                        "code": "worker_state_lost",
+                        "message": "The backend no longer owns this in-flight task; inspect before retrying.",
+                    },
+                    "next_step": "inspect_before_retry",
+                })
+        return _operation_result(receipt, obj)
+
+    @tool(
+        name="cancel_simulation",
+        description=(
+            "Cancel one owned in-flight Radar animation operation and wait until its "
+            "orchestration task has published an interrupted receipt. Completed native "
+            "results are never deleted or rewritten."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id", "radar_object_id", "operation_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string", "minLength": 1},
+                "operation_id": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+        side_effects=True,
+        requires_confirmation=False,
+        permission_tier="soft_write",
+        idempotent=True,
+        tags=CANCEL_TAGS,
+    )
+    async def _cancel_simulation(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args["radar_object_id"]))
+        operation_id = str(args["operation_id"])
+        receipt = _require_matching_operation(
+            ctx,
+            operation_id,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+        )
+        if receipt.get("status") not in {"queued", "running"}:
+            return _operation_result(receipt, obj)
+        key = _job_key(ctx, operation_id)
+        task = _ACTIVE_JOBS.get(key)
+        if task is None:
+            receipt = _put_operation(ctx, {
+                **receipt,
+                "status": "interrupted",
+                "error": {
+                    "code": "worker_state_lost",
+                    "message": "The backend no longer owns this in-flight task.",
+                },
+                "next_step": "inspect_before_retry",
+            })
+            return _operation_result(receipt, obj)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        receipt = _require_matching_operation(
+            ctx,
+            operation_id,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+        )
+        if receipt.get("status") in {"queued", "running"}:
+            receipt = _put_operation(ctx, {
+                **receipt,
+                "status": "interrupted",
+                "error": {"code": "task_cancelled", "message": "Radar orchestration task was cancelled."},
+                "next_step": "inspect_before_retry",
+            })
+        return _operation_result(receipt, obj)
+
+    @tool(
+        name="verify_result",
+        description=(
+            "Re-verify a completed native result against the preflight fingerprint, "
+            "actual frame count, cube shape, finite CUDA data and package provenance. "
+            "Normal submissions perform this check automatically before Replay is ready."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id", "radar_object_id", "operation_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string", "minLength": 1},
+                "operation_id": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        tags=VERIFY_TAGS,
+        timeout=180.0,
+    )
+    async def _verify_result(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args["radar_object_id"]))
+        operation_id = str(args["operation_id"])
+        receipt = _require_matching_operation(
+            ctx,
+            operation_id,
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+        )
+        previous_status = receipt.get("status")
+        if previous_status not in {"simulated", "verified", "replay_ready", "exported"}:
+            raise ToolError(
+                "Radar operation is not ready for result verification.",
+                code="simulation_not_complete",
+                detail={"status": receipt.get("status"), "operation_id": operation_id},
+            )
+        def observe(updated: dict[str, Any]) -> dict[str, Any]:
+            # The initial check promotes a completed solve. Rechecking a durable
+            # success receipt is read-only, including when today's state is stale.
+            if previous_status == "simulated":
+                updated = _put_operation(ctx, updated)
+            return _operation_result(updated, obj)
+
+        current = _measurement_input_fingerprint(scene, obj)
+        if current != receipt["input_fingerprint"]:
+            return observe({
+                **receipt,
+                "status": "stale",
+                "error": {
+                    "code": "scene_changed_after_simulation",
+                    "message": "Current scene inputs no longer match the simulated inputs.",
+                    "current_input_fingerprint": current,
+                },
+                "next_step": "plan_again",
+            })
+        radar = _require_live_result_identity(obj, receipt)
+        try:
+            manifest = await asyncio.to_thread(radar._query_result, "animation_manifest", {})
+        except Exception as exc:
+            raise ToolError(str(exc), code="result_verification_failed") from exc
+        expected = dict(receipt.get("expected_evidence") or {})
+        checks = _native_manifest_checks(manifest, receipt, expected)
+        if not all(checks.values()):
+            return observe({
+                **receipt,
+                "status": "failed",
+                "verification": {"passed": False, "checks": checks, "manifest": manifest},
+                "error": {
+                    "code": "result_evidence_mismatch",
+                    "message": "Native result did not satisfy every preflight completion requirement.",
+                },
+                "next_step": "inspect_failure",
+            })
+        return observe({
+            **receipt,
+            # Verification is repeatable, but never trusts an old receipt alone.
+            # Keep later replay/export milestones while rechecking the live result.
+            "status": "verified" if previous_status == "simulated" else previous_status,
+            "verification": {"passed": True, "checks": checks, "manifest": manifest},
+            "error": None,
+            "next_step": (
+                "prepare_replay_or_export" if previous_status == "simulated"
+                else receipt.get("next_step", "prepare_replay_or_export")
+            ),
+        })
+
+    @tool(
+        name="prepare_replay",
+        description=(
+            "Prepare the existing native Range Profile and Range Doppler recording "
+            "for synchronized Studio Timeline playback. Requires the recording's "
+            "scene and motion inputs to still match; stale results are rejected. "
+            "There is no allow-stale or mismatched-animation preview mode. "
+            "This does not run a new simulation or change animation."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id", "radar_object_id", "operation_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string", "minLength": 1},
+                "operation_id": {"type": "string", "minLength": 1},
+                "tx_index": {"type": "integer", "minimum": 0, "default": 0},
+                "rx_index": {"type": "integer", "minimum": 0, "default": 0},
+            },
+            "additionalProperties": False,
+        },
+        side_effects=True,
+        requires_confirmation=True,
+        permission_tier="soft_write",
+        idempotent=True,
+        durable_confirmation=True,
+        timeout=180.0,
+        tags=REPLAY_TAGS,
+    )
+    async def _prepare_replay(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args["radar_object_id"]))
+        receipt = _require_matching_operation(
+            ctx,
+            str(args["operation_id"]),
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+        )
+        if receipt.get("status") not in {"verified", "replay_ready", "exported"}:
+            raise ToolError("Verify the native result before preparing replay.", code="result_not_verified")
+        if _measurement_input_fingerprint(scene, obj) != receipt["input_fingerprint"]:
+            raise ToolError("Scene inputs changed after simulation.", code="stale_result")
+        radar, saved, _export = _result_source(ctx, obj, receipt)
+        radar.tx_index = int(args.get("tx_index", 0))
+        radar.rx_index = int(args.get("rx_index", 0))
+        previous_saved = radar._saved_result
+        radar._saved_result = saved
+        try:
+            status = await radar.prepare_synchronized_replay()
+        except Exception as exc:
+            raise ToolError(str(exc), code="replay_preparation_failed") from exc
+        finally:
+            radar._saved_result = previous_saved
+        if _measurement_input_fingerprint(scene, obj) != receipt["input_fingerprint"]:
+            raise ToolError("Scene inputs changed while preparing replay.", code="stale_result")
+        recorded = _recorded_replay_summary(ctx, obj)
+        if not _recorded_replay_is_ready(recorded):
+            raise ToolError(
+                "Synchronized replay was not published as a current, verified numeric asset.",
+                code="replay_preparation_unverified",
+                detail={
+                    "component_status": str(status),
+                    "recorded_replay": recorded,
+                },
+            )
+        receipt = _put_operation(ctx, {
+            **receipt,
+            "status": "replay_ready" if receipt.get("status") != "exported" else "exported",
+            "replay": {
+                "ready": True,
+                "status": str(status),
+                "tx_index": radar.tx_index,
+                "rx_index": radar.rx_index,
+                "recorded_replay": recorded,
+            },
+            "next_step": "export_result",
+        })
+        return _operation_result(receipt, obj)
+
+    @tool(
+        name="export_result",
+        description=(
+            "Export one verified native Radar animation NPZ into the current project's "
+            "results/radar-animation directory. Repeating the same export operation "
+            "returns the existing file and never overwrites user data."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id", "radar_object_id", "operation_id", "export_operation_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string", "minLength": 1},
+                "operation_id": {"type": "string", "minLength": 1},
+                "export_operation_id": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+        side_effects=True,
+        requires_confirmation=True,
+        permission_tier="file_write",
+        idempotent=True,
+        durable_confirmation=True,
+        timeout=180.0,
+        tags=EXPORT_TAGS,
+    )
+    async def _export_result(args: Dict[str, Any]) -> dict[str, Any]:
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args["radar_object_id"]))
+        receipt = _require_matching_operation(
+            ctx,
+            str(args["operation_id"]),
+            scene_id=str(scene.scene_id),
+            radar_object_id=str(obj.id),
+        )
+        if receipt.get("status") not in {"verified", "replay_ready", "exported"}:
+            raise ToolError("Verify the native result before export.", code="result_not_verified")
+        if _measurement_input_fingerprint(scene, obj) != receipt["input_fingerprint"]:
+            raise ToolError("Scene inputs changed after simulation.", code="stale_result")
+        export_id = str(args["export_operation_id"])
+        # One native result has one export critical section. Different client
+        # export ids must not race the same Radar component or lose journal data.
+        lock_key = f"{_job_key(ctx, str(args['operation_id']))}:export"
+        lock = _EXPORT_LOCKS.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            # Re-read after locking: an identical concurrent request may have
+            # already completed and persisted its export receipt.
+            receipt = _require_matching_operation(
+                ctx,
+                str(args["operation_id"]),
+                scene_id=str(scene.scene_id),
+                radar_object_id=str(obj.id),
+            )
+            radar, _saved, durable_export = _result_source(ctx, obj, receipt)
+            exports = dict(receipt.get("exports") or {})
+            prior = exports.get(export_id)
+            if isinstance(prior, dict):
+                path = Path(str(prior.get("path") or ""))
+                if path.is_file() and _sha256_file(path) == prior.get("sha256"):
+                    return {**_operation_result(receipt, obj), "export": prior, "reused": True}
+                raise ToolError(
+                    "The recorded export receipt no longer matches an existing file.",
+                    code="export_receipt_stale",
+                    detail={"export": prior},
+                )
+            # The client id scopes an export request, not the result artifact.
+            # Once this receipt already owns a verified durable export, another
+            # id must reuse it without appending duplicate evidence or touching
+            # workspace state.
+            if durable_export is not None:
+                return {
+                    **_operation_result(receipt, obj),
+                    "export": durable_export,
+                    "reused": True,
+                }
+            current_path = Path(str(getattr(radar, "animation_export_path", "") or ""))
+            if current_path.is_file():
+                export = _export_evidence(ctx, current_path)
+            else:
+                try:
+                    await radar.export_animation_result()
+                except Exception as exc:
+                    raise ToolError(str(exc), code="result_export_failed") from exc
+                current_path = Path(str(radar.animation_export_path or ""))
+                export = _export_evidence(ctx, current_path)
+            export = {
+                **export,
+                "input_fingerprint": receipt.get("input_fingerprint"),
+                "run_id": receipt.get("run_id"),
+                "result_handle": receipt.get("result_handle"),
+            }
+            exports[export_id] = export
+            receipt = _put_operation(ctx, {
+                **receipt,
+                "status": "exported",
+                "exports": exports,
+                "next_step": "complete",
+            })
+            return {**_operation_result(receipt, obj), "export": export, "reused": False}
+
+    @tool(
+        name="label_visibility",
+        description=(
+            "Read-only per-frame visibility labels for the selected Radar's declared targets over its "
+            "authored measurement interval: in_view, occluded, out_of_fov or out_of_range per target and "
+            "frame, with the visible-site fraction, range and angles (Studio-side static line of sight, "
+            "label_method studio_los_v1). Labels never reject a sample; only key events must be in_view."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "key_events": LABEL_KEY_EVENTS_PROPERTY,
+                "include_frames": {"type": "boolean", "default": True,
+                                   "description": "False returns only per-target counts and the gate."},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        timeout=120.0,
+        tags=INSPECT_TAGS,
+    )
+    def _label_visibility(args: Dict[str, Any]) -> dict[str, Any]:
+        from .labels import label_visibility
+
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
+        try:
+            native = _read_preflight(ctx, scene_id=str(scene.scene_id), radar_object_id=str(obj.id),
+                                     fingerprint=_measurement_input_fingerprint(scene, obj))
+        except (ToolError, ValueError, AttributeError):
+            native = None
+        try:
+            result = label_visibility(scene, obj, key_events=list(args.get("key_events") or ()),
+                                      native_preflight=native)
+        except ValueError as exc:
+            raise ToolError(str(exc), code="labels_unavailable") from exc
+        if not bool(args.get("include_frames", True)):
+            result = _strip_label_frames(result)
+        return {"ok": True, "status": "ready", **_jsonable(result),
+                "mutates_scene": False, "mutates_timeline": False, "mutates_project": False}
+
+    @tool(
+        name="check_radar_output",
+        description=(
+            "Read-only Radar output checks on an exported measurement (operation_id) or a project result "
+            "file (result_path): replay ready, finite and non-zero cube, frame count, each target present "
+            "near its ground-truth range on frames it is in view and moving, key events in view, and a "
+            "RADAR_STATIC_DOMINANT warning when a static return dominates the moving targets."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "operation_id": {"type": "string", "minLength": 1,
+                                 "description": "A measurement operation with a verified export."},
+                "result_path": {"type": "string", "minLength": 1,
+                                "description": "A result NPZ inside the project's results/radar-animation folder."},
+                "key_events": LABEL_KEY_EVENTS_PROPERTY,
+                "include_frames": {"type": "boolean", "default": False,
+                                   "description": "Also return per-frame static and moving peaks."},
+            },
+            "additionalProperties": False,
+        },
+        permission_tier="read",
+        idempotent=True,
+        timeout=300.0,
+        tags=VERIFY_TAGS,
+    )
+    async def _check_radar_output(args: Dict[str, Any]) -> dict[str, Any]:
+        from .labels import label_visibility
+        from .output_checks import check_saved_result
+
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
+        saved, source = await asyncio.to_thread(_load_result_for_check, ctx, scene, obj, args)
+        try:
+            labels = label_visibility(scene, obj, key_events=list(args.get("key_events") or ()))
+        except ValueError as exc:
+            raise ToolError(str(exc), code="labels_unavailable") from exc
+        expected = len(labels["frame_times_s"])
+        result = await asyncio.to_thread(check_saved_result, saved, labels=labels, expected_frame_count=expected)
+        checks = dict(result["checks"])
+        checks["frame_times_match"] = bool(
+            len(saved.times_s) == expected and np.allclose(saved.times_s, labels["frame_times_s"], atol=1e-6))
+        replay = _recorded_replay_summary(ctx, obj)
+        checks["replay_ready"] = _recorded_replay_is_ready(replay)
+        checks["key_events_in_view"] = bool(labels["gate"]["key_events_in_view"])
+        failed = [name for name, value in checks.items() if value is False]
+        payload = {
+            "ok": True,
+            "status": "passed" if not failed else "failed",
+            "scene_id": str(scene.scene_id),
+            "radar_object_id": str(obj.id),
+            "checks": checks,
+            "failed_checks": failed,
+            "warnings": result["warnings"],
+            "targets": result["targets"],
+            "static_to_moving_db": result["static_to_moving_db"],
+            "thresholds": result["thresholds"],
+            "key_events_in_view": checks["key_events_in_view"],
+            "key_event_failures": labels["gate"]["failures"],
+            "labels": _strip_label_frames(labels),
+            "replay": replay,
+            "result": source,
+            "mutates_scene": False,
+            "mutates_timeline": False,
+            "mutates_project": False,
+        }
+        if bool(args.get("include_frames", False)):
+            payload["frames"] = result["frames"]
+        return _jsonable(payload)
+
+    @tool(
+        name="capture_static_radar",
+        description=(
+            "Static Radar capture (no moving target): the room alone (mode room, the background and "
+            "clutter a dataset needs) or the declared actors frozen at one Timeline time (mode frozen), "
+            "as frame_count frames on the Radar's FPS. Writes one new NPZ into the project's "
+            "results/radar-animation folder and checks it; never changes the scene or motion. It "
+            "replaces the Radar's in-memory result; exported measurements stay on disk."
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["scene_id"],
+            "properties": {
+                "scene_id": SCENE_ID_PROPERTY,
+                "radar_object_id": {"type": "string"},
+                "mode": {"type": "string", "enum": ["room", "frozen"], "default": "room",
+                         "description": "room leaves every actor out; frozen holds the Radar's targets still."},
+                "frame_count": {"type": "integer", "minimum": 1, "maximum": 300, "default": 10},
+                "freeze_time_s": {"type": "number", "minimum": 0,
+                                  "description": "Frozen mode: Timeline time of the pose; default the Radar start."},
+            },
+            "additionalProperties": False,
+        },
+        side_effects=True,
+        requires_confirmation=True,
+        permission_tier="file_write",
+        idempotent=False,
+        durable_confirmation=True,
+        timeout=900.0,
+        tags=SUBMIT_TAGS,
+    )
+    async def _capture_static_radar(args: Dict[str, Any]) -> dict[str, Any]:
+        from .adapter.animation import persist_export
+        from .adapter.saved_result import SavedRadarResult
+        from .adapter.static_capture import DEFAULT_FRAME_COUNT, static_capture_request
+        from .output_checks import check_saved_result
+
+        scene = _scene_from_args(ctx, args)
+        obj = _select_radar(scene, str(args.get("radar_object_id") or ""))
+        radar = obj.get_component("Radar")
+        timeline = _timeline_summary(scene)
+        if timeline["playing"] or timeline["recording"]:
+            raise ToolError("Pause timeline playback and recording before a static capture.",
+                            code="timeline_busy", detail={"timeline": timeline})
+        mode = str(args.get("mode") or "room")
+        try:
+            request = static_capture_request(
+                radar, mode=mode, frame_count=int(args.get("frame_count", DEFAULT_FRAME_COUNT)),
+                freeze_time_s=args.get("freeze_time_s"))
+        except ValueError as exc:
+            raise ToolError(str(exc), code="invalid_static_capture") from exc
+        try:
+            status = await radar._simulate_async(animation=True, request=request)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - native error retained for the caller
+            raise ToolError(str(exc), code="RADAR_SIMULATION_FAILED",
+                            detail={"type": type(exc).__name__}) from exc
+        try:
+            reference = await asyncio.to_thread(radar._query_result, "animation_export", {})
+            path = await asyncio.to_thread(persist_export, ctx.api, reference)
+            saved = await asyncio.to_thread(SavedRadarResult.load, path)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(str(exc), code="static_capture_export_failed") from exc
+        checks = await asyncio.to_thread(check_saved_result, saved, expected_frame_count=request["frame_count"])
+        producer = saved.producer
+        # The room model is specular single bounce: a mount with every wall,
+        # floor and furniture foot point outside the pattern (the installation
+        # rule) truthfully returns a zero room cube. Only frozen actors must
+        # return energy.
+        failed = [name for name in checks["failed_checks"] if not (mode == "room" and name == "nonzero_return")]
+        return _jsonable({
+            "ok": True,
+            "status": "captured" if not failed else "failed",
+            "room_return_in_beam": bool(checks["checks"]["nonzero_return"]),
+            "scene_id": str(scene.scene_id),
+            "radar_object_id": str(obj.id),
+            "capture": "static",
+            "mode": mode,
+            "frame_count": int(request["frame_count"]),
+            "fps": float(request["fps"]),
+            "freeze_time_s": request.get("freeze_time_s"),
+            "export_path": str(path),
+            "component_status": str(status),
+            "checks": checks["checks"],
+            "failed_checks": failed,
+            "static_peak_range_m": max(checks["frames"], key=lambda item: item["static_peak_db"])[
+                "static_peak_range_m"] if checks["frames"] else None,
+            "targets": producer.get("targets"),
+            "site_count": producer.get("site_count"),
+            "environment_reflection": producer.get("environment_reflection"),
+            "mutates_scene": False,
+            "mutates_timeline": False,
+            "mutates_project": True,
+        })
+
+    @tool(
+        name="describe_pipeline_contract",
+        description=(
+            "Return the versioned Radar planning and result-action contracts for "
+            "orchestrators and plan editors. Does not inspect or edit a scene."
+        ),
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        permission_tier="read",
+        idempotent=True,
+    )
+    def _describe_pipeline_contract(_args: Dict[str, Any]) -> dict[str, Any]:
+        actions = {
+            "plan_placement": _plan_sensor_placement,
+            "configure": _ensure_sensor,
+            "preflight": _plan_animation_measurement,
+            "simulate": _submit_animation_measurement,
+            "verify": _verify_result,
+            "replay": _prepare_replay,
+            "export": _export_result,
+        }
+        return {
+            "schema": "witwin.radar.pipeline-capabilities.v1",
+            "actions": {
+                name: {
+                    "tool_name": value.name,
+                    "input_schema": copy.deepcopy(value.input_schema),
+                    "permission_tier": value.permission_tier,
+                    "requires_confirmation": value.requires_confirmation,
+                    "idempotent": value.idempotent,
+                }
+                for name, value in actions.items()
+            },
+            "dependencies": {
+                "simulate": ["configure", "preflight"],
+                "verify": ["simulate"],
+                "replay": ["verify"],
+                "export": ["verify"],
+            },
+        }
+
+    for value in (
+        _runtime_diagnostics,
+        _inspect_pipeline,
+        _plan_sensor_placement,
+        _ensure_sensor,
+        _plan_animation_measurement,
+        _submit_animation_measurement,
+        _get_simulation,
+        _cancel_simulation,
+        _verify_result,
+        _prepare_replay,
+        _export_result,
+        _describe_pipeline_contract,
+        _label_visibility,
+        _check_radar_output,
+        _capture_static_radar,
+    ):
+        ctx.tools.register(value)

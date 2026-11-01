@@ -1,0 +1,689 @@
+"""Small real-Studio/native-Radar contracts; no offline experiment dependency."""
+from types import SimpleNamespace
+import json
+import zipfile
+
+import numpy as np
+import pytest
+import torch
+
+from test_snapshot import Context, copy_for_solver, scene  # noqa: F401
+from witwin_server import SceneObject
+from witwin_server.core.components import SkinnedMeshComponent
+from witwin_server.features.timeline import InterpolationType, TimelineManager
+from wt_radar.adapter.animation import (
+    MODEL, AnimationTopologyError, animation_preflight, animation_request,
+    animation_view, export_animation, frame_times, solve_animation,
+    solve_native_frame, validate_unambiguous_velocity,
+)
+from wt_radar.adapter.saved_result import SavedRadarResult
+from wt_radar.adapter.snapshot import prepare_snapshot, snapshot_request
+from wt_radar.adapter.studio_motion import (
+    MAX_TARGET_SITE_BUDGET, MultiTargetSkinSampler, StudioSkinSampler, anatomically_prioritized_ranks,
+    resolved_target_site_budget, spatially_spread_ranks,
+)
+from wt_radar.adapter.target_contract import component_target_specs, normalize_target_specs
+
+
+class AnimationContext(Context):
+    def throw_if_cancelled(self):
+        pass
+
+
+def test_hidden_fractional_fps_reports_exact_values_without_rounding():
+    with pytest.raises(ValueError, match=r"FPS=29\.998998642.*re-enter exact values"):
+        frame_times({"time_s": 7., "duration_s": 12., "fps": 29.998998641967773}, None)
+
+
+def test_frame_times_accepts_float32_round_trip_for_frame_aligned_duration():
+    component = SimpleNamespace(
+        num_tx=1,
+        num_rx=1,
+        chirp_per_frame=1,
+        adc_samples=1,
+        scene=SimpleNamespace(
+            timeline_manager=SimpleNamespace(clip=SimpleNamespace(duration=20.0)),
+        ),
+    )
+
+    duration = float(np.float32(16.9))
+    times = frame_times({"time_s": 0.0, "duration_s": duration, "fps": 10.0}, component)
+
+    assert len(times) == 169
+    assert times[-1] == pytest.approx(16.8)
+
+
+def test_animation_request_carries_explicit_target_physics(scene):
+    original, component = scene
+    make_rig(original, component)
+
+    assert animation_request(component)["target_multipath"] is False
+    assert animation_request(component)["target_motion_sampling"] == "chirp"
+    assert animation_request(component)["target_site_budget"] == 24
+    component.target_multipath = True
+    component.target_motion_sampling = "chirp"
+    request = animation_request(component)
+    assert request["target_multipath"] is True
+    assert request["target_motion_sampling"] == "chirp"
+
+
+def test_sampler_site_budget_uses_stable_spatial_coverage(scene):
+    original, component = scene
+    make_rig(original, component)
+
+    sampler = StudioSkinSampler(original, "target", site_budget=1)
+
+    assert sampler.available_site_count == 2
+    assert sampler.site_budget == 1
+    assert len(sampler.vertex_ids) == len(sampler.site_names) == 1
+
+
+def test_multi_target_sampler_combines_two_animated_skinned_actors(scene):
+    original, component = scene
+    _, vertices = make_rig(original, component)
+    dog = SceneObject(id="dog", name="Dog", mesh_type="Empty")
+    original.add_object(dog)
+    skin = dog.add_component(SkinnedMeshComponent())
+    skin.set_mesh_data(vertices, np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint32))
+    for oid in ("dog-bone0", "dog-bone1"):
+        original.add_object(SceneObject(id=oid, name=oid, mesh_type="Empty"))
+        original.set_parent(oid, "dog", keep_local_transform=True)
+    indices = np.zeros((6, 4), dtype=np.int64)
+    indices[3:, 0] = 1
+    weights = np.zeros((6, 4), dtype=np.float32)
+    weights[:, 0] = 1
+    skin.set_skinning_data(
+        ["dog-bone0", "dog-bone1"], indices, weights,
+        np.tile(np.eye(4, dtype=np.float32), (2, 1, 1)), root_bone_id="dog-bone0",
+    )
+    add_track(original, "dog-bone0", "position", [(0., [0., 0., 0.]), (2., [1., 0., 0.])])
+
+    sampler = MultiTargetSkinSampler(original, [
+        {"object_id": "target", "site_budget": 2},
+        {"object_id": "dog", "site_budget": 2},
+    ])
+    positions, velocities = sampler.sample(.5)
+
+    assert positions.shape == velocities.shape == (4, 3)
+    assert [item["object_id"] for item in sampler.target_slices] == ["target", "dog"]
+    assert sampler.target_slices[0]["site_end"] == sampler.target_slices[1]["site_start"]
+    assert all(name.startswith(("target:", "dog:")) for name in sampler.site_names)
+
+
+def test_dense_surface_sampler_supports_2400_deterministic_sites():
+    points = np.column_stack((
+        np.linspace(-1.0, 1.0, 2600),
+        np.sin(np.linspace(0.0, 17.0, 2600)),
+        np.cos(np.linspace(0.0, 11.0, 2600)),
+    ))
+
+    first = spatially_spread_ranks(points, MAX_TARGET_SITE_BUDGET)
+    second = spatially_spread_ranks(points, MAX_TARGET_SITE_BUDGET)
+
+    assert len(first) == len(np.unique(first)) == 2400
+    np.testing.assert_array_equal(first, second)
+
+
+def test_typed_defaults_apply_only_without_an_authored_override():
+    human = SimpleNamespace(
+        get_component=lambda name: object() if name == "SMPLBody" else None,
+    )
+    dog = SimpleNamespace(
+        get_component=lambda name: object() if name == "AnimalActor" else None,
+    )
+    scene = SimpleNamespace(get_object=lambda object_id: {"human": human, "dog": dog}.get(object_id))
+
+    assert resolved_target_site_budget(scene, "human") == 720
+    assert resolved_target_site_budget(scene, "dog") == 360
+    assert resolved_target_site_budget(scene, "human", 240) == 240
+    assert resolved_target_site_budget(scene, "dog", 120) == 120
+    assert resolved_target_site_budget(scene, "missing", 24) == 24
+
+
+def test_multi_target_contract_resolves_each_budget_and_rejects_duplicates():
+    human = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "SMPLBody"} else None)
+    dog = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "AnimalActor"} else None)
+    targets = {"human": human, "dog": dog}
+    scene = SimpleNamespace(get_object=lambda object_id: targets.get(object_id))
+
+    specs = normalize_target_specs(scene, [
+        {"object_id": "human", "site_budget": 24},
+        {"object_id": "dog", "site_budget": 720},
+    ])
+
+    assert specs == [
+        {"object_id": "human", "target_kind": "human", "site_budget": 24, "budget_source": "explicit"},
+        {"object_id": "dog", "target_kind": "animal", "site_budget": 720, "budget_source": "explicit"},
+    ]
+    with pytest.raises(ValueError, match="duplicated"):
+        normalize_target_specs(scene, [
+            {"object_id": "dog", "site_budget": 24},
+            {"object_id": "dog", "site_budget": 24},
+        ])
+
+
+def test_component_target_contract_keeps_legacy_single_target_compatible():
+    target = SimpleNamespace(get_component=lambda name: object() if name == "SkinnedMesh" else None)
+    scene = SimpleNamespace(get_object=lambda object_id: target if object_id == "dog" else None)
+    component = SimpleNamespace(
+        scene=scene,
+        animation_targets_json="",
+        snapshot_target_id="dog",
+        target_site_budget=24,
+    )
+
+    assert component_target_specs(component) == [{
+        "object_id": "dog",
+        "target_kind": "skinned",
+        "site_budget": 24,
+        "budget_source": "component_default",
+    }]
+
+
+def test_component_budget_controls_reconfigure_typed_targets_after_authoring():
+    human = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "SMPLBody"} else None)
+    dog = SimpleNamespace(get_component=lambda name: object() if name in {"SkinnedMesh", "AnimalActor"} else None)
+    scene = SimpleNamespace(get_object=lambda object_id: {"human": human, "dog": dog}.get(object_id))
+    authored = normalize_target_specs(scene, [{"object_id": "human"}, {"object_id": "dog"}])
+    component = SimpleNamespace(
+        scene=scene,
+        animation_targets_json=json.dumps(authored),
+        snapshot_target_id="human",
+        target_site_budget=24,
+        human_target_site_budget=480,
+        animal_target_site_budget=180,
+    )
+
+    assert component_target_specs(component) == [
+        {"object_id": "human", "target_kind": "human", "site_budget": 480,
+         "budget_source": "component_default"},
+        {"object_id": "dog", "target_kind": "animal", "site_budget": 180,
+         "budget_source": "component_default"},
+    ]
+
+
+def test_anatomical_budget_prefers_major_cat_motion_sites():
+    core = ["spine_01", "spine_02", "spine_03", "spine_04", "spine_05", "neck", "head"]
+    limbs = [
+        f"{part}.{side}"
+        for side in ("L", "R")
+        for part in ("shoulder_blade", "hip_f", "leg_f", "foot_f", "hip_b", "leg_b", "foot_b")
+    ]
+    tail = [f"tail_0{index}" for index in range(1, 6)]
+    cosmetic = ["mouth", "tongue_01", "eye.L", "eyelid.R", "mustache.L", "ear_1.R", "claw_f.L"]
+    names = core + limbs + tail + cosmetic
+    points = np.arange(len(names) * 3, dtype=np.float64).reshape(-1, 3)
+
+    ranks = anatomically_prioritized_ranks(points, names, 24)
+    selected = {names[rank] for rank in ranks}
+
+    assert selected == {*core, *limbs, "tail_01", "tail_03", "tail_05"}
+
+
+def add_track(scene, oid, field, keys):
+    track = scene.timeline_manager.clip.get_or_create_track(oid, "Transform", field)
+    for time_s, value in keys:
+        track.add_keyframe(time_s, value, interpolation=InterpolationType.LINEAR)
+    return track
+
+
+def make_rig(scene, component):
+    """Two separate bone influences with identity bind matrices and actual skinning."""
+    target = scene.get_object("target")
+    target._components.pop("Mesh", None)
+    skin = target.add_component(SkinnedMeshComponent())
+    vertices = np.array([
+        [-.1, 0, -.25], [0, .1, -.25], [.1, 0, -.25],
+        [-.1, 0, .25], [0, .1, .25], [.1, 0, .25],
+    ], dtype=np.float32)
+    skin.set_mesh_data(vertices, np.array([[0, 1, 2], [3, 4, 5]], dtype=np.uint32))
+    for oid in ("bone0", "bone1"):
+        scene.add_object(SceneObject(id=oid, name=oid, mesh_type="Empty"))
+        scene.set_parent(oid, "target", keep_local_transform=True)
+    indices = np.zeros((6, 4), dtype=np.int64)
+    indices[3:, 0] = 1
+    weights = np.zeros((6, 4), dtype=np.float32)
+    weights[:, 0] = 1
+    skin.set_skinning_data(
+        ["bone0", "bone1"], indices, weights,
+        np.tile(np.eye(4, dtype=np.float32), (2, 1, 1)), root_bone_id="bone0",
+    )
+    scene.timeline_manager = TimelineManager(scene)
+    scene.timeline_manager.clip.duration = 2.0
+    component.animation_duration_s = .2
+    component.animation_fps = 10
+    add_track(scene, "bone0", "position", [(0., [0., 0., 0.]), (2., [0., 0., -2.])])
+    return skin, vertices
+
+
+def test_world_scale_parent_affine_and_bone_velocity_are_applied_once(scene):
+    original, component = scene
+    _, vertices = make_rig(original, component)
+    parent = SceneObject(id="parent", mesh_type="Empty")
+    original.add_object(parent)
+    original.set_parent("target", "parent", keep_local_transform=True)
+    parent.get_component("Transform").scale = [2., 3., 4.]
+    parent.get_component("Transform").rotation = [0., .7, 0.]
+    target = original.get_object("target").get_component("Transform")
+    target.scale = [.65, .65, .65]
+    add_track(original, "target", "position", [(0., [0., 1., -3.]), (2., [.3, 1., -3.])])
+    sampler = StudioSkinSampler(original, "target")
+    p, v = sampler.sample(.5)
+    parent_matrix = parent.get_component("Transform").get_transformation_matrix().numpy()
+    local = vertices[sampler.vertex_ids].astype(np.float64)
+    bone_velocities = np.zeros_like(local)
+    bone_velocities[0, 2] = -1.
+    local[0, 2] -= .5
+    expected_local = .65 * local + [.075, 1., -3.]
+    expected = (np.column_stack((expected_local, np.ones(len(local)))) @ parent_matrix.T)[:, :3]
+    expected_velocity = (.65 * bone_velocities + [.15, 0., 0.]) @ parent_matrix[:3, :3].T
+    np.testing.assert_allclose(p, expected, atol=2e-6, rtol=0)
+    np.testing.assert_allclose(v, expected_velocity, atol=2e-3, rtol=0)
+    assert original.timeline_manager.current_time == pytest.approx(.5)
+    assert not np.allclose(v[0], v[1])  # bone motion is not replaced by root velocity
+
+
+def test_bone_rotation_velocity_is_not_rigid_root_translation(scene):
+    original, component = scene
+    _, vertices = make_rig(original, component)
+    original.timeline_manager.clip.tracks.clear()
+    # Studio stores Euler components in ZXY order, not XYZ.
+    add_track(original, "bone0", "rotation", [(0., [0., 0., 0.]), (2., [1., 0., 0.])])
+    original.get_object("target").get_component("Transform").scale = [.65, .65, .65]
+    sampler = StudioSkinSampler(original, "target")
+    p, v = sampler.sample(.5)
+    angle = .25
+    rotation = np.array([[np.cos(angle), -np.sin(angle), 0.],
+                         [np.sin(angle), np.cos(angle), 0.], [0., 0., 1.]])
+    rotated = rotation @ vertices[sampler.vertex_ids[0]]
+    np.testing.assert_allclose(p[0], .65 * rotated + [0., 1., -3.], atol=1e-6)
+    np.testing.assert_allclose(v[0], .65 * .5 * np.array([-rotated[1], rotated[0], 0.]), atol=3e-4)
+    np.testing.assert_allclose(v[1], 0., atol=3e-4)
+
+
+def test_sampler_sparse_skinning_matches_full_studio_result_without_full_mesh_call(scene):
+    original, component = scene
+    skin, _ = make_rig(original, component)
+    sampler = StudioSkinSampler(original, "target")
+    original.timeline_manager.set_time(.5, apply_to_scene=True)
+    expected = skin.compute_skinned_vertices(in_local_space=False).detach().cpu().numpy()[sampler.vertex_ids]
+
+    def full_mesh_forbidden(*_args, **_kwargs):
+        raise AssertionError("WT Radar sparse sampling must not skin the full mesh")
+
+    skin.compute_skinned_vertices = full_mesh_forbidden
+    sampled = sampler.positions(.5)
+
+    np.testing.assert_allclose(sampled, expected, atol=1e-7, rtol=0)
+    assert sampled.shape == (len(sampler.vertex_ids), 3)
+
+
+@pytest.mark.parametrize("time_s", [1., 1. - 1e-13, 1. + 1e-13])
+def test_knot_uses_right_hand_velocity_and_restores_pose(scene, time_s):
+    original, component = scene
+    make_rig(original, component)
+    original.timeline_manager.clip.tracks.clear()
+    add_track(original, "bone0", "position", [
+        (0., [0., 0., 0.]), (1., [0., 0., -1.]), (2., [0., 0., -3.]),
+    ])
+    sampler = StudioSkinSampler(original, "target")
+    p, v = sampler.sample(time_s)
+    np.testing.assert_allclose(v[0], [0., 0., -2.], atol=2e-3)
+    np.testing.assert_allclose(v[1], 0., atol=1e-5)
+    np.testing.assert_array_equal(p, sampler.positions(time_s))
+    np.testing.assert_array_equal(sampler.sample(2.)[1], np.zeros((2, 3)))
+
+
+def test_sampler_refuses_non_target_animation_and_non_linear_tracks(scene):
+    original, component = scene
+    make_rig(original, component)
+    track = add_track(original, "floor", "position", [(0., [0., -2., 0.])])
+    with pytest.raises(ValueError, match="unsupported track"):
+        StudioSkinSampler(original, "target")
+    original.timeline_manager.clip.tracks.pop(track.path)
+    track = next(iter(original.timeline_manager.clip.tracks.values()))
+    track.keyframes[0].interpolation = InterpolationType.STEP
+    with pytest.raises(ValueError, match="LINEAR"):
+        StudioSkinSampler(original, "target")
+
+
+def test_sampler_refuses_invalid_skin_weights(scene):
+    original, component = scene
+    skin, _ = make_rig(original, component)
+    data = skin.get_skinning_data()
+    weights = np.asarray(data["skin_weights"]).copy()
+    weights[0] = 0.  # Studio normalizes nonzero sums at its setter boundary.
+    skin.set_skinning_data(data["bone_ids"], data["skin_indices"], weights,
+                           data["inverse_bind_matrices"], root_bone_id="bone0")
+    with pytest.raises(ValueError, match="skin influences"):
+        StudioSkinSampler(original, "target")
+
+
+@pytest.mark.parametrize("updates", [
+    {"duration_s": 0.}, {"duration_s": 31.}, {"fps": 0.}, {"fps": 31.},
+    {"time_s": -1.}, {"time_s": float("nan")}, {"duration_s": .15},
+    {"duration_s": 2.1},
+])
+def test_invalid_animation_interval_is_refused(scene, updates):
+    original, component = scene
+    make_rig(original, component)
+    request = {"time_s": 0., "duration_s": .2, "fps": 10., **updates}
+    with pytest.raises(ValueError):
+        frame_times(request, component)
+
+
+def test_animation_total_memory_budget_rejects_without_changing_configuration(scene):
+    original, component = scene
+    make_rig(original, component)
+    original.timeline_manager.clip.duration = 30.
+    component.num_tx, component.num_rx = 3, 4
+    component.chirp_per_frame, component.adc_samples = 128, 256
+    before = (component.num_tx, component.num_rx, component.chirp_per_frame, component.adc_samples)
+    with pytest.raises(ValueError, match="1536 MiB"):
+        frame_times({"time_s": 0., "duration_s": 30., "fps": 30.}, component)
+    assert before == (component.num_tx, component.num_rx, component.chirp_per_frame, component.adc_samples)
+
+
+def test_animation_does_not_silently_freeze_target_mesh_descendants(scene, monkeypatch):
+    import wt_radar.adapter.animation as animation
+    original, component = scene
+    make_rig(original, component)
+    accessory = SceneObject(id="collar", mesh_type="Cube")
+    original.add_object(accessory)
+    original.set_parent("collar", "bone0", keep_local_transform=True)
+    request = animation_request(component)
+
+    def unexpected_export(*args, **kwargs):
+        pytest.fail("Moving Mesh descendant was accepted and reached static export")
+
+    monkeypatch.setattr(animation, "prepare_snapshot", unexpected_export)
+    with pytest.raises(ValueError, match="(?i)(mesh|geometry|descendant)"):
+        solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+
+def test_animation_refuses_radar_parented_under_a_moving_bone(scene, monkeypatch):
+    import wt_radar.adapter.animation as animation
+    original, component = scene
+    make_rig(original, component)
+    original.set_parent("radar", "bone0", keep_local_transform=True)
+    request = animation_request(component)
+
+    def unexpected_export(*args, **kwargs):
+        pytest.fail("Moving radar hierarchy was accepted and reached static export")
+
+    monkeypatch.setattr(animation, "prepare_snapshot", unexpected_export)
+    with pytest.raises(ValueError, match="(?i)(radar|sensor|static)"):
+        solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+
+def native_setup(original, component):
+    from wt_radar.adapter.radar04 import build_radar
+    world, config, meta = prepare_snapshot(copy_for_solver(original), snapshot_request(component))
+    radar = build_radar(
+        config, device="cuda", position=meta["radar_position_m"],
+        look_at=meta["radar_target_m"], up=meta["radar_up"],
+        polarization=meta["world_polarization"],
+    )
+    return radar, world, .01, meta["world_polarization"]
+
+
+def test_native_stationary_vs_moving_has_physical_doppler(scene, cuda_ready):
+    from witwin.radar.processing import range_profile, range_doppler_map
+    original, component = scene
+    component.chirp_per_frame = component.num_doppler_bins = 64
+    radar, world, response, polarization = native_setup(original, component)
+    stationary, zero = solve_native_frame(radar, world, response, 0., [[0., 1., -3.]], [[0., 0., 0.]], polarization)
+    moving, active = solve_native_frame(radar, world, response, 0., [[0., 1., -3.]], [[0., 0., -1.]], polarization)
+    assert zero["delay_rate_abs_max"] == 0.
+    assert active["delay_rate_abs_max"] > 0. and active["chirp_change_max"] > 0.
+    assert zero["nonzero_return"] and active["nonzero_return"]
+    assert not torch.equal(stationary.data, moving.data)
+    for product, expected_speed in ((stationary, 0.), (moving, 1.)):
+        rd = range_doppler_map(range_profile(product, window="rectangular", remove_dc=False), window="hann")
+        matrix = rd.data[0, 0].abs().cpu().numpy()
+        velocity_bin, _ = np.unravel_index(matrix.argmax(), matrix.shape)
+        measured_speed = abs(float(product.axes.velocity_mps[velocity_bin]))
+        assert abs(measured_speed - expected_speed) <= product.axes.velocity_bin_mps
+
+
+def test_native_frame_coherently_adds_single_bounce_room_return(scene, cuda_ready):
+    original, component = scene
+    back_wall = SceneObject(id="back-wall", mesh_type="Cube")
+    back_wall.get_component("Transform").position = [0.0, 1.0, -5.0]
+    back_wall.get_component("Transform").scale = [10.0, 10.0, 0.1]
+    original.add_object(back_wall)
+    radar, world, response, polarization = native_setup(original, component)
+    target, stats = solve_native_frame(
+        radar, world, response, 0.0,
+        [[0.0, 1.0, -3.0]], [[0.0, 0.0, -1.0]], polarization,
+        target_reflections=1,
+        target_motion_sampling_mode="chirp",
+    )
+    assert stats["path_count"] > 1
+    assert stats["path_set_complete"] is False
+    assert stats["motion_sampling"] == "chirp"
+    assert bool((target.data.abs() > 0).any())
+
+
+def test_native_no_incident_path_is_an_error_not_zero_fill(scene, cuda_ready):
+    original, component = scene
+    # Closed large slab cuts every LOS from radar to the target.
+    wall = SceneObject(id="wall", mesh_type="Cube")
+    wall.get_component("Transform").position = [0., 1., -1.5]
+    wall.get_component("Transform").scale = [10., 10., .2]
+    original.add_object(wall)
+    radar, world, response, polarization = native_setup(original, component)
+    with pytest.raises(ValueError, match="no inbound leg row"):
+        solve_native_frame(radar, world, response, 0., [[0., 1., -3.]], [[0., 0., -1.]], polarization)
+
+
+def test_native_preflight_blocks_occluded_skin_site_before_synthesis(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    wall = SceneObject(id="wall", mesh_type="Cube")
+    wall.get_component("Transform").position = [0., 1., -1.5]
+    wall.get_component("Transform").scale = [10., 10., .2]
+    original.add_object(wall)
+    with pytest.raises(AnimationTopologyError) as failure:
+        animation_preflight(copy_for_solver(original), animation_request(component))
+    assert failure.value.detail["code"] == "sensor_embedded_or_all_sites_occluded"
+    assert failure.value.detail["declared_site_count"] == 2
+    assert len(failure.value.detail["occluded_sites"]) == 2
+    assert "No GPU waveform synthesis" in str(failure.value)
+
+
+def test_native_preflight_reports_reachable_topology_without_synthesis(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    result = animation_preflight(copy_for_solver(original), animation_request(component))
+    assert result["topology"]["status"] == "reachable"
+    assert result["topology"]["method"] == "radar04_public_trace_interval_visibility_intersection_no_synthesis"
+    assert result["topology"]["declared_site_count"] == result["site_count"] == 2
+    assert result["topology"]["active_site_count"] == 2
+    assert result["topology"]["occluded_site_count"] == 0
+    assert all(frame["round_trip_rows"] > 0 for frame in result["topology"]["frames"])
+
+
+def test_solve_reuses_fingerprint_bound_native_preflight(scene, cuda_ready, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    request = animation_request(component)
+    request["native_preflight"] = animation_preflight(copy_for_solver(original), request)
+
+    def repeated_preflight(*_args, **_kwargs):
+        pytest.fail("solve repeated the already verified native topology preflight")
+
+    def repeated_sampling(*_args, **_kwargs):
+        pytest.fail("solve repeated the already verified authored motion sampling")
+
+    monkeypatch.setattr("wt_radar.adapter.animation.visibility_preflight", repeated_preflight)
+    monkeypatch.setattr("wt_radar.adapter.animation.sample_authored_motion", repeated_sampling)
+    result = solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+    assert result.metadata["native_preflight_reused"] is True
+    assert result.metadata["native_motion_samples_reused"] is True
+    assert result.metadata["topology_preflight"] == request["native_preflight"]["topology"]
+
+
+def test_solve_rejects_mismatched_cached_native_preflight(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    request = animation_request(component)
+    request["native_preflight"] = animation_preflight(copy_for_solver(original), request)
+    request["native_preflight"]["radar_position_m"][0] += 1.0
+
+    with pytest.raises(ValueError, match="preflight pose"):
+        solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+
+def test_solve_rejects_mismatched_cached_motion_shape(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    request = animation_request(component)
+    request["native_preflight"] = animation_preflight(copy_for_solver(original), request)
+    request["native_preflight"]["sampled_motion"]["positions_m"].pop()
+
+    with pytest.raises(ValueError, match="sampled motion"):
+        solve_animation(AnimationContext(), copy_for_solver(original), request)
+
+
+def test_visible_site_model_preserves_ids_and_does_not_renormalize_rcs(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    # The near site ends at z=-2.75 before this slab; the far site at z=-3.25
+    # is occluded for the whole interval.
+    wall = SceneObject(id="partial-wall", mesh_type="Cube")
+    wall.get_component("Transform").position = [0., 1., -2.9]
+    wall.get_component("Transform").scale = [1., 1., .1]
+    original.add_object(wall)
+    request = animation_request(component)
+    preflight = animation_preflight(copy_for_solver(original), request)
+    topology = preflight["topology"]
+    assert topology["declared_site_count"] == 2
+    assert topology["active_site_count"] == 1
+    assert topology["occluded_site_count"] == 1
+    assert topology["occluded_sites"][0]["bone_name"] == "bone0"
+    assert topology["rcs_policy"].endswith("no_visible_renormalization")
+    assert topology["visibility_coverage"] == pytest.approx(0.5)
+    assert topology["visibility_quality"] == "degraded_interval_global_subset"
+
+    result = solve_animation(AnimationContext(), copy_for_solver(original), request)
+    assert result.metadata["site_bone_names"] == ["bone1"]
+    assert result.metadata["declared_site_bone_names"] == ["bone0", "bone1"]
+    assert result.metadata["active_site_ids"] == topology["active_site_ids"]
+    assert result.metadata["rcs_per_site_m2"] == pytest.approx(component.snapshot_rcs_m2 / 2)
+    assert result.positions_m.shape == result.velocities_mps.shape == (2, 1, 3)
+
+
+def test_native_animation_propagates_frame_error_without_completed_result(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    wall = SceneObject(id="wall", mesh_type="Cube")
+    wall.get_component("Transform").position = [0., 1., -1.5]
+    wall.get_component("Transform").scale = [10., 10., .2]
+    original.add_object(wall)
+    request = animation_request(component)
+    with pytest.raises(AnimationTopologyError, match="no skin site.*throughout the requested interval") as failure:
+        solve_animation(AnimationContext(), copy_for_solver(original), request)
+    assert failure.value.detail["code"] == "sensor_embedded_or_all_sites_occluded"
+
+
+def test_native_animation_refuses_overlapping_cpi(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    component.chirp_per_frame = component.num_doppler_bins = 1024
+    component.animation_duration_s = .1
+    component.animation_fps = 30
+    with pytest.raises(ValueError, match="(?i)(CPI|frame spacing)"):
+        solve_animation(AnimationContext(), copy_for_solver(original), animation_request(component))
+
+
+def test_native_animation_refuses_slow_time_velocity_alias(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    original.timeline_manager.clip.tracks.clear()
+    add_track(original, "bone0", "position", [(0., [0., 0., 0.]), (2., [0., 0., -200.])])
+    with pytest.raises((ValueError, RuntimeError), match="(?i)(Nyquist|alias|unambiguous)"):
+        solve_animation(AnimationContext(), copy_for_solver(original), animation_request(component))
+
+
+def test_unambiguous_velocity_uses_radar_radial_component(scene, cuda_ready):
+    original, component = scene
+    make_rig(original, component)
+    radar, *_ = native_setup(original, component)
+    positions = np.array([[[0.0, 1.0, -3.0]]])
+    aliased_speed = 2.0 * radar.system_config.waveform_spec().max_unambiguous_speed_mps
+
+    evidence = validate_unambiguous_velocity(
+        radar, positions, np.array([[[aliased_speed, 0.0, 0.0]]])
+    )
+
+    assert evidence["motion_speed_max_mps"] == pytest.approx(aliased_speed)
+    assert evidence["radial_motion_speed_max_mps"] == pytest.approx(0.0)
+    with pytest.raises(ValueError, match="Target radial speed"):
+        validate_unambiguous_velocity(
+            radar, positions, np.array([[[0.0, 0.0, -aliased_speed]]])
+        )
+
+
+def test_preflight_rejects_velocity_alias_before_topology_discovery(scene, cuda_ready, monkeypatch):
+    original, component = scene
+    make_rig(original, component)
+    original.timeline_manager.clip.tracks.clear()
+    add_track(original, "bone0", "position", [(0., [0., 0., 0.]), (2., [0., 0., -200.])])
+
+    def topology_started(*_args, **_kwargs):
+        pytest.fail("expensive topology discovery started before velocity validation")
+
+    monkeypatch.setattr("wt_radar.adapter.animation.visibility_preflight", topology_started)
+    with pytest.raises(ValueError, match="unambiguous velocity"):
+        animation_preflight(copy_for_solver(original), animation_request(component))
+
+
+def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene, cuda_ready, tmp_path):
+    original, component = scene
+    make_rig(original, component)
+    component.chirp_per_frame = component.num_doppler_bins = 64
+    request = animation_request(component)
+    before = original.to_dict()
+    result = solve_animation(AnimationContext(), copy_for_solver(original), request)
+    assert original.to_dict() == before
+    assert result.metadata["model"] == MODEL
+    assert result.cube.shape == (2, 1, 1, 64, 128)
+    assert result.positions_m.shape == result.velocities_mps.shape == (2, 2, 3)
+    assert all(row["delay_rate_abs_max"] > 0 for row in result.metadata["frame_diagnostics"])
+    assert result.metadata["components"] == ["los", "reflection"]
+    assert result.metadata["max_depth"] == 1
+    assert result.metadata["target_propagation"] == {
+        "components": ["los"], "max_depth": 0, "multipath_enabled": False,
+        "motion_sampling": "chirp",
+    }
+    environment = result.metadata["environment_reflection"]
+    assert environment["model"] == "radar04_native_single_bounce"
+    assert environment["max_depth"] == 1
+    assert environment["reflected_path_count"] >= 0
+    assert environment["material_slot_count"] > 0
+    assert environment["coherent_with_target"] is True
+    np.testing.assert_allclose(result.times_s, [0., .1], atol=0, rtol=0)
+    path = tmp_path / "animation.npz"
+
+    def save_result(payload, **kwargs):
+        assert kwargs["kind"] == "radar.animation"
+        path.write_bytes(payload)
+        return str(path)
+
+    assert export_animation(SimpleNamespace(result_ref=save_result), result) == str(path)
+    with zipfile.ZipFile(path) as archive:
+        assert {entry.compress_type for entry in archive.infolist()} == {zipfile.ZIP_STORED}
+    loaded = SavedRadarResult.load(path)
+    assert torch.equal(loaded.cube, result.cube)
+    np.testing.assert_array_equal(loaded.times_s, result.times_s)
+    with np.load(path, allow_pickle=False) as archive:
+        np.testing.assert_array_equal(archive["positions_m"], result.positions_m)
+        np.testing.assert_array_equal(archive["velocities_mps"], result.velocities_mps)
+    for frame in range(2):
+        payload = animation_view(result, {"frame": frame, "view": "range_profile", "tx": 0, "rx": 0})
+        np.testing.assert_array_equal(payload["magnitude"], result.cube[frame, 0, 0, 0].abs().tolist())
+        assert "Studio skin motion" in payload["title"]
+    with pytest.raises(ValueError, match="Animation frame"):
+        animation_view(result, {"frame": 2})

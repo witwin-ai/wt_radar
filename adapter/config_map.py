@@ -1,10 +1,10 @@
-"""Sensor config interchange: ``witwin.radar.RadarConfig`` <-> the unified Radar component.
+"""Sensor config interchange: ``witwin.radar.Radar`` <-> the unified Radar component.
 
 ``settings_to_studio`` builds the single ``Empty`` Radar Settings object carrying ONE
-``Radar`` component, then fills its fields from a platform ``RadarConfig`` (the sensor
+``Radar`` component, then fills its fields from a platform ``Radar`` (the sensor
 pose/tracer settings are editor state and keep their defaults, since they are not part
 of the pair). ``build_config`` reads the same fields back into a dict, enforces the
-adc-vs-quantization cross rule, and hands it to ``RadarConfig.from_dict`` which runs
+adc-vs-quantization cross rule, and hands it to ``Radar.from_dict`` which runs
 the platform's own validation — so the editor never emits an invalid config. Values are
 stored in the platform's native non-SI units (see ``common``), so the round trip is exact.
 """
@@ -20,7 +20,7 @@ MARKER_COMPONENT = "Radar"
 
 
 class ConfigMap:
-    """``RadarConfig`` (+ sensor + 4 sub-configs) <-> the unified Radar component."""
+    """Radar 0.4's flat FMCW fields <-> the unified Radar component."""
 
     @staticmethod
     def settings_to_studio(config: Optional[Any]) -> SceneObject:
@@ -31,20 +31,20 @@ class ConfigMap:
         radar = obj.add_component(RadarComponent())
         if config is not None:
             ConfigMap._fill(radar, config)
-            SubConfigMap.antenna_to_studio(radar, config.antenna_pattern)
-            SubConfigMap.noise_to_studio(radar, config.noise_model)
-            SubConfigMap.pol_to_studio(radar, config.polarization)
-            SubConfigMap.chain_to_studio(radar, config.receiver_chain)
+            pattern = getattr(config, "pattern", None)
+            if pattern is not None:
+                ConfigMap._pattern_to_studio(radar, pattern)
         return obj
 
     @staticmethod
     def build_config(settings_obj: SceneObject) -> Any:
-        """Read the Radar component back into a validated ``RadarConfig``."""
-        from witwin.radar import RadarConfig
+        """Read the Radar component back into a validated Radar 0.4 object."""
+        from witwin.radar import Radar
+        from .radar04 import flat_config
 
         config_dict = ConfigMap.build_dict(settings_obj)
         ConfigMap._check_cross_rules(config_dict)
-        return RadarConfig.from_dict(config_dict)
+        return Radar.from_dict(flat_config(config_dict))
 
     @staticmethod
     def build_dict(settings_obj: SceneObject) -> Dict[str, Any]:
@@ -82,23 +82,37 @@ class ConfigMap:
     @staticmethod
     def _fill(radar: Any, config: Any) -> None:
         # Platform RadarConfig dataclass -> the unified Radar component (native units).
-        radar.fc = float(config.fc)
-        radar.slope = float(config.slope)
+        waveform = config.waveform
+        radar.fc = float(config.carrier)
+        radar.slope = float(waveform.slope) / 1e12
         radar.power = float(config.power)
-        radar.adc_samples = int(config.adc_samples)
-        radar.adc_start_time = float(config.adc_start_time)
-        radar.sample_rate = float(config.sample_rate)
-        radar.idle_time = float(config.idle_time)
-        radar.ramp_end_time = float(config.ramp_end_time)
-        radar.chirp_per_frame = int(config.chirp_per_frame)
-        radar.frame_per_second = float(config.frame_per_second)
-        radar.num_doppler_bins = int(config.num_doppler_bins)
-        radar.num_range_bins = int(config.num_range_bins)
-        radar.num_angle_bins = int(config.num_angle_bins)
-        radar.num_tx = int(config.num_tx)
-        radar.num_rx = int(config.num_rx)
-        radar.tx_loc = [list(loc) for loc in config.tx_loc]
-        radar.rx_loc = [list(loc) for loc in config.rx_loc]
+        radar.adc_samples = int(waveform.samples_per_chirp)
+        radar.adc_start_time = float(waveform.adc_start) * 1e6
+        radar.sample_rate = float(waveform.sample_rate) / 1e3
+        radar.idle_time = float(waveform.idle) * 1e6
+        radar.ramp_end_time = float(waveform.ramp_end) * 1e6
+        radar.chirp_per_frame = int(waveform.chirps_per_frame)
+        radar.num_doppler_bins = int(waveform.chirps_per_frame)
+        radar.num_range_bins = int(waveform.samples_per_chirp)
+        radar.num_tx = len(config.tx)
+        radar.num_rx = len(config.rx)
+        radar.tx_loc = [list(loc) for loc in config.tx]
+        radar.rx_loc = [list(loc) for loc in config.rx]
+
+    @staticmethod
+    def _pattern_to_studio(radar: Any, pattern: Any) -> None:
+        """Map Radar 0.4's typed Pattern without reviving the 0.3 schema."""
+
+        radar.use_default = False
+        radar.pattern_kind = "map" if pattern.kind == "map" else "separable"
+        radar.x_angles_deg = list(pattern.x_angles)
+        radar.y_angles_deg = list(pattern.y_angles)
+        if pattern.kind == "map":
+            import json
+            radar.values_2d_json = json.dumps([list(row) for row in pattern.gain])
+        else:
+            radar.x_values = list(pattern.x_gain)
+            radar.y_values = list(pattern.y_gain)
 
     # --- sub-configs + cross rules -------------------------------------------
 

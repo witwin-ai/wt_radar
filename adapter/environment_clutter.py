@@ -1,0 +1,165 @@
+"""Native single-bounce returns from Studio's exported static geometry.
+
+Channel owns reflection discovery and material response.  This adapter only
+connects that direct Tx -> environment -> Rx route to Radar synthesis and
+keeps antenna leakage out of the returned cube.
+"""
+from dataclasses import dataclass
+
+import torch
+
+from .direct_environment import DirectEnvironmentComposer
+from .runtime_contract import require_supported_runtime
+
+
+SINGLE_BOUNCE_COMPONENTS = frozenset({"reflection"})
+
+
+@dataclass(frozen=True)
+class EnvironmentClutterResult:
+    """One static raw Radar frame and evidence about its reflected paths."""
+
+    cube: torch.Tensor
+    reflected_path_count: int
+    material_slot_count: int
+    max_depth: int = 1
+    # Producer axes of this cube, for a capture with no target synthesis.
+    axes: object = None
+
+
+def add_environment_to_fmcw_result(radar, target_cube, environment):
+    """Coherently add one static environment return in the result domain.
+
+    ``single_bounce_environment_cube`` returns the native synthesis product in
+    the instrument's declared FMCW domain, but before the receive chain.
+    Studio's Radar 0.4 adapter currently refuses every legacy frontend option,
+    so the configured instrument has no nonlinear receive stage. Refuse a
+    future frontend here rather than silently combining two products after a
+    nonlinear AGC or ADC.
+    """
+    if radar.frontend is not None:
+        raise NotImplementedError(
+            "Static environment returns must be combined before a configured "
+            "Radar receive frontend; the Studio Radar 0.4 adapter does not "
+            "support that frontend yet."
+        )
+    if radar.waveform.output not in ("spectrum", "beat"):
+        raise ValueError(f"Unsupported FMCW output domain: {radar.waveform.output!r}")
+    clutter_cube = environment.cube
+    if clutter_cube.shape != target_cube.shape:
+        raise ValueError(
+            "Environment and target Radar cubes disagree: "
+            f"{tuple(clutter_cube.shape)} != {tuple(target_cube.shape)}"
+        )
+    return target_cube + clutter_cube
+
+
+def single_bounce_environment_cube(radar, world, *, polarization):
+    """Synthesize the static scene's native one-reflection Radar return.
+
+    The returned cube is before the receive frontend.  It can therefore be
+    added coherently to the target cube before processing.  No mesh points,
+    furniture names, or room-specific scattering amplitudes are invented in
+    this plugin: Channel discovers the specular path and evaluates the actual
+    exported material.
+    """
+    require_supported_runtime()
+
+    from witwin.radar.channel import ChannelPropagationAdapter, compile_scene
+    from witwin.radar.sensors import RoundTripPatternStage
+    from witwin.radar.simulation import ScatterSitePolicy, bind_radar_world
+    from witwin.radar.processing import ProcessingAxes
+    from witwin.radar.synthesis import SlowTimeMode, SynthesisPathBatch
+    from witwin.radar.synthesis.assembly import SynthesisResult, assemble_frame_cube
+    from witwin.radar.synthesis.fmcw import synthesize_fmcw
+
+    propagation = radar.system_config.propagation
+    reference_frequency_hz = propagation.reference_frequency_hz
+    compiled = compile_scene(world, reference_frequency_hz=reference_frequency_hz)
+
+    # bind_radar_world is the public owner of array endpoint IDs and powers.
+    # The direct environment route does not consume a scatter site; one dummy
+    # position is supplied only because the binding contract describes both
+    # direct and two-way endpoint sets together.
+    dummy_site = radar.tx_pos[:1].detach().clone().contiguous()
+    binding = bind_radar_world(
+        radar,
+        world,
+        sites=ScatterSitePolicy.explicit(dummy_site),
+        polarization=tuple(polarization),
+    )
+    adapter = ChannelPropagationAdapter(
+        compiled,
+        reference_frequency_hz=reference_frequency_hz,
+        components=SINGLE_BOUNCE_COMPONENTS,
+        max_depth=1,
+    )
+    frozen = adapter.freeze(binding.transmitters, binding.receivers)
+    composer = DirectEnvironmentComposer.freeze(
+        frozen,
+        radar_source_ids=binding.transmitter_ids,
+        radar_sink_ids=binding.receiver_ids,
+        reference_frequency_hz=reference_frequency_hz,
+    )
+    leg = adapter.reevaluate_slots(
+        frozen,
+        binding.transmitters,
+        binding.receivers,
+        slot_count=1,
+        ad_mode="none",
+    )
+    paths = composer.compose(leg)
+
+    material_slot_count = len(compiled.materials.material_keys)
+    # The Channel query is reflection-only and depth-one, so every returned row
+    # is an environment reflection. No Radar-side component classifier is needed.
+    reflected_path_count = paths.path_count
+    stage = RoundTripPatternStage.freeze(
+        radar,
+        composer,
+        site_ids=(),
+        pattern=radar.pattern,
+    )
+    if leg.departure_target_m is None or leg.arrival_origin_m is None:
+        raise RuntimeError(
+            "Channel did not publish the interaction points required for the "
+            "Radar antenna pattern on direct environment paths."
+        )
+    rows = composer.row_index
+    paths = stage.apply(
+        paths,
+        tx_pos=radar.tx_pos,
+        rx_pos=radar.rx_pos,
+        tx_targets_m=leg.departure_target_m.index_select(0, rows).contiguous(),
+        rx_targets_m=leg.arrival_origin_m.index_select(0, rows).contiguous(),
+    )
+
+    mode = SlowTimeMode.FROZEN_WEIGHT_WITH_CARRIER_RATE
+    clutter_paths = SynthesisPathBatch.from_radar_paths(paths, slow_time_mode=mode)
+    synthesis_cube = synthesize_fmcw(
+        clutter_paths,
+        radar.system_config.waveform_spec(),
+    )
+    array = radar.system_config.sensors.array
+    cube = assemble_frame_cube(
+        synthesis_cube,
+        num_tx=array.num_tx,
+        num_rx=array.num_rx,
+    )
+    if cube.device.type != "cuda" or not torch.isfinite(cube).all():
+        raise RuntimeError("Native single-bounce environment cube is missing or nonfinite.")
+    spec = radar.system_config.waveform_spec()
+    return EnvironmentClutterResult(
+        cube=cube,
+        reflected_path_count=reflected_path_count,
+        material_slot_count=material_slot_count,
+        axes=ProcessingAxes.from_synthesis(SynthesisResult.from_fmcw(synthesis_cube, spec), spec, array),
+    )
+
+
+__all__ = [
+    "add_environment_to_fmcw_result",
+    "EnvironmentClutterResult",
+    "SINGLE_BOUNCE_COMPONENTS",
+    "single_bounce_environment_cube",
+]

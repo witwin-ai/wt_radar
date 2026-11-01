@@ -6,6 +6,7 @@ half-wavelength units. The unit pickers below keep the stored value in the platf
 native unit (the option with multiplier 1.0 is the base), so the round trip is exact
 no matter which unit the editor displays.
 """
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -101,3 +102,20 @@ class Derived:
             "doppler_resolution_mps": lam / (2 * num_doppler * chirp_period * num_tx),
             "max_doppler_mps": lam / (4 * chirp_period * num_tx),
         }
+
+    @staticmethod
+    def slope_for_max_range(comp: Any, max_range_m: float) -> float:
+        """Return the TI-style MHz/us slope for a requested FMCW range span.
+
+        The native fast-time sample count and sample rate stay unchanged, so
+        narrowing the unambiguous range also narrows each physical range bin.
+        This is waveform configuration only; no Radar DSP or propagation code
+        is replaced here.
+        """
+        requested = float(max_range_m)
+        if not math.isfinite(requested) or requested <= 0.0:
+            raise ValueError("max_range_m must be a finite positive distance")
+        sample_rate_hz = num(comp.sample_rate) * 1e3
+        if not math.isfinite(sample_rate_hz) or sample_rate_hz <= 0.0:
+            raise ValueError("Radar sample_rate must be finite and positive")
+        return C0 * sample_rate_hz / (2.0 * requested) / 1e12

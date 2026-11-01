@@ -5,12 +5,28 @@ author = ""
 description = "FMCW radar simulation from Studio meshes with signal visualization."
 license = "GPL-3.0-or-later"
 repository = "https://github.com/witwin-ai/wt_radar"
-dependencies = ["scipy", "numpy"]
+dependencies = [
+    "scipy",
+    "numpy",
+    "witwin-radar>=0.4,<0.5",
+    "witwin-channel>=0.5,<0.6",
+]
 icon = "radar"
 enabled = true
 
 [engines]
 witwin = "^1.0.0"
+
+[[contributes.tools]]
+module = "agent_tools"
+register = "register"
+
+[permissions]
+tools = ["read", "soft_write", "scene_write", "execute", "file_write"]
+frontend = true
+
+[web]
+root = "frontend"
 
 [[contributes.solvers]]
 id = "witwin.radar.simulate"
@@ -27,4 +43,8 @@ python = "${backend:python}"
 [contributes.solvers.capabilities]
 cancel = true
 partials = true
-query = ["raw_signal", "range_doppler", "point_cloud", "music"]
+query = ["snapshot_view", "animation_view", "animation_export", "animation_replay", "animation_manifest"]
+
+[contributes.viewport.host]
+entry = "viewport.mjs"
+sdkVersion = "1.6.0"

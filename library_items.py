@@ -1,19 +1,14 @@
-"""Radar library prefabs — drag-to-create scene building blocks (master §8).
+"""Radar 0.4 Studio library prefabs.
 
 Registers a ``Radar`` category with:
 
-- **Radar (Demo)** — a Radar Settings object (77 GHz FMCW defaults + sensor pose/backend
-  + tracer + the Simulate button) plus a plain static box target, so dropping it in is
-  immediately simulable: press **Simulate** on the Radar Settings object to see the
-  range-doppler / point-cloud views in-component.
+- **Radar (Demo)** — Radar Settings plus an explicitly selected box target for a
+  one-frame snapshot diagnosis.
 - **Radar Settings** — just the sensor singleton, to compose a custom scene.
 - **Radar Target** — a plain box mesh with radar-friendly material defaults.
 
-Human/SMPL bodies are owned by the wt-human plugin, not radar; a radar scene that contains
-one round-trips through the shared base geometry map with no radar-side SMPL code.
-
-Each prefab reuses the tested adapter maps so geometry / materials / components match the
-round trip. Runtime/result state is never part of a prefab.
+Human/SMPL bodies and their animation are authored by the Motion Matching plugin;
+WT Radar only samples the resulting Studio scene and baked timeline.
 """
 from witwin_server import Library
 
@@ -48,8 +43,6 @@ def _target_object(name="Radar Target"):
 
 def _make_demo(ctx):
     settings = _settings_object(ctx.name)
-    # Unique the target name so dropping the demo more than once does not produce two
-    # structures with the same name (the platform wr.Scene.add_structure rejects dups).
     base = "Radar Target"
     existing = {obj.name for obj in ctx.scene.objects.values()}
     name = base
@@ -57,7 +50,9 @@ def _make_demo(ctx):
     while name in existing:
         name = f"{base} {i}"
         i += 1
-    ctx.scene.add_object(_target_object(name))
+    target = _target_object(name)
+    ctx.scene.add_object(target)
+    settings.get_component("Radar").snapshot_target_id = target.id
     return settings
 
 
@@ -75,13 +70,13 @@ def register() -> None:
     Library.register_category(_CATEGORY, "Radar", icon="radar", order=30)
     Library.register_item("radar_demo", "Radar (Demo)", _CATEGORY,
                           icon="radar", object_type="empty", factory=_make_demo,
-                          description="Sensor + a plain mesh target; Simulate to see the range-doppler signal")
+                          description="Sensor + selected box target for a Radar 0.4 static snapshot")
     Library.register_item("radar_settings", "Radar Settings", _CATEGORY,
                           icon="settings", object_type="empty", factory=_make_settings,
-                          description="FMCW sensor config + Simulate button (build your own scene)")
+                          description="FMCW sensor config for Snapshot or baked Studio animation")
     Library.register_item("radar_target", "Radar Target", _CATEGORY,
                           icon="box", object_type="mesh", factory=_make_target,
-                          description="A plain box mesh exported directly as a radar structure")
+                          description="Plain Studio mesh usable as an explicit snapshot target")
 
 
 register()
