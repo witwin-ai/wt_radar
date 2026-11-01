@@ -87,3 +87,17 @@ def test_nan_and_frame_count_mismatch_fail(axes):
     cube[1, 0, 0, 3, 5] = float("nan")
     result = output_checks.radar_output_checks(cube, axes, np.arange(2) / 10., expected_frame_count=3)
     assert set(result["failed_checks"]) == {"all_finite", "frame_count_matches", "nonzero_return"}
+
+
+def test_static_dominance_is_not_judged_when_every_target_stands_still(axes):
+    # A fallen person lying still is itself a zero-Doppler return; with nothing
+    # moving the static-to-moving ratio says nothing about a room bright spot.
+    ranges = axes.range_m.numpy()
+    cube = frames(2, moving_amp=1e-4, static_amp=1.)
+    still = output_checks.radar_output_checks(
+        cube, axes, np.arange(2) / 10., labels=labels_at(ranges[10], 2, speed=0.))
+    assert still["warnings"] == []
+    assert still["static_check_skipped_frames"] == 2
+    moving = output_checks.radar_output_checks(
+        cube, axes, np.arange(2) / 10., labels=labels_at(ranges[10], 2, speed=1.))
+    assert moving["warnings"][0]["code"] == "RADAR_STATIC_DOMINANT"

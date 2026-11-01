@@ -166,3 +166,64 @@ def test_check_radar_output_runs_the_checks_on_a_project_result(scene, tmp_path)
         asyncio.run(run(tools, "check_radar_output", {
             "scene_id": original.scene_id, "radar_object_id": "radar", "result_path": str(outside)}))
     assert getattr(raised.value, "code", "") == "result_path_outside_project"
+
+
+def test_installation_plan_predicts_the_peak_radial_speed_from_the_baked_motion(scene):
+    original, component = scene
+    make_rig(original, component)
+    original.remove_object("radar")
+    tools = register(original)
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": original.scene_id, "placement_mode": "automatic", "placement_objective": "installation",
+        "target_object_id": "target", "install_rule": {"profile": "fall"},
+    })
+    assert result["ok"], result
+    velocity = result["placement"]["velocity"]
+    assert velocity["checked"] is True
+    assert 0. < velocity["peak_radial_mps"] <= velocity["limit_mps"] < velocity["max_unambiguous_speed_mps"]
+    assert result["placement"]["rule"]["profile"] == "fall"
+
+    blocked = run(tools, "plan_sensor_placement", {
+        "scene_id": original.scene_id, "placement_mode": "automatic", "placement_objective": "installation",
+        "target_object_id": "target", "install_rule": {"profile": "fall", "max_speed_fraction": .01},
+    })
+    assert blocked["status"] == "blocked"
+    assert blocked["blockers"][0]["code"] == "RADAR_VELOCITY_ALIASING"
+
+
+def test_a_fall_key_event_selects_the_fall_profile(room):
+    scene, tools = room
+    result = run(tools, "plan_sensor_placement", {
+        "scene_id": scene.scene_id, "placement_mode": "automatic", "placement_objective": "installation",
+        "key_events": [{"id": "impact", "kind": "fall_impact", "actor_kind": "person",
+                        "position_m": [2.5, 0., 2.0], "test_height_m": .3}],
+    })
+    assert result["ok"], result
+    assert result["placement"]["rule"]["profile"] == "fall"
+    assert result["placement"]["mount"]["position_m"][1] <= 1.3 + 1e-9
+    assert result["proposed_ensure_sensor_arguments"]["height_m"] <= 1.3
+
+
+def test_velocity_check_catches_a_peak_between_radar_frames(scene):
+    from test_animation import add_track
+
+    original, component = scene
+    make_rig(original, component)
+    original.remove_object("radar")
+    # Replace the slow walk with a 25 m/s burst between the 10 fps frames 0.0 and 0.1 s.
+    original.timeline_manager.clip.tracks.clear()
+    add_track(original, "bone0", "position", [(0., [0., 0., 0.]), (.04, [0., 0., 0.]), (.07, [0., 0., -.75]),
+                                             (2., [0., 0., -.75])])
+    tools = register(original)
+    args = {"scene_id": original.scene_id, "placement_mode": "automatic", "placement_objective": "installation",
+            "target_object_id": "target", "install_rule": {"profile": "fall"}}
+    velocity = run(tools, "plan_sensor_placement", args)["placement"]["velocity"]
+    # The peak lies between the 10 fps Radar frames; frame-only sampling would see nothing.
+    assert velocity["sample_fps"] == 30.0
+    assert velocity["t_s"] == pytest.approx(1 / 15)
+    assert velocity["peak_radial_mps"] > 1.
+    # The chosen mount looks nearly across the burst; a stricter share leaves none.
+    blocked = run(tools, "plan_sensor_placement", {**args, "install_rule": {"profile": "fall",
+                                                                           "max_speed_fraction": .5}})
+    assert blocked["blockers"][0]["code"] == "RADAR_VELOCITY_ALIASING"
+    assert blocked["blockers"][0]["detail"]["sample_fps"] == 30.0

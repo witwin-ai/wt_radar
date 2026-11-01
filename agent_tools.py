@@ -1662,6 +1662,19 @@ INSTALL_RULE_PROPERTY = {
                     "default": [1.0, 6.0], "description": "Sensing-zone range limits in metres."},
         "wall_standoff_m": {"type": "number", "minimum": 0, "maximum": 0.5, "default": 0.05,
                             "description": "Distance from the inner wall face in metres."},
+        "profile": {
+            "type": "string", "enum": ["auto", "default", "fall"], "default": "auto",
+            "description": (
+                "Mount profile. fall: near torso height (1.0-1.3 m), little tilt, chosen to look across the "
+                "motion so the fall stays under the unambiguous radial speed. auto: fall when a key event's "
+                "kind starts with 'fall', else default (2.0 m wall or corner)."),
+        },
+        "height_span_m": {"type": "number", "minimum": 0, "maximum": 1,
+                          "description": "Also try mount heights height_m +- this span in 0.15 m steps."},
+        "max_speed_fraction": {
+            "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.95,
+            "description": "Refuse a mount whose predicted peak radial speed exceeds this share of the "
+                           "Radar's unambiguous speed (RADAR_VELOCITY_ALIASING when no mount passes)."},
     },
     "additionalProperties": False,
     "description": "Installation rule (witwin.scenario/v1 radar.rule); omitted fields take the defaults.",
@@ -1675,6 +1688,13 @@ PLACEMENT_KEY_EVENTS_PROPERTY = {
         "properties": {
             "id": {"type": "string", "minLength": 1},
             "actor_kind": {"type": "string", "enum": ["person", "cat"], "default": "person"},
+            "kind": {"type": "string",
+                     "description": "Event type, e.g. arrival, seat_contact, fall_impact, landing; a fall selects "
+                                    "the fall mount profile."},
+            "direction_xz": {
+                "type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                "description": "Fall events before motion exists: horizontal fall direction to look across.",
+            },
             "position_m": {
                 "type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
                 "description": "World position in metres; y is the supporting surface (floor, bed top).",
@@ -1709,6 +1729,10 @@ LABEL_KEY_EVENTS_PROPERTY = {
 
 # Scenario default (design 5.4): clip length minus 0.2 s at 10 fps.
 _INSTALLATION_FPS = 10.0
+# Velocities for the aliasing check are sampled this densely over the measured
+# interval, so a fall peak between 10 fps Radar frames is not missed and the
+# chosen mount holds at any Radar FPS up to the Studio maximum.
+_VELOCITY_SAMPLE_FPS = 30.0
 _INSTALLATION_TAIL_S = 0.2
 
 
@@ -1719,7 +1743,7 @@ def _installation_rule(args: dict[str, Any]) -> Any:
     if "height_m" not in value and "height_m" in args:
         value["height_m"] = float(args["height_m"])
     try:
-        return InstallRule.from_dict(value)
+        return InstallRule.from_dict(value, key_events=list(args.get("key_events") or ()))
     except (TypeError, ValueError) as exc:
         raise ToolError(str(exc), code="invalid_sensor_placement",
                         detail={"install_rule": _jsonable(value)}) from exc
@@ -1748,12 +1772,78 @@ def _plan_installation(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
                         code="conflicting_sensor_placement")
     rule = _installation_rule(args)
     events = [
-        {key: value for key, value in event.items() if key in {"id", "actor_kind", "position_m", "test_height_m"}}
+        {key: value for key, value in event.items()
+         if key in {"id", "actor_kind", "position_m", "test_height_m", "kind", "direction_xz"}}
         for event in args.get("key_events") or ()
     ]
-    plan = plan_installation(scene, rule=rule, key_events=events, room_index=args.get("room_index"))
+    from .install_rule import InstallRuleError
+
+    motion = _installation_motion(scene, args)
+    try:
+        plan = plan_installation(scene, rule=rule, key_events=events, room_index=args.get("room_index"),
+                                 actor_paths=motion["actor_paths"], motion_samples=motion["samples"],
+                                 max_radial_speed_mps=motion["max_unambiguous_speed_mps"])
+    except InstallRuleError as exc:
+        if exc.code == "RADAR_VELOCITY_ALIASING":
+            exc.detail.update(interval=motion["interval"], sample_fps=_VELOCITY_SAMPLE_FPS)
+        raise
     plan["mount"]["rotation_euler_zxy_rad"] = _look_at_euler(plan["position_m"], plan["aim_point_m"])
+    if plan["velocity"]["checked"]:
+        plan["velocity"].update(interval=motion["interval"], sample_fps=_VELOCITY_SAMPLE_FPS)
     return plan
+
+
+def _installation_motion(scene: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Baked target motion on the measured frames, for the velocity check and actor paths.
+
+    Empty before motion exists: the rule then plans from room geometry only.
+    """
+    empty = {"samples": None, "actor_paths": None, "max_unambiguous_speed_mps": None, "interval": None}
+    try:
+        target_specs = _target_specs_from_args(scene, args, infer_single=True)
+    except ToolError:
+        return empty
+    if "duration_s" in args and "fps" in args:
+        interval = {"start_s": float(args.get("start_s", 0.0)), "duration_s": float(args["duration_s"]),
+                    "fps": float(args["fps"])}
+    else:
+        interval = _installation_interval(scene)
+    if not target_specs or interval is None:
+        return empty
+    from .adapter.studio_motion import MultiTargetSkinSampler
+    from .adapter.timebase import aligned_frame_count
+
+    frames = aligned_frame_count(interval["duration_s"], interval["fps"])
+    if frames is None:
+        return empty
+    try:
+        sampler = MultiTargetSkinSampler(scene, target_specs)
+        last = interval["start_s"] + (frames - 1) / interval["fps"]
+        if last > sampler.duration + 1e-7:
+            return empty
+        dense = int(math.floor((last - interval["start_s"]) * _VELOCITY_SAMPLE_FPS + 1e-9)) + 1
+        times = np.union1d(interval["start_s"] + np.arange(frames, dtype=np.float64) / interval["fps"],
+                           interval["start_s"] + np.arange(dense, dtype=np.float64) / _VELOCITY_SAMPLE_FPS)
+        sampled = [sampler.sample(float(t)) for t in times]
+    except (ValueError, RuntimeError):
+        return empty
+    positions = np.asarray([item[0] for item in sampled])
+    velocities = np.asarray([item[1] for item in sampled])
+    requested = str(args.get("radar_object_id") or "").strip()
+    probe = (_select_radar(scene, requested) if requested else _settings_object("Installation probe"))
+    max_speed = float(Derived.compute(probe.get_component("Radar"))["max_doppler_mps"])
+    samples, paths = [], []
+    kinds = {spec["object_id"]: spec.get("target_kind") for spec in target_specs}
+    for item in sampler.target_slices:
+        sites = slice(item["site_start"], item["site_end"])
+        samples.append({"object_id": item["object_id"], "times_s": times,
+                        "positions_m": positions[:, sites], "velocities_mps": velocities[:, sites]})
+        if kinds.get(item["object_id"]) == "human":
+            root = positions[:, sites].mean(axis=1)
+            paths.append({"object_id": item["object_id"], "points_xz": root[:, [0, 2]].tolist(),
+                          "top_y": float(positions[:, sites, 1].max())})
+    return {"samples": samples, "actor_paths": paths, "max_unambiguous_speed_mps": max_speed,
+            "interval": interval}
 
 
 def _installation_label_preview(scene: Any, plan: dict[str, Any], target_specs: list[dict[str, Any]],
@@ -1842,7 +1932,7 @@ def _plan_sensor_installation(scene: Any, args: dict[str, Any]) -> dict[str, Any
         **{key: plan[key] for key in (
             "mount", "position_m", "aim_point_m", "rule", "room", "zones", "zone_fraction_of_open_floor",
             "key_events", "key_events_in_zone", "candidate_count", "valid_mount_count", "rejected_counts",
-            "rejected_mounts", "label_method")},
+            "rejected_mounts", "label_method", "velocity")},
         "label_preview": _installation_label_preview(
             scene, plan, target_specs, interval, list(args.get("key_events") or ())),
     }
