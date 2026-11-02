@@ -18,7 +18,7 @@ dynamic = ["version"]
 description = "FMCW radar simulation from Studio meshes with signal visualization."
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "witwin-studio>=0.1,<0.2",
   "numpy",
@@ -39,3 +39,17 @@ solve = [
 
 [project.urls]
 Repository = "https://github.com/witwin-ai/wt_radar"
+
+# Nothing first-party comes from PyPI. uv reads this table only while
+# developing this repository (`uv sync`, `uv run pytest`); a Project that
+# depends on this Plugin pins its own sources (`witwin add`).
+[tool.uv.sources]
+witwin-studio = { index = "witwin" }
+witwin = { index = "witwin" }
+witwin-radar = { index = "witwin" }
+witwin-channel = { index = "witwin" }
+
+[[tool.uv.index]]
+name = "witwin"
+url = "https://witwin-ai.github.io/python-index/simple/"
+explicit = true
