@@ -20,7 +20,7 @@ readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
-  "witwin-studio>=0.1,<0.2",
+  "witwin-studio>=0.1.2,<0.2",
   "numpy",
   "scipy",
 ]

@@ -12,7 +12,7 @@ if str(PLUGIN_PARENT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_PARENT))
 
 import wt_radar  # noqa: E402,F401  (registers Radar components before Scene.from_dict)
-from witwin_server.features.solvers.sdk import query, serve  # noqa: E402
+from witwin.studio.solver import query, serve  # noqa: E402
 
 
 def _as_numpy(value: Any, dtype=None) -> np.ndarray:
