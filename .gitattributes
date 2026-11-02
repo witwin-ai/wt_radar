@@ -1,0 +1,3 @@
+# Project template payloads are verified byte for byte against the sha256 in
+# their content manifest; line-ending conversion on checkout would break that.
+templates/** -text
