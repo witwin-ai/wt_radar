@@ -48,3 +48,16 @@ query = ["snapshot_view", "animation_view", "animation_export", "animation_repla
 [contributes.viewport.host]
 entry = "viewport.mjs"
 sdkVersion = "1.6.0"
+
+# A Project template (Studio's template cards). The payload is copied as-is;
+# every file is checked against the content manifest, whose sha256 is pinned
+# here. Rebuild both with studio/scripts/build-template-manifest.mjs.
+[[contributes.templates]]
+id = "radar-sim"
+title = "Radar Sim"
+description = "A 77 GHz FMCW radar looking at one box target."
+icon = "radar"
+version = "1.0.0"
+dir = "templates/radar-sim"
+manifest = "template.manifest.json"
+sha256 = "c957d7509c3660820741334414a4c823f4befe8cf34e9c6c32af4fbf2caa47cf"

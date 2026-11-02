@@ -1,0 +1,19 @@
+format = 2
+id = "main"
+role = "main"
+
+[[entity]]
+id = "radar_target"
+name = "Radar Target"
+type = "builtin.mesh"
+transform = {pos = [0.6000000238418579, 0.0, -2.5], rot = [0.0, 0.0, 0.0, 1.0], eul = [0.0, 0.0, 0.0], scl = [0.6000000238418579, 0.4000000059604645, 0.4000000059604645]}
+components = [
+    {type = "Material", color = "#7f7f7fff", metalness = 0.5, roughness = 0.5, normal_strength = 1.0, occlusion_strength = 1.0, emissive_color = "#000000ff", emissive_intensity = 0.0, alpha = 1.0, alpha_mode = "opaque", alpha_cutoff = 0.5, double_sided = false, material_name = "metal", model = "scalar", eps_r = [8.0, 0.0], mu_r = 1.0, sigma_e = 0.0, debye_poles = [], drude_poles = [], lorentz_poles = [], mu_debye_poles = [], mu_drude_poles = [], mu_lorentz_poles = [], epsilon_tensor = [1.0, 1.0, 1.0], mu_tensor = [1.0, 1.0, 1.0], sigma_e_tensor = [0.0, 0.0, 0.0], kerr_chi3 = 0.0},
+    {type = "Mesh", vertices = {is_array = true,shape = [8, 3],base_type = "vector3"}, mesh_type = "Cube"},
+]
+
+[[entity]]
+id = "radar_demo_1"
+name = "Radar"
+type = "builtin.group"
+components = [{type = "Radar", fc = 76999999488.0, slope = 60.012001037597656, power = 15.0, adc_samples = 256.0, sample_rate = 4400.0, adc_start_time = 6.0, idle_time = 7.0, ramp_end_time = 58.0, chirp_per_frame = 128.0, frame_per_second = 10.0, num_doppler_bins = 128.0, num_range_bins = 256.0, num_angle_bins = 64.0, num_tx = 3.0, num_rx = 4.0, tx_loc = [[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [2.0, 1.0, 0.0]], rx_loc = [[-6.0, 0.0, 0.0], [-5.0, 0.0, 0.0], [-4.0, 0.0, 0.0], [-3.0, 0.0, 0.0]], fov = 60.0, resolution = 128.0, epsilon_r = 5.0, sampling = "triangle", multipath = false, max_reflections = 0.0, ray_batch_size = 65536.0, backend = "dirichlet", pad_factor = 16.0, device = "cuda", use_default = true, pattern_kind = "separable", x_angles_deg = [], y_angles_deg = [], x_values = [], y_values = [], values_2d_json = "", enable_thermal = false, thermal_std = 0.0, enable_quantization = false, quant_bits = 12.0, quant_full_scale = 1.0, enable_phase = false, phase_std = 0.0, use_seed = false, seed = 0.0, pol_enabled = false, pol_tx_uniform = true, pol_tx = [1.0, 0.0, 0.0], pol_tx_bank = [], pol_rx_uniform = true, pol_rx = [1.0, 0.0, 0.0], pol_rx_bank = [], pol_reflection_flip = true, enable_lna = false, lna_gain_db = 0.0, enable_agc = false, agc_target_rms = 1.0, agc_max_gain_db = 60.0, agc_min_gain_db = -60.0, agc_mode = "per_rx", enable_adc = false, adc_bits = 12.0, adc_full_scale = 1.0, reference_impedance_ohm = 50.0, motion_sampling = "per_chirp", t0 = 0.0, stream_max_fps = 30.0, stream_channels = "rd", stream_history_length = 1.0, stream_on_change_only = true, post_processors = [], saved_result_path = "", saved_all_frames = true, saved_frame_index = 0.0, saved_chirp_index = 0.0, snapshot_target_id = "radar_target", animation_targets_json = "", snapshot_local_point = [0.0, 0.0, 0.0], snapshot_rcs_m2 = 0.10000000149011612, snapshot_polarization = [0.0, 1.0, 0.0], animation_duration_s = 5.0, animation_fps = 10.0, target_multipath = false, target_motion_sampling = "chirp", target_site_budget = 24.0, human_target_site_budget = 720.0, animal_target_site_budget = 360.0, animation_frame_index = 0.0, view = "range_doppler", tx_index = 0.0, rx_index = 0.0, static_clutter_removal = false, show_cfar = false, detector = "cfar", guard_doppler = 2.0, guard_range = 4.0, training_doppler = 4.0, training_range = 8.0, pfa = 0.0010000000474974513, energy_top_k = 128.0, frame_rate = 30.0, timeline_source = "pointcloud_sequence", pointcloud_path = "", motion_path = "", velocity_corrected = true, frame_index = 0.0}]

@@ -1,0 +1,32 @@
+[project]
+name = "radar-sim"
+version = "0.1.0"
+description = "WiTwin Studio Project: Radar Sim"
+requires-python = ">=3.11"
+# Plugins this Project uses are dependencies too, e.g. "wt-radar".
+dependencies = [
+    "witwin-studio>=0.1,<0.2",
+    "wt-radar>=0.1.0,<0.2",
+]
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+# The Project has no importable package yet, so installing it installs only the
+# dependencies. To add reusable code, create src/<package>/ and delete this
+# table.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[[tool.uv.index]]
+name = "witwin"
+url = "https://witwin-ai.github.io/python-index/simple/"
+explicit = true
+
+[tool.uv.sources]
+wt-radar = { index = "witwin" }
+witwin-studio = { index = "witwin" }
+
+[dependency-groups]
+dev = ["pytest>=7"]

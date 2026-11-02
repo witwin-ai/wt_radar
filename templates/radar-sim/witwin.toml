@@ -1,0 +1,8 @@
+[project]
+id = "00000000-0000-4000-8000-000000000002"
+name = "Radar Sim"
+format_version = "1.0"
+description = "A 77 GHz FMCW radar looking at one box target."
+main_scene = "main"
+template_id = "radar-sim"
+template_version = "1.0.0"
