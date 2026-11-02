@@ -7,11 +7,27 @@ from pathlib import Path
 import numpy as np
 
 
-PLUGIN_PARENT = Path(__file__).resolve().parent.parent
-if str(PLUGIN_PARENT) not in sys.path:
-    sys.path.insert(0, str(PLUGIN_PARENT))
+def _import_this_plugin() -> None:
+    """Import this folder as the ``wt_radar`` package.
 
-import wt_radar  # noqa: E402,F401  (registers Radar components before Scene.from_dict)
+    The folder name is not always ``wt_radar`` (a worktree, a cloud store
+    ``<id>/<version>/`` folder), so putting the parent on ``sys.path`` and
+    importing by name can load another checkout of the Plugin, or none.
+    """
+    import importlib.util
+
+    root = Path(__file__).resolve().parent
+    loaded = sys.modules.get("wt_radar")
+    if loaded is not None and Path(getattr(loaded, "__file__", None) or ".").resolve().parent == root:
+        return  # imported as part of this package (tests, in-process callers)
+    spec = importlib.util.spec_from_file_location(
+        "wt_radar", root / "__init__.py", submodule_search_locations=[str(root)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["wt_radar"] = module
+    spec.loader.exec_module(module)  # registers Radar components before Scene.from_dict
+
+
+_import_this_plugin()
 from witwin.studio.solver import query, serve  # noqa: E402
 
 
