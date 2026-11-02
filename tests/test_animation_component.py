@@ -560,12 +560,17 @@ def attached_component(monkeypatch):
 def test_component_button_request_uses_canonical_measurement_identity(monkeypatch):
     from witwin_server.api import TimelineManager
     from wt_radar import agent_tools
+    from wt_radar.adapter import animation
     from wt_radar.adapter.animation import animation_request
 
     scene, owner, value, _ = attached_component(monkeypatch)
     scene.timeline_manager = TimelineManager(scene)
     scene.timeline_manager.clip.duration = 10.0
     value.snapshot_target_id = "cat"
+    # Target validation needs a skinned rig; this test is about the fingerprint only.
+    monkeypatch.setattr(animation, "component_target_specs", lambda component: [
+        {"object_id": "cat", "target_kind": "animal", "site_budget": 24, "budget_source": "explicit"},
+    ])
     expected = "a" * 64
     monkeypatch.setattr(
         agent_tools,

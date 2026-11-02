@@ -560,14 +560,15 @@ def test_visible_site_model_preserves_ids_and_does_not_renormalize_rcs(scene, cu
     assert topology["declared_site_count"] == 2
     assert topology["active_site_count"] == 1
     assert topology["occluded_site_count"] == 1
-    assert topology["occluded_sites"][0]["bone_name"] == "bone0"
+    # Site names carry the target id so several targets stay distinct (ea62034).
+    assert topology["occluded_sites"][0]["bone_name"] == "target:bone0"
     assert topology["rcs_policy"].endswith("no_visible_renormalization")
     assert topology["visibility_coverage"] == pytest.approx(0.5)
     assert topology["visibility_quality"] == "degraded_interval_global_subset"
 
     result = solve_animation(AnimationContext(), copy_for_solver(original), request)
-    assert result.metadata["site_bone_names"] == ["bone1"]
-    assert result.metadata["declared_site_bone_names"] == ["bone0", "bone1"]
+    assert result.metadata["site_bone_names"] == ["target:bone1"]
+    assert result.metadata["declared_site_bone_names"] == ["target:bone0", "target:bone1"]
     assert result.metadata["active_site_ids"] == topology["active_site_ids"]
     assert result.metadata["rcs_per_site_m2"] == pytest.approx(component.snapshot_rcs_m2 / 2)
     assert result.positions_m.shape == result.velocities_mps.shape == (2, 1, 3)
