@@ -550,8 +550,11 @@ def attached_component(monkeypatch):
     owner = SceneObject(id="radar", mesh_type="Empty")
     value = owner.add_component(RadarComponent())
     scene.add_object(owner)
+    # `scenes` stands for whichever Scene object the ProjectServer has loaded
+    # under each id; the fake api answers `get_scene` from it like the real one.
     server = SimpleNamespace(scenes={scene.scene_id: scene})
-    monkeypatch.setattr(radar, "api", SimpleNamespace(server=server))
+    fake_api = SimpleNamespace(server=server, get_scene=lambda scene_id: server.scenes.get(scene_id))
+    monkeypatch.setattr(radar, "api", fake_api)
     return scene, owner, value, server
 
 
@@ -613,6 +616,7 @@ def test_solve_does_not_publish_into_closed_reopened_scene(monkeypatch):
 
     stub_solve_transport(value, monkeypatch, solve)
     radar.api.server = server
+    radar.api.get_scene = lambda scene_id: server.scenes.get(scene_id)
 
     async def exercise():
         task = asyncio.create_task(value._simulate_async(animation=True))

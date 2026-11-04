@@ -52,7 +52,7 @@ def cold_result(harness, payload, tmp_path, monkeypatch):
     server = SimpleNamespace(default_scene_dir=tmp_path, scenes={scene.scene_id: scene},
                              get_scene=lambda _: scene,
                              handlers={"binary_assets": SimpleNamespace(service=BinaryAssetService(persistence=persistence))})
-    ctx = SimpleNamespace(scene=scene, api=SimpleNamespace(server=server), tools=collector,
+    ctx = SimpleNamespace(scene=scene, api=SimpleNamespace(server=server, get_scene=server.get_scene), tools=collector,
                           _radar_operation_fallback=state)
     agent_tools.register(ctx)
     monkeypatch.setattr(radar_module, "api", ctx.api)

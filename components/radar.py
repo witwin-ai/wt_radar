@@ -893,7 +893,7 @@ class RadarComponent(Component):
                 or owner.get_component("Radar") is not self):
             return False
         try:
-            return api.server.scenes.get(scene.scene_id) is scene
+            return api.get_scene(scene.scene_id) is scene
         except RuntimeError:
             return False
 
