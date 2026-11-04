@@ -18,7 +18,7 @@ enabled = true
 pluginDependencies = [{ id = "studio.properties", optional = true }, { id = "studio.em" }]
 
 [engines]
-witwin = "^1.0.0"
+witwin = "^2.0.0"
 
 [[contributes.tools]]
 module = "agent_tools"
