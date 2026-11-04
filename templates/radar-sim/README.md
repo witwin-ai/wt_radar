@@ -36,9 +36,12 @@ print(list(scene.objects))
 
 ## What is in the Scene
 
-`scenes/main.wtscene` is the Radar plugin's library demo: a `Radar` entity
-holding the 77 GHz FMCW sensor configuration, and `Radar Target`, a metal box
-the sensor's static snapshot is aimed at (`snapshot_target_id`).
+`scenes/main.wtscene` is a short road seen by a 77 GHz FMCW sensor. `Radar`
+holds the sensor configuration and sits 1 m above the `Road`,
+looking down -z; it sees out to about 11 m. `Radar Target` is the car 6 m
+ahead that the static snapshot is aimed at (`snapshot_target_id`), with its
+`Radar Target Cabin` on top. `Parked Car` and `Sign Post` are more metal in
+the field of view for the multi-target simulation.
 
 ## Solve
 
