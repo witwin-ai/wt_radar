@@ -189,10 +189,12 @@ function createRecordingWidget(host, React) {
         ? textPlot(manifest.sourceLabel, `No recorded Radar frame at scene time ${Number(time).toFixed(3)} s.`)
         : recordingFramePlot(manifest, loaded.samples, frame, selectedView);
     }
-    const plot = host.ui.renderWidget(
-      { ...props.config, widget_type: "plot" },
-      { ...props, value },
-    );
+    // renderWidget takes one props object; the widget type travels in props.config.
+    const plot = host.ui.renderWidget({
+      ...props,
+      value,
+      config: { ...props.config, widget_type: "plot" },
+    });
     if (!manifest || !loaded?.samples) return plot;
 
     const timelineFrame = recordingFrameAtTime(manifest, time);
