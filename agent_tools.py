@@ -169,11 +169,8 @@ def _read_preflight(
 
 
 def _workspace_state(ctx: Any) -> Any:
-    state = getattr(ctx, "workspaceState", None) or getattr(ctx, "workspace_state", None)
-    if state is None:
-        container = getattr(ctx, "state", None)
-        state = getattr(container, "workspace_state", None) or getattr(container, "workspaceState", None)
-    return state
+    # The per-Project memento; test doubles may have none.
+    return getattr(ctx, "workspace_state", None)
 
 
 def _operation_map(ctx: Any) -> dict[str, Any]:
