@@ -10,7 +10,26 @@ Registers a ``Radar`` category with:
 Human/SMPL bodies and their animation are authored by the Motion Matching plugin;
 WT Radar only samples the resulting Studio scene and baked timeline.
 """
+import inspect as _inspect
+from pathlib import Path as _Path
+
 from witwin_server import Library
+
+
+_PREVIEWS = _Path(__file__).resolve().parent / "previews" / "library"
+
+
+def _preview(item_id):
+    """The Library card image for an item, as keyword arguments.
+
+    Images are renders from Studio's `scripts/template-previews/library_items.py`.
+    Empty when the file is missing or Studio's `register_item` has no `preview`
+    parameter yet (older Studio), so the card falls back to the item's icon.
+    """
+    path = _PREVIEWS / f"{item_id}.webp"
+    if not path.is_file() or "preview" not in _inspect.signature(Library.register_item).parameters:
+        return {}
+    return {"preview": str(path)}
 
 from .adapter.config_map import ConfigMap
 
@@ -70,13 +89,13 @@ def register() -> None:
     Library.register_category(_CATEGORY, "Radar", icon="radar", order=30)
     Library.register_item("radar_demo", "Radar (Demo)", _CATEGORY,
                           icon="radar", object_type="empty", factory=_make_demo,
-                          description="Sensor + selected box target for a Radar 0.4 static snapshot")
+                          description="Sensor + selected box target for a Radar 0.4 static snapshot", **_preview("radar_demo"))
     Library.register_item("radar_settings", "Radar Settings", _CATEGORY,
                           icon="settings", object_type="empty", factory=_make_settings,
-                          description="FMCW sensor config for Snapshot or baked Studio animation")
+                          description="FMCW sensor config for Snapshot or baked Studio animation", **_preview("radar_settings"))
     Library.register_item("radar_target", "Radar Target", _CATEGORY,
                           icon="box", object_type="mesh", factory=_make_target,
-                          description="Plain Studio mesh usable as an explicit snapshot target")
+                          description="Plain Studio mesh usable as an explicit snapshot target", **_preview("radar_target"))
 
 
 register()
