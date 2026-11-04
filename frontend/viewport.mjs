@@ -4,9 +4,12 @@
  * module owns the recording schema emitted by adapter/replay.py, reads the
  * content-addressed float32 payload through Studio's asset API and follows the
  * source Scene clock without asking the Python backend to redraw every frame.
+ *
+ * Hand-written ES module (no build step), typed with JSDoc against
+ * @witwin/host 2.
  */
 
-export const sdkVersion = "1.6.0";
+export const sdkVersion = "2.0.0";
 
 const MAX_RECORDING_BYTES = 128 * 1024 * 1024;
 
@@ -107,6 +110,10 @@ function textPlot(title, content) {
   return { type: "text", title, data: { content, format: "plain" } };
 }
 
+/**
+ * @param {import("@witwin/host").FrontendHost} host
+ * @param {any} React the host's React singleton
+ */
 function createRecordingWidget(host, React) {
   const { useEffect, useMemo, useState } = React;
   return function RadarRecordingWidget(props) {
@@ -270,16 +277,20 @@ function createRecordingWidget(host, React) {
   };
 }
 
-export function activate(host) {
-  const React = globalThis.__witwin?.react;
-  if (!React) throw new Error("WT Radar replay requires the Studio React singleton.");
-  // Studios without widget decorators render recording plots with their own widget.
-  if (typeof host.registerWidgetDecorator !== "function") return;
-  host.registerWidgetDecorator({
-    id: "witwin.radar.recordingPlot",
-    widgetType: "plot",
-    priority: 100,
-    match: (props) => props.value?.data?.recording?.schema === 1,
-    component: createRecordingWidget(host, React),
-  });
-}
+/** @type {import("@witwin/host").PluginDefinition} */
+const plugin = {
+  id: "witwin.radar",
+  activate(host) {
+    const React = globalThis.__witwin?.react;
+    if (!React) throw new Error("WT Radar replay requires the Studio React singleton.");
+    host.registerWidgetDecorator({
+      id: "witwin.radar.recordingPlot",
+      widgetType: "plot",
+      priority: 100,
+      match: (props) => props.value?.data?.recording?.schema === 1,
+      component: createRecordingWidget(host, React),
+    });
+  },
+};
+
+export default plugin;

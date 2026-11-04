@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  activate,
+import plugin, {
   recordingFrameAtTime,
+  sdkVersion,
   recordingFramePlot,
   validateRecordingManifest,
 } from "../frontend/viewport.mjs";
@@ -74,19 +74,19 @@ test("manifest rejects a payload whose byte length cannot hold every frame", () 
   );
 });
 
+test("the module is an SDK 2 plugin definition", () => {
+  assert.equal(sdkVersion, "2.0.0");
+  assert.equal(plugin.id, "witwin.radar");
+  assert.equal(typeof plugin.activate, "function");
+});
+
 test("frontend activation claims only WT Radar recording plots", () => {
   const registrations = [];
   globalThis.__witwin = { react: {} };
-  activate({ registerWidgetDecorator: (registration) => registrations.push(registration) });
+  plugin.activate({ registerWidgetDecorator: (registration) => registrations.push(registration) });
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].id, "witwin.radar.recordingPlot");
   assert.equal(registrations[0].match({ value: { data: { recording: { schema: 1 } } } }), true);
   assert.equal(registrations[0].match({ value: { data: {} } }), false);
-  delete globalThis.__witwin;
-});
-
-test("frontend activation leaves recording plots to Studio when the host has no widget decorators", () => {
-  globalThis.__witwin = { react: {} };
-  assert.doesNotThrow(() => activate({}));
   delete globalThis.__witwin;
 });

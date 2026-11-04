@@ -13,6 +13,8 @@ dependencies = [
 ]
 icon = "radar"
 enabled = true
+# The web half only draws recording plots in the Properties plot widget.
+pluginDependencies = [{ id = "studio.properties", optional = true }]
 
 [engines]
 witwin = "^1.0.0"
@@ -47,7 +49,7 @@ query = ["snapshot_view", "animation_view", "animation_export", "animation_repla
 
 [contributes.viewport.host]
 entry = "viewport.mjs"
-sdkVersion = "1.6.0"
+sdkVersion = "2.0.0"
 
 # A Project template (Studio's template cards). The payload is copied as-is;
 # every file is checked against the content manifest, whose sha256 is pinned
