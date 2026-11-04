@@ -21,10 +21,25 @@ def test_package_does_not_register_radar03_platform_adapter():
     assert callers == []
 
 
-@pytest.mark.parametrize("config", [{}, {"adapter": "unknown"}])
-def test_solver_rejects_non_radar04_requests(config):
+def test_solver_rejects_non_radar04_requests():
     with pytest.raises(RuntimeError, match="legacy Radar 0.3"):
-        solver_host.solve(object(), object(), config)
+        solver_host.solve(object(), object(), {"adapter": "unknown"})
+
+
+def test_bare_solve_snapshots_the_scene_radar(monkeypatch):
+    """An empty config (witwin solve with no config) runs the scene's first Radar's snapshot."""
+    from types import SimpleNamespace
+    from wt_radar.adapter import snapshot
+
+    radar = object()
+    scene = SimpleNamespace(objects={
+        "box": SimpleNamespace(get_component=lambda name: None),
+        "radar": SimpleNamespace(get_component=lambda name: radar if name == "Radar" else None),
+    })
+    monkeypatch.setattr(snapshot, "snapshot_request", lambda component: {"adapter": "picked", "component": component})
+    assert solver_host._snapshot_request_from_scene(scene) == {"adapter": "picked", "component": radar}
+    with pytest.raises(RuntimeError, match="no Radar"):
+        solver_host.solve(object(), SimpleNamespace(objects={}), {})
 
 
 def test_solver_host_does_not_publish_radar03_live_session_methods():

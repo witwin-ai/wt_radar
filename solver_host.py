@@ -37,8 +37,25 @@ def _as_numpy(value: Any, dtype=None) -> np.ndarray:
     return np.asarray(value, dtype=dtype)
 
 
+def _snapshot_request_from_scene(scene):
+    """The request a bare solve runs: the scene's first Radar, as its Run Static Snapshot.
+
+    ``witwin solve witwin.radar.simulate`` and ``POST /v1/solve`` with no config
+    land here; Studio's buttons always send an explicit request.
+    """
+    from wt_radar.adapter.snapshot import snapshot_request
+
+    for obj in scene.objects.values():
+        component = obj.get_component("Radar")
+        if component is not None:
+            return snapshot_request(component)
+    raise RuntimeError("The scene has no Radar. Add one, or pass an explicit Radar 0.4 request.")
+
+
 def solve(ctx, scene, config):
     config = config or {}
+    if not config.get("adapter"):
+        config = _snapshot_request_from_scene(scene)
     from wt_radar.adapter.animation import MODEL as ANIMATION_MODEL, solve_animation
     if config.get("adapter") == ANIMATION_MODEL:
         return solve_animation(ctx, scene, config)
