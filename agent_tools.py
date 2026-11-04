@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from witwin_server.api import ToolError, tool
+from witwin_server.api import ProjectPathError, ToolError, resolve_project_path, tool
 
 from .adapter.memory_budget import MAX_RESULT_BYTES, available_memory_bytes
 from .adapter.common import Derived
@@ -1984,8 +1984,15 @@ def _load_result_for_check(ctx: Any, scene: Any, obj: Any, args: dict[str, Any])
         return saved, {"source": "verified_export", "export": export}
     if not args.get("result_path"):
         raise ToolError("Give operation_id (an exported measurement) or result_path.", code="missing_result")
-    folder = (Path(ctx.api.server.default_scene_dir) / "results" / "radar-animation").resolve()
-    path = Path(str(args["result_path"])).resolve()
+    project = Path(ctx.api.server.default_scene_dir).resolve()
+    folder = (project / "results" / "radar-animation").resolve()
+    # A Project path, never a server-side absolute path (plan 6.6).
+    try:
+        path = resolve_project_path(project, str(args["result_path"]))
+    except ProjectPathError as exc:
+        raise ToolError("result_path must be a Project path inside results/radar-animation.",
+                        code="result_path_outside_project",
+                        detail={"result_path": str(args["result_path"])}) from exc
     if not path.is_relative_to(folder):
         raise ToolError("result_path must be inside the project's results/radar-animation folder.",
                         code="result_path_outside_project", detail={"result_path": str(path)})
@@ -3503,7 +3510,8 @@ def register(ctx: Any) -> None:
                 "operation_id": {"type": "string", "minLength": 1,
                                  "description": "A measurement operation with a verified export."},
                 "result_path": {"type": "string", "minLength": 1,
-                                "description": "A result NPZ inside the project's results/radar-animation folder."},
+                                "description": "A result NPZ as a Project path, inside results/radar-animation "
+                                               "(for example results/radar-animation/run.npz)."},
                 "key_events": LABEL_KEY_EVENTS_PROPERTY,
                 "include_frames": {"type": "boolean", "default": False,
                                    "description": "Also return per-frame static and moving peaks."},

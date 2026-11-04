@@ -12,7 +12,12 @@ Allowed, from dev_docs/everything-is-a-plugin-plan.md section 7 in witwin-studio
 Every other ``witwin_server`` module, and every other module of another
 Plugin, fails this test: Studio's internals may move at any time. The test
 reads the source with ``ast`` and never imports it, so it runs without Studio.
-Keep this file identical in every wt_ repo.
+
+The canonical copy is ``server/scripts/plugin_api_boundary.py`` in
+witwin-studio; each Plugin repo keeps an identical copy as
+``tests/test_plugin_api_boundary.py``. Studio's
+``tests/test_backend_architecture.py`` checks the copies are identical.
+Run by hand: ``python tests/test_plugin_api_boundary.py [<plugin root> ...]``.
 """
 from __future__ import annotations
 
@@ -50,12 +55,12 @@ SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", "build", "d
              ".pytest-tmp", ".witwin", "site-packages", "web"}
 
 
-def _manifest() -> dict:
-    return tomllib.loads((ROOT / "witwin.toml").read_text(encoding="utf-8"))
+def _manifest(root: Path) -> dict:
+    return tomllib.loads((root / "witwin.toml").read_text(encoding="utf-8"))
 
 
-def _own_package(manifest: dict) -> str:
-    return PLUGIN_PACKAGES.get(manifest.get("id", ""), ROOT.name)
+def _own_package(manifest: dict, root: Path) -> str:
+    return PLUGIN_PACKAGES.get(manifest.get("id", ""), root.name)
 
 
 def _dependency_packages(manifest: dict) -> set[str]:
@@ -85,14 +90,16 @@ def _imports(tree: ast.AST):
                 yield node.lineno, node.args[0].value
 
 
-def violations() -> list[str]:
-    manifest = _manifest()
-    own = _own_package(manifest)
+def violations(root: Path = ROOT) -> list[str]:
+    """``file:line  module (reason)`` for every import outside the Plugin API under ``root``."""
+    root = Path(root)
+    manifest = _manifest(root)
+    own = _own_package(manifest, root)
     deps = _dependency_packages(manifest)
     others = set(PLUGIN_PACKAGES.values()) - {own}
     found = []
-    for path in sorted(ROOT.rglob("*.py")):
-        rel = path.relative_to(ROOT)
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
         if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts[:-1]):
             continue
         tree = ast.parse(path.read_bytes(), filename=str(path))
@@ -115,4 +122,7 @@ def test_imports_stay_inside_the_plugin_api() -> None:
 
 
 if __name__ == "__main__":
-    print("\n".join(violations()) or "ok")
+    roots = [Path(arg) for arg in sys.argv[1:]] or [ROOT]
+    lines = [f"{root.name}/{line}" if len(roots) > 1 else line for root in roots for line in violations(root)]
+    print("\n".join(lines) or "ok")
+    sys.exit(1 if lines else 0)

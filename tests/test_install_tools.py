@@ -152,7 +152,8 @@ def test_check_radar_output_runs_the_checks_on_a_project_result(scene, tmp_path)
     assert tools["check_radar_output"].permission_tier == "read"
     path = _write_result(tmp_path / "results" / "radar-animation" / "studio-animation-test.npz", 2)
     result = asyncio.run(run(tools, "check_radar_output", {
-        "scene_id": original.scene_id, "radar_object_id": "radar", "result_path": str(path)}))
+        "scene_id": original.scene_id, "radar_object_id": "radar",
+        "result_path": "results/radar-animation/studio-animation-test.npz"}))
     assert result["ok"]
     assert result["checks"]["all_finite"] and result["checks"]["frame_count_matches"]
     assert result["checks"]["replay_ready"] is False
@@ -162,10 +163,12 @@ def test_check_radar_output_runs_the_checks_on_a_project_result(scene, tmp_path)
 
     outside = tmp_path / "elsewhere.npz"
     _write_result(outside, 2)
-    with pytest.raises(Exception) as raised:
-        asyncio.run(run(tools, "check_radar_output", {
-            "scene_id": original.scene_id, "radar_object_id": "radar", "result_path": str(outside)}))
-    assert getattr(raised.value, "code", "") == "result_path_outside_project"
+    # Outside the results folder, and any absolute path even when it is inside.
+    for result_path in ("elsewhere.npz", "../elsewhere.npz", str(path)):
+        with pytest.raises(Exception) as raised:
+            asyncio.run(run(tools, "check_radar_output", {
+                "scene_id": original.scene_id, "radar_object_id": "radar", "result_path": result_path}))
+        assert getattr(raised.value, "code", "") == "result_path_outside_project"
 
 
 def test_installation_plan_predicts_the_peak_radial_speed_from_the_baked_motion(scene):
