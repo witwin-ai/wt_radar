@@ -7,12 +7,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from witwin_server import SceneObject
-from witwin_server.core.components import MeshComponent, SkinnedMeshComponent
-from witwin_server.core.scene import Scene
-from witwin_server.core import wtscene
-from witwin_server.features.timeline import TimelineManager
-from witwin_server.tools.base import ToolError
+from witwin_server.api import SceneObject, MeshComponent, SkinnedMeshComponent, Scene
+from witwin.studio import wtscene
+from witwin_server.api import TimelineManager, ToolError
 
 from wt_radar import agent_tools as radar_tools
 from wt_radar.adapter.specs import SensorSpec
@@ -88,8 +85,7 @@ def test_measurement_fingerprint_tracks_authored_inputs_not_playback(harness, ap
     ("unverified", "unverified_motion"), ("unsafe_id", "invalid_manifest"),
 ])
 def test_inspect_distinguishes_persisted_replay_from_lost_native_handle(harness, tmp_path, change, expected_status):
-    from witwin_server.core.components.core.plot import PlotData
-    from witwin_server.features.assets.binary.service import BinaryAssetService
+    from witwin_server.api import PlotData, BinaryAssetService
     from wt_radar.adapter.replay import motion_fingerprint
 
     scene, tools = harness

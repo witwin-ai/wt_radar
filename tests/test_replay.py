@@ -14,8 +14,7 @@ import torch
 
 from test_saved_result import payload, save  # noqa: F401
 from witwin.radar.processing import ProcessingCube, range_doppler_map, range_profile
-from witwin_server import Scene, SceneObject
-from witwin_server.features.timeline import TimelineManager
+from witwin_server.api import Scene, SceneObject, TimelineManager
 from wt_radar.adapter import memory_budget, replay
 from wt_radar.adapter.saved_result import SavedRadarResult, show_saved_result
 from wt_radar.components.radar import RadarComponent

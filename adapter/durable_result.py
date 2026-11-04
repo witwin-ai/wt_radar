@@ -2,7 +2,7 @@
 from pathlib import Path
 import hashlib
 
-from witwin_server.tools.base import ToolError
+from witwin_server.api import ToolError
 
 from .saved_result import SavedRadarResult
 

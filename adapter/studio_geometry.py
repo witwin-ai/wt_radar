@@ -13,7 +13,7 @@ import torch
 def export_static_mesh_scene(scene, *, excluded_object_ids=(), frequency_hz=None):
     """``frequency_hz`` evaluates nominal ITU materials at the radar carrier."""
     import witwin.core as wc
-    from witwin_server.features.platform.bridge.material_map import MaterialMap
+    from witwin_server.api import MaterialMap
     from .itu_frequency import itu_material_at
     from .snapshot import _hierarchy
 

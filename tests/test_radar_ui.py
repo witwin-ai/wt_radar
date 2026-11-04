@@ -1,7 +1,7 @@
 """Current UI hides unavailable actions without changing old project data."""
 from types import SimpleNamespace
 
-from witwin_server import Scene
+from witwin_server.api import Scene
 from wt_radar.components.radar import RadarComponent
 from wt_radar.library_items import _make_demo
 

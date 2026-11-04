@@ -1,9 +1,7 @@
 """Radar targets cover every moving actor of the scene, never just the first one."""
 import pytest
 
-from witwin_server import SceneObject
-from witwin_server.core.components import SkinnedMeshComponent
-from witwin_server.tools.base import ToolError
+from witwin_server.api import SceneObject, SkinnedMeshComponent, ToolError
 
 from test_agent_tools import harness, run
 

@@ -4,12 +4,21 @@ import tomllib
 
 import pytest
 
-from witwin_server.features.platform.bridge.registry import AdapterRegistry
 from wt_radar import solver_host
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_package_does_not_register_radar03_platform_adapter():
-    assert not AdapterRegistry.has("radar")
+    # The adapter registry is a Studio internal; register_platform_adapter is
+    # the only public way in, so the package must never call it.
+    callers = [
+        path.relative_to(PLUGIN_ROOT).as_posix()
+        for path in PLUGIN_ROOT.rglob("*.py")
+        if "tests" not in path.relative_to(PLUGIN_ROOT).parts
+        and "register_platform_adapter" in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert callers == []
 
 
 @pytest.mark.parametrize("config", [{}, {"adapter": "unknown"}])

@@ -122,11 +122,12 @@ def test_export_completion_cannot_overwrite_new_result(component, monkeypatch):
 def stub_solve_transport(component, monkeypatch, solve, *, status=None, cancel=None):
     from wt_radar.components import radar
     from wt_radar.adapter import animation
-    from witwin_server.features.solvers import scene_ref
+    from witwin_server import api as studio_api
 
     request = {"duration_s": 1.0, "fps": 2.0, "time_s": 0.0}
     monkeypatch.setattr(animation, "animation_request", lambda value: request)
-    monkeypatch.setattr(scene_ref, "make_scene_ref", lambda value: {"scene": {}})
+    # The component imports make_scene_ref from witwin_server.api when it solves.
+    monkeypatch.setattr(studio_api, "make_scene_ref", lambda value: {"scene": {}}, raising=False)
     monkeypatch.setattr(radar, "api", SimpleNamespace(solvers=SimpleNamespace(
         solve=solve,
         status=status or (lambda *_args, **_kwargs: {"activeRunId": None}),
@@ -400,7 +401,7 @@ def test_nonresult_solver_completion_cannot_publish_previous_animation(
 
 @pytest.fixture
 def export_source(tmp_path, saved_payload):
-    from witwin_server.features.solvers.result_ref import read_result_ref
+    from witwin.studio.solver import read_result_ref
 
     cache, project = tmp_path / "solver-cache", tmp_path / "project"
     cache.mkdir()
@@ -543,7 +544,7 @@ def test_export_never_overwrites_existing_destination(export_source, monkeypatch
 
 
 def attached_component(monkeypatch):
-    from witwin_server import Scene, SceneObject
+    from witwin_server.api import Scene, SceneObject
     from wt_radar.components import radar
 
     scene = Scene(scene_id="radar-owner-scene")
@@ -551,12 +552,13 @@ def attached_component(monkeypatch):
     value = owner.add_component(RadarComponent())
     scene.add_object(owner)
     server = SimpleNamespace(scenes={scene.scene_id: scene})
-    monkeypatch.setattr(radar, "api", SimpleNamespace(server=server))
+    monkeypatch.setattr(radar, "api", SimpleNamespace(
+        server=server, get_scene=lambda scene_id: server.scenes.get(scene_id)))
     return scene, owner, value, server
 
 
 def test_component_button_request_uses_canonical_measurement_identity(monkeypatch):
-    from witwin_server.features.timeline import TimelineManager
+    from witwin_server.api import TimelineManager
     from wt_radar import agent_tools
     from wt_radar.adapter.animation import animation_request
 
@@ -575,7 +577,7 @@ def test_component_button_request_uses_canonical_measurement_identity(monkeypatc
 
 
 def test_live_identity_rejects_closed_reopened_or_removed_owner(monkeypatch):
-    from witwin_server import Scene
+    from witwin_server.api import Scene
 
     scene, owner, value, server = attached_component(monkeypatch)
     assert value._scene_is_live()
@@ -598,7 +600,7 @@ def test_live_identity_rejects_removed_replaced_component(monkeypatch):
 
 
 def test_solve_does_not_publish_into_closed_reopened_scene(monkeypatch):
-    from witwin_server import Scene
+    from witwin_server.api import Scene
     from wt_radar.components import radar
 
     scene, _, value, server = attached_component(monkeypatch)
@@ -613,6 +615,7 @@ def test_solve_does_not_publish_into_closed_reopened_scene(monkeypatch):
 
     stub_solve_transport(value, monkeypatch, solve)
     radar.api.server = server
+    radar.api.get_scene = lambda scene_id: server.scenes.get(scene_id)
 
     async def exercise():
         task = asyncio.create_task(value._simulate_async(animation=True))
@@ -631,7 +634,7 @@ def test_solve_does_not_publish_into_closed_reopened_scene(monkeypatch):
 
 
 def test_preview_does_not_publish_after_scene_replaced(monkeypatch):
-    from witwin_server import Scene
+    from witwin_server.api import Scene
     from wt_radar.adapter import animation
 
     scene, _, value, server = attached_component(monkeypatch)

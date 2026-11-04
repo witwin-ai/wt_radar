@@ -10,7 +10,7 @@ stored in the platform's native non-SI units (see ``common``), so the round trip
 """
 from typing import Any, Dict, Optional
 
-from witwin_server import SceneObject
+from witwin_server.api import SceneObject
 
 from .common import num, vec_list
 from .subconfig_map import SubConfigMap

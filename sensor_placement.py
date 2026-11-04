@@ -7,7 +7,7 @@ import copy
 import math
 import numpy as np
 
-from witwin_server.tools.base import ToolError
+from witwin_server.api import ToolError
 
 
 PLACEMENT_OBJECTIVES = (
@@ -556,7 +556,7 @@ def _per_target_failure_detail(ranked, positions_by_frame, target_slices, *, fov
 
 
 def choose_sensor_placement(scene, args, *, radar_object_id=None):
-    from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
+    from witwin_server.api import load_scene_ref, make_scene_ref
     from .library_items import _settings_object
     from .adapter.studio_motion import MultiTargetSkinSampler
     from .adapter.animation import animation_preflight, animation_request, AnimationTopologyError

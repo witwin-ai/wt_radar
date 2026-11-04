@@ -9,6 +9,7 @@ initializes the mitsuba CUDA variant, so if the radar stack is not importable th
 suite is skipped rather than erroring (mark as needs-user-verification).
 """
 import importlib
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -22,7 +23,8 @@ if str(PLUGINS_DIR) not in sys.path:
 PKG = "wt_radar"
 
 try:
-    import witwin_server  # noqa: F401
+    if importlib.util.find_spec("witwin_server") is None:
+        raise ImportError("witwin_server")
     import witwin.radar  # noqa: F401
     _DEPS_OK = True
 except Exception:  # noqa: BLE001 - radar stack (mitsuba/drjit/CUDA) may be absent

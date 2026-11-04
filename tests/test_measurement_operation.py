@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 from wt_radar import agent_tools as radar_tools
-from witwin_server.tools.base import ToolError
+from witwin_server.api import ToolError
 
 from test_agent_tools import harness, native_preflight, run
 

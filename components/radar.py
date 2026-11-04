@@ -10,9 +10,9 @@ import json
 
 import numpy as np
 
-from witwin_server import Notifications
-from witwin_server.api import api
-from witwin_server.core.components import (
+from witwin_server.api import (
+    Notifications,
+    api,
     Component,
     GizmoContext,
     bool_field,
@@ -28,8 +28,8 @@ from witwin_server.core.components import (
     list_field,
     string_field,
     vector3_field,
+    get_logger,
 )
-from witwin_server.utils.logging import get_logger
 
 from ..adapter.common import (
     FREQUENCY_UNITS,
@@ -701,7 +701,7 @@ class RadarComponent(Component):
                 request = snapshot_request(self)
             if str(self.view) not in SUPPORTED_VIEWS or bool(self.static_clutter_removal) or bool(self.show_cfar):
                 raise ValueError("Choose Range Profile / Range Spectrum / Range Doppler and disable clutter removal / CFAR.")
-            from witwin_server.features.solvers.scene_ref import make_scene_ref
+            from witwin_server.api import make_scene_ref
             # No await while copying live values: nested keyframe lists must
             # not alias author state once the worker starts JSON serialization.
             scene_ref = copy.deepcopy(make_scene_ref(self.scene))
@@ -893,7 +893,8 @@ class RadarComponent(Component):
                 or owner.get_component("Radar") is not self):
             return False
         try:
-            return api.server.scenes.get(scene.scene_id) is scene
+            # The server keeps one current scene; a closed or reopened one is not it.
+            return api.get_scene(scene.scene_id) is scene
         except RuntimeError:
             return False
 

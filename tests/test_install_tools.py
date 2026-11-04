@@ -12,7 +12,7 @@ from test_agent_tools import ToolCollector, run
 from test_animation import make_rig
 from test_install_rule import box_room
 from test_snapshot import scene  # noqa: F401
-from witwin_server.features.timeline import TimelineManager
+from witwin_server.api import TimelineManager
 from wt_radar import agent_tools as radar_tools
 
 

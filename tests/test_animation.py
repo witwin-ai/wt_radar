@@ -8,9 +8,7 @@ import pytest
 import torch
 
 from test_snapshot import Context, copy_for_solver, scene  # noqa: F401
-from witwin_server import SceneObject
-from witwin_server.core.components import SkinnedMeshComponent
-from witwin_server.features.timeline import InterpolationType, TimelineManager
+from witwin_server.api import SceneObject, SkinnedMeshComponent, InterpolationType, TimelineManager
 from wt_radar.adapter.animation import (
     MODEL, AnimationTopologyError, animation_preflight, animation_request,
     animation_view, export_animation, frame_times, solve_animation,

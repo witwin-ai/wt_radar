@@ -85,7 +85,7 @@ def build_recording_overview(result, tx=0, rx=0):
 
 
 def _image_plot(values, x, y, title, ylabel):
-    from witwin_server.core.components.core.plot import PlotData
+    from witwin_server.api import PlotData
 
     # Studio's heatmap requires uniformly spaced bins. Hardware timestamps are
     # increasing but contain sub-frame USB/host jitter, so render them on the
@@ -112,7 +112,7 @@ def _image_plot(values, x, y, title, ylabel):
 
 def recording_overview_plot(overview, view):
     """Return one whole-recording plot for the shared Radar Replay figure."""
-    from witwin_server.core.components.core.plot import PlotData
+    from witwin_server.api import PlotData
 
     antenna = f"TX{overview.tx} RX{overview.rx}"
     if view == "micro_doppler":

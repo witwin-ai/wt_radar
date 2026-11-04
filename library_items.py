@@ -10,7 +10,7 @@ Registers a ``Radar`` category with:
 Human/SMPL bodies and their animation are authored by the Motion Matching plugin;
 WT Radar only samples the resulting Studio scene and baked timeline.
 """
-from witwin_server import Library
+from witwin_server.api import Library
 
 from .adapter.config_map import ConfigMap
 
@@ -26,7 +26,7 @@ def _settings_object(name="Radar Settings"):
 
 def _target_object(name="Radar Target"):
     # A plain Studio mesh: the adapter exports visible meshes directly as radar structures.
-    from witwin_server import SceneObject
+    from witwin_server.api import SceneObject
 
     obj = SceneObject(name=name, mesh_type="Cube")
     transform = obj.get_component("Transform")

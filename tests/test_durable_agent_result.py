@@ -12,10 +12,8 @@ from test_saved_result import payload  # noqa: F401
 from wt_radar import agent_tools
 from wt_radar.adapter.replay import motion_fingerprint
 from wt_radar.components import radar as radar_module
-from witwin_server.core import wtscene
-from witwin_server.core.scene import Scene
-from witwin_server.features.assets.binary.service import BinaryAssetService
-from witwin_server.tools.base import ToolError
+from witwin.studio import wtscene
+from witwin_server.api import Scene, BinaryAssetService, ToolError
 
 
 @pytest.fixture
@@ -52,7 +50,7 @@ def cold_result(harness, payload, tmp_path, monkeypatch):
     server = SimpleNamespace(default_scene_dir=tmp_path, scenes={scene.scene_id: scene},
                              get_scene=lambda _: scene,
                              handlers={"binary_assets": SimpleNamespace(service=BinaryAssetService(persistence=persistence))})
-    ctx = SimpleNamespace(scene=scene, api=SimpleNamespace(server=server), tools=collector,
+    ctx = SimpleNamespace(scene=scene, api=SimpleNamespace(server=server, get_scene=server.get_scene), tools=collector,
                           _radar_operation_fallback=state)
     agent_tools.register(ctx)
     monkeypatch.setattr(radar_module, "api", ctx.api)

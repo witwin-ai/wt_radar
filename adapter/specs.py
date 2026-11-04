@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 
 import numpy as np
 
-from witwin_server.utils.logging import get_logger
+from witwin_server.api import get_logger
 
 from .common import num
 
@@ -44,7 +44,7 @@ class SensorSpec:
 
 def _world_pose(obj: Any) -> tuple:
     """Return world position, look-at target, and up from a Studio transform."""
-    from witwin_server.utils.mitsuba_utils import get_world_transform
+    from witwin_server.api import get_world_transform
 
     matrix = np.asarray(get_world_transform(obj), dtype=np.float64)
     position = matrix[:3, 3].tolist()

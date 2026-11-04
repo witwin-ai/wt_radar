@@ -104,7 +104,7 @@ def _recording_source_descriptor(component, record, asset_id):
 
 
 def numeric_plot(payload):
-    from witwin_server.core.components.core.plot import PlotData
+    from witwin_server.api import PlotData
     title = payload.get("title", "Native Radar result")
     ranges = payload["range_m"]
     if payload["view"] == "range_doppler":
@@ -175,7 +175,7 @@ def build_recording(result, tx=0, rx=0):
 
 def publish_recording(component, api, record, data):
     """Use Studio's existing binary data plane; websocket carries only metadata."""
-    from witwin_server.core.components.core.plot import PlotData
+    from witwin_server.api import PlotData
     if record["sceneId"] != component.scene.scene_id:
         raise ValueError("Recorded scene differs from this room; refusing cat/radar synchronization.")
     fingerprint = record.get("sceneFingerprint")

@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import sys
 import time
@@ -40,31 +39,13 @@ def main() -> int:
     args = parser.parse_args()
 
     project = args.project.resolve()
-    os.environ["WITWIN_PROJECT_DIR"] = str(project)
 
     import wt_radar  # noqa: F401 - register component schemas before scene load
-    from witwin_server.persistence import PersistenceManager
-    from witwin_server.features.platform.bridge.offline_scene import hydrate_project_meshes
-    from witwin_server.features.assets.imported.gltf_import_handler import GLTFImportHandler
-    from witwin_server.features.assets.imported.skinned_mesh_loader import (
-        hydrate_skinned_mesh,
-        needs_skin_hydration,
-    )
+    from witwin_server.api import open_project_scene
     from wt_radar.adapter.animation import animation_request, export_animation, solve_animation
 
-    scene = PersistenceManager(object()).load_scene_by_id(args.scene_id)
-    if scene is None:
-        raise FileNotFoundError(f"Scene not found: {args.scene_id}")
-    hydration = hydrate_project_meshes(scene, project)
-    print(
-        f"Hydrated {hydration.hydrated_meshes}/{hydration.project_meshes} project meshes",
-        flush=True,
-    )
-    gltf_reader = object.__new__(GLTFImportHandler)
-    for obj in scene.objects.values():
-        skin = obj.get_component("SkinnedMesh")
-        if skin is not None and needs_skin_hydration(skin):
-            hydrate_skinned_mesh(skin, obj.mesh_path, project, gltf_reader)
+    # Loads project meshes and skinned GLB meshes, as the viewport sees them.
+    scene = open_project_scene(project, args.scene_id)
     radar_objects = [obj for obj in scene.objects.values() if obj.get_component("Radar") is not None]
     if len(radar_objects) != 1:
         raise RuntimeError(f"Expected exactly one Radar object, found {len(radar_objects)}")

@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pytest
 
-from witwin_server import Scene, SceneObject
+from witwin_server.api import Scene, SceneObject
 
 from wt_radar import install_rule
 from wt_radar.install_rule import InstallRule, InstallRuleError

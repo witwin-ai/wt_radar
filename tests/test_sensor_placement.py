@@ -6,9 +6,7 @@ from test_snapshot import scene
 from test_animation import add_track, make_rig
 from wt_radar import sensor_placement
 from wt_radar.adapter import animation
-from witwin_server.tools.base import ToolError
-from witwin_server import SceneObject
-from witwin_server.core.components import SkinnedMeshComponent
+from witwin_server.api import ToolError, SceneObject, SkinnedMeshComponent
 
 
 def add_second_rig(scene, vertices):
@@ -385,7 +383,7 @@ def test_all_occluded_candidates_stop_at_the_bound_without_mutation(scene, monke
 
 
 def test_automatic_placement_rejects_candidate_inside_furniture_before_native_preflight(scene, monkeypatch):
-    from witwin_server import SceneObject
+    from witwin_server.api import SceneObject
 
     original, component = scene
     make_rig(original, component)

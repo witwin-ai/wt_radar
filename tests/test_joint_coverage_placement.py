@@ -11,9 +11,7 @@ from test_snapshot import scene
 from test_animation import add_track, make_rig
 from wt_radar import sensor_placement
 from wt_radar.adapter import animation
-from witwin_server import SceneObject
-from witwin_server.core.components import SkinnedMeshComponent
-from witwin_server.tools.base import ToolError
+from witwin_server.api import SceneObject, SkinnedMeshComponent, ToolError
 
 
 def add_walking_rig(scene, object_id, start, end, *, duration=2.):

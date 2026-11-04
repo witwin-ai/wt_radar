@@ -6,8 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from witwin_server import Scene, SceneObject
-from witwin_server.features.solvers.scene_ref import make_scene_ref, load_scene_ref
+from witwin_server.api import Scene, SceneObject, make_scene_ref, load_scene_ref
 from wt_radar.components.radar import RadarComponent
 from wt_radar.adapter.snapshot import (
     MODEL, SnapshotResult, _hierarchy, prepare_snapshot, processing_cube,
@@ -124,7 +123,7 @@ def test_wrong_scene_and_playback_fail(scene):
     request["scene_id"] = "other-scene"
     with pytest.raises(ValueError, match="identity"):
         prepare_snapshot(copy_for_solver(original), request)
-    from witwin_server.features.timeline import TimelineManager
+    from witwin_server.api import TimelineManager
     original.timeline_manager = TimelineManager(original)
     original.timeline_manager.is_playing = True
     with pytest.raises(ValueError, match="Pause"):
@@ -132,7 +131,7 @@ def test_wrong_scene_and_playback_fail(scene):
 
 
 def test_timeline_cannot_bypass_unsupported_settings_validation(scene):
-    from witwin_server.features.timeline import TimelineManager
+    from witwin_server.api import TimelineManager
     original, component = scene
     original.timeline_manager = TimelineManager(original)
     original.timeline_manager.clip.get_or_create_track("radar", "Radar", "multipath").add_keyframe(0.0, True)

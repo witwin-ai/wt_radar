@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from witwin_server.tools.base import ToolError, tool
+from witwin_server.api import ToolError, tool
 
 from .adapter.memory_budget import MAX_RESULT_BYTES, available_memory_bytes
 from .adapter.common import Derived
@@ -526,7 +526,7 @@ def _hash_json(value: Any) -> str:
 
 
 def _scene_input_evidence(scene: Any) -> dict[str, Any]:
-    from witwin_server.features.timeline.fingerprint import authored_scene_payload
+    from witwin_server.api import authored_scene_payload
     payload = _jsonable(authored_scene_payload(scene))
     radar_object_ids: set[str] = set()
     for object_id, obj in (payload.get("objects") or {}).items():
@@ -2011,7 +2011,7 @@ def register(ctx: Any) -> None:
 
     tracker = getattr(ctx, "track", None)
     if callable(tracker):
-        from witwin_server.plugins.disposable import FunctionDisposable
+        from witwin_server.api import FunctionDisposable
         tracker(FunctionDisposable(_cancel_owned_jobs))
 
     @tool(
@@ -2777,7 +2777,7 @@ def register(ctx: Any) -> None:
         )
         if native_preflight is None:
             try:
-                from witwin_server.features.solvers.scene_ref import load_scene_ref, make_scene_ref
+                from witwin_server.api import load_scene_ref, make_scene_ref
                 from .adapter.animation import animation_preflight, animation_request
                 request = animation_request(radar)
                 solver_scene = load_scene_ref(copy.deepcopy(make_scene_ref(scene)))
