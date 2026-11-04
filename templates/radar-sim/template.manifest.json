@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "templateId": "radar-sim",
-  "templateVersion": "1.0.1",
+  "templateVersion": "1.2.0",
   "projectFormatVersion": "1.0",
   "minProtocol": 1,
-  "totalBytes": 9753,
-  "treeSha256": "b278485eca9f4614002d2a9848b7903505cf8cfdab22e38928b3a326e31bbada",
+  "totalBytes": 13579,
+  "treeSha256": "71b6297d5559b4a32594cc5aaf227fbc70c60693a88e447309ec699c7148df50",
   "recommendedPlugins": [
     "witwin.radar"
   ],
@@ -17,18 +17,18 @@
     },
     {
       "path": "README.md",
-      "bytes": 1778,
-      "sha256": "3fee5ce1764fe8b83678d6342a47838f009146408558171be26ada55904e70c9"
+      "bytes": 1975,
+      "sha256": "3fd4af8701f08febd461c6cf74b3d7f61d3ba3315f17efb9d8681ec7b97c0e27"
     },
     {
       "path": "pyproject.toml",
-      "bytes": 809,
-      "sha256": "75de77fced09e4f82c1410181c149a6f8163df934a15ebf5d7c45388da59b520"
+      "bytes": 810,
+      "sha256": "1fc9e1a011acde257fa6182b81d382f61b8b2ab17e4d56f7b9d82ef0641e10a5"
     },
     {
       "path": "scenes/main.wtscene",
-      "bytes": 3604,
-      "sha256": "13429f299361a00844770a939e834bcc3ea72e2974bd7d49b273c4952174fb58"
+      "bytes": 7222,
+      "sha256": "3c137e314385ce749890343802987456ea6b84dae18d1d35a27ae991d6bb16bc"
     },
     {
       "path": "scripts/prepare_radar.py",
@@ -42,8 +42,8 @@
     },
     {
       "path": "witwin.toml",
-      "bytes": 232,
-      "sha256": "d261f92683c34c47acd455a3a19abbec2a5b59bd6f223677bbb58407f5f32e2a"
+      "bytes": 242,
+      "sha256": "21491518bcf4f7d5baaebf4b0566a4067c742e87f4e2a1ab8b3d6295ac102259"
     }
   ]
 }
