@@ -14,7 +14,8 @@ dependencies = [
 icon = "radar"
 enabled = true
 # The web half only draws recording plots in the Properties plot widget.
-pluginDependencies = [{ id = "studio.properties", optional = true }]
+# studio.em: the EM fields of Material and the Receiver component (2026-11-03).
+pluginDependencies = [{ id = "studio.properties", optional = true }, { id = "studio.em" }]
 
 [engines]
 witwin = "^1.0.0"

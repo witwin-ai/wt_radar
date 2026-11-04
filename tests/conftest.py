@@ -55,3 +55,18 @@ def cuda_ready():
     if not torch.cuda.is_available():
         pytest.skip("radar dirichlet/slang solve requires a CUDA device")
     return True
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _studio_system_plugins():
+    """Activate Studio's system Plugins once, as a ProjectServer does.
+
+    The EM fields of Material and the Transmitter, Receiver and Field
+    components belong to the system Plugin ``studio.em`` (2026-11-03); Scenes
+    built directly in these tests need it active.
+    """
+    try:
+        from witwin_server.api import testing
+    except ImportError:
+        return
+    testing.activate_system_plugins()
