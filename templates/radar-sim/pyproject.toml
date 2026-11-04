@@ -5,7 +5,7 @@ description = "WiTwin Studio Project: Radar Sim"
 requires-python = ">=3.11"
 # Plugins this Project uses are dependencies too, e.g. "wt-radar".
 dependencies = [
-    "witwin-studio>=0.1,<0.2",
+    "witwin-studio>=0.8,<0.9",
     "wt-radar>=0.1.0,<0.2",
 ]
 
