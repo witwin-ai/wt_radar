@@ -14,8 +14,12 @@ from .install_rule import (
     plan_installation,
     room_geometry_from_scene,
 )
+# Samples radar scatter sites from a Studio skinned mesh; wt_genesis checks
+# its baked playback proxies against it.
+from .adapter.studio_motion import StudioSkinSampler
 
 __all__ = [
+    "StudioSkinSampler",
     "InstallRule",
     "InstallRuleError",
     "SensingZone",
