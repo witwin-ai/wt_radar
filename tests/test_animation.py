@@ -688,3 +688,16 @@ def test_native_two_frame_animation_export_roundtrip_and_editor_isolation(scene,
         assert "Studio skin motion" in payload["title"]
     with pytest.raises(ValueError, match="Animation frame"):
         animation_view(result, {"frame": 2})
+
+
+def test_replay_explains_a_plain_mesh_target():
+    """The Radar Sim template's box car is not skinned: say what Replay needs and what to use."""
+    from types import SimpleNamespace
+    from wt_radar.adapter.target_contract import normalize_target_specs
+
+    car = SimpleNamespace(name="Radar Target", get_component=lambda name: None)
+    scene = SimpleNamespace(get_object=lambda object_id: car if object_id == "radar_target" else None)
+    with pytest.raises(ValueError, match="Replay needs an animated, skinned target") as info:
+        normalize_target_specs(scene, [{"object_id": "radar_target"}])
+    assert "'Radar Target' is a plain mesh" in str(info.value)
+    assert "Run Static Snapshot" in str(info.value)

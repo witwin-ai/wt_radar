@@ -30,7 +30,12 @@ def normalize_target_specs(
         if target is None:
             raise ValueError(f"Radar target does not exist in scene: {object_id}")
         if target.get_component("SkinnedMesh") is None:
-            raise ValueError(f"Radar target must have a SkinnedMesh component: {object_id}")
+            # The Radar Sim template's car is a plain box; Replay used to answer
+            # it with only "must have a SkinnedMesh component".
+            raise ValueError(
+                f"Replay needs an animated, skinned target (a SkinnedMesh, such as a person or "
+                f"animal from Motion Matching), and {target.name!r} is a plain mesh. Use Run Static "
+                f"Snapshot for it, or choose a skinned object as the Replay target.")
         kind = target_kind(scene, object_id)
         persisted_source = str(value.get("budget_source") or "")
         explicit = "site_budget" in value and persisted_source not in {
