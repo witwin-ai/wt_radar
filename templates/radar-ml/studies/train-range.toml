@@ -1,0 +1,8 @@
+# Train Study: fit scripts/model.py to the dataset and log its curves.
+name = "Train range regressor"
+kind = "train"
+script = "scripts/train.py"
+args = {lr = 0.003, epochs = 300, batch_size = 32, hidden = [64], seed = 0}
+inputs = {dataset = "datasets/radar-returns"}
+metric = {name = "val/mae_m", direction = "minimize"}
+resources = {gpus = 0}

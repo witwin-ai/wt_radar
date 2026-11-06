@@ -1,0 +1,22 @@
+# Dataset Study: one radar range profile per sampled car position.
+# Run it from the Studies page, or without Studio:
+#   python -m witwin.studio.studies --project . --study radar-returns --out .witwin/runs/manual
+name = "Radar returns"
+kind = "dataset"
+scene = "main"
+method = {kind = "monte_carlo", samples = 600, sampler = "lhs"}
+export = {kind = "script", path = "scripts/synthesize.py", function = "export"}
+dataset = {dir = "datasets/radar-returns", shard_size = 200, splits = {train = 0.8, val = 0.1, test = 0.1}}
+seed = 7
+on_error = "stop"
+resources = {gpus = 1}
+
+[variables.target_range]
+lower = 3.0
+upper = 10.0
+dist = "uniform"
+
+[variables.target_offset]
+lower = -1.5
+upper = 1.5
+dist = "uniform"

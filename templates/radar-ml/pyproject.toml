@@ -1,0 +1,52 @@
+[project]
+name = "radar-ml"
+version = "0.1.0"
+description = "WiTwin Studio Project: Radar ML"
+# witwin-channel, which witwin-radar needs, ships CPython 3.11 wheels only.
+requires-python = ">=3.11,<3.12"
+# Plugins this Project uses are dependencies too. The dataset Study calls
+# witwin-radar on a CUDA GPU, so the solver stack ("solve") is installed here.
+# uv applies [tool.uv.sources] to direct dependencies only, so the first-party
+# libraries wt-radar[solve] brings in, and torch, are listed again to come
+# from the right index.
+dependencies = [
+    "witwin-studio[optimize]>=0.9,<0.10",
+    "wt-radar[solve]>=0.1.1,<0.2",
+    "witwin>=0.4,<0.5",
+    "witwin-radar>=0.4,<0.5",
+    "witwin-channel>=0.5,<0.6",
+    "torch>=2.4",
+    "numpy>=1.24",
+]
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+# The Project has no importable package yet, so installing it installs only the
+# dependencies. To add reusable code, create src/<package>/ and delete this
+# table.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[[tool.uv.index]]
+name = "witwin"
+url = "https://witwin-ai.github.io/python-index/simple/"
+explicit = true
+
+# CUDA 12.8 builds of torch (PyPI's Windows torch has no CUDA). macOS takes PyPI's.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+wt-radar = { index = "witwin" }
+witwin-studio = { index = "witwin" }
+witwin = { index = "witwin" }
+witwin-radar = { index = "witwin" }
+witwin-channel = { index = "witwin" }
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+
+[dependency-groups]
+dev = ["pytest>=7"]

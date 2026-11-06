@@ -1,0 +1,30 @@
+# --- WiTwin Studio: default project ignore (managed template) ---
+# Runtime and system state (disposable; never share)
+.witwin/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Common tooling noise (defensive; projects may not use these)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+
+# Editor swap / backup
+*~
+*.swp
+*.swo
+
+# This Project: trained models, rebuilt by the train Study
+checkpoints/

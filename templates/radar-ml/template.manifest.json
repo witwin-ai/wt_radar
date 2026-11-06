@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "templateId": "radar-ml",
+  "templateVersion": "1.0.0",
+  "projectFormatVersion": "1.0",
+  "minProtocol": 1,
+  "totalBytes": 40670,
+  "treeSha256": "029f1ba4c40a215407bd459428d4af531ad0f545dedca471ef4ee1d6a9c6b948",
+  "recommendedPlugins": [
+    "witwin.radar"
+  ],
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 475,
+      "sha256": "8ad0b10d81e134e01890b1b68092c51ad49babaf977c139eef918d1479bbaab0"
+    },
+    {
+      "path": ".python-version",
+      "bytes": 5,
+      "sha256": "49a506dd32096b010d75205acf3430c9ae6c40351888129499e5a5e487126c93"
+    },
+    {
+      "path": "README.md",
+      "bytes": 3224,
+      "sha256": "70b8ab3caeb0f9a19332378c41195c03785cbf9ef02b206e013fb24e2106da53"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 1688,
+      "sha256": "6dbd46bc37b54ba88651faaf3d21f1d1c4a3c31baec61401f448f46edc0eddf5"
+    },
+    {
+      "path": "scenes/main.wtscene",
+      "bytes": 7725,
+      "sha256": "f870d52fc8440f4662d00ee9ff4c61d9114fa1d68c134f8d82fe9edd3f7d00cd"
+    },
+    {
+      "path": "scripts/evaluate.py",
+      "bytes": 3326,
+      "sha256": "227274c562e17ae91159a100410931159a03d28ff4bc4f87cf0fb8a48138129b"
+    },
+    {
+      "path": "scripts/model.py",
+      "bytes": 5590,
+      "sha256": "54d7fcb513f33eae53db73ca8e886e97abf5cee4a9da24cf4515129210647df2"
+    },
+    {
+      "path": "scripts/synthesize.py",
+      "bytes": 8172,
+      "sha256": "4eec894dd33446b8d27dfe9972fe7c11d3b7d5f79e6518cb87a4c14781be51b6"
+    },
+    {
+      "path": "scripts/train.py",
+      "bytes": 3574,
+      "sha256": "e8201b2e4d5c2854214235b16c8cb491ed6fe8a449b19198591a5bb53bad1745"
+    },
+    {
+      "path": "studies/radar-returns.toml",
+      "bytes": 708,
+      "sha256": "188535bb35cd089b375d8ce2f60de8a199bc0f6bc42e5bd7d5c1e17d6ef3cf2a"
+    },
+    {
+      "path": "studies/train-range.toml",
+      "bytes": 344,
+      "sha256": "cef0a314d713a801245a31f13bfe1842ed243cc20888f931e9273cb774e55876"
+    },
+    {
+      "path": "tasks/radar-pipeline.toml",
+      "bytes": 400,
+      "sha256": "b6ae6e5a35473db8b038f6a52c0ae39ee868e0f304b5f38e6d9a34c07161fe8d"
+    },
+    {
+      "path": "tests/standin_export.py",
+      "bytes": 1057,
+      "sha256": "e34e8e8e5e4582100f1b49e28171dd10368f3b6175c44063152da7721f156a86"
+    },
+    {
+      "path": "tests/test_pipeline.py",
+      "bytes": 2369,
+      "sha256": "2f6953fbcd351b3eca9285ee5aa831a127f7679255e6af0854a3f5a668cdec01"
+    },
+    {
+      "path": "tests/test_project.py",
+      "bytes": 1759,
+      "sha256": "c46a96713bb93d47f6423ec0fa92462994464c6f8ffdaffa809e294d9ec1248f"
+    },
+    {
+      "path": "witwin.toml",
+      "bytes": 254,
+      "sha256": "10fc0171c94a343b49bd6bb35705ed02c7ae08f99bc93e23157d1dbf99fb2c42"
+    }
+  ]
+}

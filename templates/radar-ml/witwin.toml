@@ -1,0 +1,8 @@
+[project]
+id = "00000000-0000-4000-8000-000000000012"
+name = "Radar ML"
+format_version = "1.0"
+description = "Synthesize radar range profiles, train a range regressor, evaluate it."
+main_scene = "main"
+template_id = "radar-ml"
+template_version = "1.0.0"

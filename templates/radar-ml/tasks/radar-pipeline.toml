@@ -1,0 +1,21 @@
+schema = 2
+title = "Synthesize, train, evaluate"
+max_parallel = 3
+
+[[steps]]
+id = "synthesize"
+kind = "study"
+study = "radar-returns"
+
+[[steps]]
+id = "train"
+kind = "study"
+study = "train-range"
+matrix = {lr = [0.01, 0.003, 0.001]}
+args = {lr = "${matrix.lr}"}
+
+[[steps]]
+id = "evaluate"
+kind = "script"
+entry = "scripts/evaluate.py"
+args = ["--dataset", "datasets/radar-returns", "--split", "test"]
